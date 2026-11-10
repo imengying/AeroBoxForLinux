@@ -3,35 +3,48 @@ use aerobox_for_linux::traffic::{Counters, RateMeter};
 use std::time::Instant;
 
 pub(super) struct Dashboard {
+    controls: gtk::Box,
     download: gtk::Label,
     upload: gtk::Label,
+    download_unit: gtk::Label,
+    upload_unit: gtk::Label,
     download_total: gtk::Label,
     upload_total: gtk::Label,
     connections: gtk::Label,
     uptime: gtk::Label,
-    app_memory: gtk::Label,
-    core_memory: gtk::Label,
+    memory: gtk::Label,
     ipv4: gtk::Label,
     ipv6: gtk::Label,
     network_status: gtk::Label,
     refresh: gtk::Button,
     rates: RefCell<RateMeter>,
     pending: Cell<bool>,
+    memory_at: Cell<Option<Instant>>,
     network_pending: Cell<bool>,
 }
 
 impl Ui {
-    pub(super) fn overview(self: &Rc<Self>, heading: &gtk::Box) {
+    pub(super) fn home(self: &Rc<Self>) {
+        self.body.add_css_class("home-page");
+        self.body.set_spacing(20);
+        self.body.set_margin_bottom(112);
         let state = self.service.snapshot();
         let status = self.service.status();
+
         let toggle = primary(
-            if status.running { "停止" } else { "连接" },
+            if status.running { "停止" } else { "启动" },
             if status.running {
                 "media-playback-stop-symbolic"
             } else {
                 "media-playback-start-symbolic"
             },
         );
+        toggle.add_css_class("home-start");
+        toggle.set_widget_name("home-start");
+        toggle.set_halign(gtk::Align::Start);
+        toggle.set_valign(gtk::Align::End);
+        toggle.set_margin_start(30);
+        toggle.set_margin_bottom(24);
         if status.running {
             toggle.remove_css_class("suggested-action");
             toggle.add_css_class("destructive-action");
@@ -45,37 +58,70 @@ impl Ui {
         );
         let weak = Rc::downgrade(self);
         toggle.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                if ui.jobs.get() > 0 && !status.running {
-                    return;
-                }
-                button.set_sensitive(false);
-                ui.task(
-                    "切换连接",
-                    move |s| Ok(if status.running { s.stop() } else { s.start() }),
-                    |ui, result| {
-                        ui.refresh(Page::Overview);
-                        if let Err(e) = result {
-                            ui.error("连接失败", format!("{e:#}"));
-                        }
-                    },
-                );
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let running = ui.service.status().running;
+            if ui.jobs.get() > 0 && !running {
+                return;
             }
+            button.set_sensitive(false);
+            ui.task(
+                if running { "停止" } else { "启动" },
+                move |s| Ok(if running { s.stop() } else { s.start() }),
+                |ui, result| {
+                    ui.refresh(Page::Home);
+                    if let Err(e) = result {
+                        ui.error("操作失败", format!("{e:#}"));
+                    }
+                },
+            );
         });
-        heading.append(&pill(
-            if status.running {
-                "已连接"
-            } else {
-                "未连接"
-            },
-            if status.running { "active" } else { "" },
-        ));
-        heading.append(&toggle);
+        self.floating.add_overlay(&toggle);
+        self.home_action.replace(Some(toggle));
 
-        let controls = card(gtk::Orientation::Vertical, 0);
-        let mode_row = detail_row("network-transmit-receive-symbolic", "出站模式", "");
-        let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        modes.add_css_class("linked");
+        let top = flow(1, 2);
+        top.set_vexpand(false);
+        top.add_css_class("home-top");
+        let network = card(gtk::Orientation::Vertical, 12);
+        network.add_css_class("home-network");
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let title = label("出口 IP", "section-title");
+        title.set_hexpand(true);
+        header.append(&title);
+        let network_status = label("", "muted small");
+        header.append(&network_status);
+        let refresh = icon_button("view-refresh-symbolic", "检测当前出口 IP");
+        header.append(&refresh);
+        network.append(&header);
+        let ipv4 = ip_row(&network, "IPv4", true);
+        ipv4.add_css_class("exit-ip");
+        let ipv6 = ip_row(&network, "IPv6", false);
+        if !state.settings.ipv6 {
+            ipv6.set_text("已关闭");
+        }
+        top.insert(&network, -1);
+
+        let speeds = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        speeds.set_homogeneous(true);
+        let (down, download, download_unit, download_total) =
+            speed_card("go-down-symbolic", "下载", "download");
+        let (up, upload, upload_unit, upload_total) =
+            speed_card("go-up-symbolic", "上传", "upload");
+        speeds.append(&down);
+        speeds.append(&up);
+        top.insert(&speeds, -1);
+        self.body.append(&top);
+
+        let controls = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        controls.set_sensitive(self.jobs.get() == 0);
+        let mode_row = card(gtk::Orientation::Horizontal, 16);
+        mode_row.add_css_class("home-mode");
+        let title = label("出站模式", "section-title");
+        title.set_hexpand(true);
+        mode_row.append(&title);
+        let modes = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        modes.add_css_class("mode-selector");
         let mut first: Option<gtk::ToggleButton> = None;
         for (title, value) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
             let button = gtk::ToggleButton::with_label(title);
@@ -99,7 +145,7 @@ impl Ui {
                         "切换出站模式",
                         move |s| Ok(s.set_routing_mode(value)),
                         |ui, result| {
-                            ui.refresh(Page::Overview);
+                            ui.refresh(Page::Home);
                             if let Err(e) = result {
                                 ui.error("切换失败", format!("{e:#}"));
                             }
@@ -111,50 +157,53 @@ impl Ui {
         }
         mode_row.append(&modes);
         controls.append(&mode_row);
-        let switches = gtk::Box::new(gtk::Orientation::Horizontal, 20);
-        switches.add_css_class("quick-switches");
+
+        let switches = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         switches.set_homogeneous(true);
-        for (title, kind, active) in [
-            ("系统代理", 0, status.proxy),
-            ("虚拟网卡", 1, state.settings.tun_enabled),
-            ("IPv6", 2, state.settings.ipv6),
+        for (title, system, active, icon) in [
+            ("系统代理", true, status.proxy, "network-workgroup-symbolic"),
+            (
+                "虚拟网卡",
+                false,
+                state.settings.tun_enabled,
+                "network-wired-symbolic",
+            ),
         ] {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            let name = label(title, "");
+            let row = card(gtk::Orientation::Horizontal, 12);
+            row.add_css_class("home-switch");
+            let image = gtk::Image::from_icon_name(icon);
+            image.add_css_class("muted");
+            row.append(&image);
+            let name = label(title, "section-title");
             name.set_hexpand(true);
             row.append(&name);
             let switch = gtk::Switch::new();
             switch.set_valign(gtk::Align::Center);
             switch.set_active(active);
             switch.update_property(&[gtk::accessible::Property::Label(title)]);
-            if kind == 0 {
+            if system {
                 switch.set_sensitive(status.running || status.proxy);
             }
             let weak = Rc::downgrade(self);
             let group = controls.downgrade();
-            switch.connect_state_set(move |switch, enabled| {
+            switch.connect_state_set(move |_, enabled| {
                 if let Some(ui) = weak.upgrade() {
-                    switch.set_sensitive(false);
                     if let Some(group) = group.upgrade() {
                         group.set_sensitive(false);
                     }
                     ui.task(
                         title,
                         move |s| {
-                            Ok(if kind == 0 {
+                            Ok(if system {
                                 s.set_proxy(enabled)
                             } else {
                                 let mut settings = s.snapshot().settings;
-                                if kind == 1 {
-                                    settings.tun_enabled = enabled;
-                                } else {
-                                    settings.ipv6 = enabled;
-                                }
+                                settings.tun_enabled = enabled;
                                 s.apply_settings(settings)
                             })
                         },
                         |ui, result| {
-                            ui.refresh(Page::Overview);
+                            ui.refresh(Page::Home);
                             if let Err(e) = result {
                                 ui.error("设置失败", format!("{e:#}"));
                             }
@@ -169,71 +218,35 @@ impl Ui {
         controls.append(&switches);
         self.body.append(&controls);
 
-        let metrics = gtk::FlowBox::new();
-        metrics.add_css_class("metrics");
-        metrics.set_selection_mode(gtk::SelectionMode::None);
-        metrics.set_homogeneous(true);
-        metrics.set_min_children_per_line(2);
-        metrics.set_max_children_per_line(3);
-        metrics.set_column_spacing(14);
-        metrics.set_row_spacing(14);
-        let (down, download, download_total) = metric("go-down-symbolic", "下载", "—", "累计 —");
-        let (up, upload, upload_total) = metric("go-up-symbolic", "上传", "—", "累计 —");
-        let (connections_card, connections, _) =
-            metric("network-workgroup-symbolic", "活跃连接", "—", "");
-        let (uptime_card, uptime, _) = metric(
-            "preferences-system-time-symbolic",
-            "运行时间",
-            &duration(status.uptime),
-            "",
-        );
-        let (core_card, core_memory, _) = metric("drive-harddisk-symbolic", "内核内存", "—", "");
-        let (app_card, app_memory, _) =
-            metric("application-x-executable-symbolic", "应用内存", "—", "");
-        for item in [
-            &down,
-            &up,
-            &connections_card,
-            &uptime_card,
-            &core_card,
-            &app_card,
-        ] {
-            metrics.insert(item, -1);
-        }
-        self.body.append(&metrics);
+        let stats = card(gtk::Orientation::Horizontal, 0);
+        stats.add_css_class("home-stats");
+        stats.set_homogeneous(true);
+        let (connection_box, connections) = stat("连接数", "—");
+        let (uptime_box, uptime) = stat("运行时间", &duration(status.uptime));
+        let (memory_box, memory) = stat("内存占用", "—");
+        stats.append(&connection_box);
+        stats.append(&uptime_box);
+        stats.append(&memory_box);
+        self.body.append(&stats);
 
-        let network = card(gtk::Orientation::Vertical, 14);
-        network.add_css_class("padded-card");
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let title = label("网络检测", "section-title");
-        title.set_hexpand(true);
-        header.append(&title);
-        let network_status = label("", "muted small");
-        header.append(&network_status);
-        let refresh = icon_button("view-refresh-symbolic", "检测当前出口 IP");
-        header.append(&refresh);
-        network.append(&header);
-        let ipv4 = ip_row(&network, "IPv4");
-        let ipv6 = ip_row(&network, "IPv6");
-        if !state.settings.ipv6 {
-            ipv6.set_text("已关闭");
-        }
-        self.body.append(&network);
         let dashboard = Rc::new(Dashboard {
+            controls,
             download,
             upload,
+            download_unit,
+            upload_unit,
             download_total,
             upload_total,
             connections,
             uptime,
-            app_memory,
-            core_memory,
+            memory,
             ipv4,
             ipv6,
             network_status,
             refresh: refresh.clone(),
             rates: RefCell::new(RateMeter::default()),
             pending: Cell::new(false),
+            memory_at: Cell::new(None),
             network_pending: Cell::new(false),
         });
         let weak = Rc::downgrade(self);
@@ -253,21 +266,26 @@ impl Ui {
 
 impl Dashboard {
     pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
+        self.controls.set_sensitive(ui.jobs.get() == 0);
         let status = ui.service.status();
         self.uptime.set_text(&duration(status.uptime));
-        let memory = ui.service.memory_usage();
-        self.app_memory
-            .set_text(&memory.app_bytes.map(bytes).unwrap_or_else(|| "—".into()));
-        self.core_memory
-            .set_text(&memory.core_bytes.map(bytes).unwrap_or_else(|| "—".into()));
-        if !status.running || self.pending.replace(true) {
+        let memory_due = self
+            .memory_at
+            .get()
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(2));
+        if (!status.running && !memory_due) || self.pending.replace(true) {
             return;
         }
+        if memory_due {
+            self.memory_at.set(Some(Instant::now()));
+        }
+        let running = status.running;
         let (tx, rx) = mpsc::channel();
         let service = ui.service.clone();
         std::thread::spawn(move || {
-            let result = service.traffic();
-            let _ = tx.send((Instant::now(), result));
+            let memory = memory_due.then(|| service.memory_usage());
+            let traffic = running.then(|| service.traffic());
+            let _ = tx.send((Instant::now(), memory, traffic));
         });
         let weak = Rc::downgrade(self);
         let weak_ui = Rc::downgrade(ui);
@@ -276,12 +294,23 @@ impl Dashboard {
                 return glib::ControlFlow::Break;
             };
             match rx.try_recv() {
-                Ok((at, result)) => {
+                Ok((at, memory, traffic)) => {
                     dashboard.pending.set(false);
                     if ui.service.status().pid == status.pid {
-                        match result {
-                            Ok(counters) => dashboard.update(at, counters),
-                            Err(e) => dashboard.unavailable(&format!("{e:#}")),
+                        if let Some(memory) = memory {
+                            dashboard.memory.set_text(
+                                &memory.total_bytes.map(bytes).unwrap_or_else(|| "—".into()),
+                            );
+                            dashboard.memory.set_tooltip_text(Some(&format!(
+                                "AeroBox 与内核合计（{}）",
+                                memory.basis.label()
+                            )));
+                        }
+                        if let Some(result) = traffic {
+                            match result {
+                                Ok(counters) => dashboard.update(at, counters),
+                                Err(e) => dashboard.unavailable(&format!("{e:#}")),
+                            }
                         }
                     }
                     glib::ControlFlow::Break
@@ -359,11 +388,15 @@ impl Dashboard {
     }
     fn update(&self, at: Instant, counters: Counters) {
         let rates = self.rates.borrow_mut().record(at, counters);
-        self.download.set_text(
-            &rates.map_or_else(|| "—".into(), |r| format!("{}/s", bytes(r.download as u64))),
+        set_speed(
+            &self.download,
+            &self.download_unit,
+            rates.map(|r| r.download as u64),
         );
-        self.upload.set_text(
-            &rates.map_or_else(|| "—".into(), |r| format!("{}/s", bytes(r.upload as u64))),
+        set_speed(
+            &self.upload,
+            &self.upload_unit,
+            rates.map(|r| r.upload as u64),
         );
         self.download_total
             .set_text(&format!("累计 {}", bytes(counters.download)));
@@ -374,42 +407,82 @@ impl Dashboard {
     }
     fn unavailable(&self, error: &str) {
         self.rates.borrow_mut().clear();
-        self.download.set_text("—");
-        self.upload.set_text("—");
+        set_speed(&self.download, &self.download_unit, None);
+        set_speed(&self.upload, &self.upload_unit, None);
         self.connections.set_text("—");
         self.download_total.set_text("累计 —");
         self.upload_total.set_text("累计 —");
         self.connections.set_tooltip_text(Some(error));
     }
 }
-fn metric(
+fn flow(min: u32, max: u32) -> gtk::FlowBox {
+    let flow = gtk::FlowBox::new();
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_homogeneous(true);
+    flow.set_min_children_per_line(min);
+    flow.set_max_children_per_line(max);
+    flow.set_column_spacing(16);
+    flow.set_row_spacing(16);
+    flow
+}
+fn speed_card(
     icon: &str,
     title: &str,
-    value: &str,
-    caption: &str,
-) -> (gtk::Box, gtk::Label, gtk::Label) {
-    let card = card(gtk::Orientation::Vertical, 10);
-    card.add_css_class("stat-card");
+    accent: &str,
+) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label) {
+    let card = card(gtk::Orientation::Vertical, 12);
+    card.add_css_class("speed-card");
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    heading.add_css_class(accent);
     heading.append(&gtk::Image::from_icon_name(icon));
-    heading.append(&label(title, "muted"));
+    heading.append(&label(title, "section-title"));
     card.append(&heading);
-    let value = label(value, "metric-value");
+    let value = label("—", "speed-value");
     card.append(&value);
-    let caption = label(caption, "resource-subtitle");
-    if !caption.text().is_empty() {
-        card.append(&caption);
-    }
-    (card, value, caption)
+    let unit = label("B/s", "muted small");
+    card.append(&unit);
+    let total = label("累计 —", "muted small");
+    total.set_vexpand(true);
+    total.set_valign(gtk::Align::End);
+    total.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    card.append(&total);
+    (card, value, unit, total)
 }
-fn ip_row(parent: &gtk::Box, title: &str) -> gtk::Label {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    row.append(&label(title, "muted"));
+fn set_speed(value: &gtk::Label, unit: &gtk::Label, count: Option<u64>) {
+    if let Some(count) = count {
+        let formatted = bytes(count);
+        let (number, suffix) = formatted.split_once(' ').unwrap_or((&formatted, "B"));
+        value.set_text(number);
+        unit.set_text(&format!("{suffix}/s"));
+    } else {
+        value.set_text("—");
+        unit.set_text("B/s");
+    }
+}
+fn stat(title: &str, value: &str) -> (gtk::Box, gtk::Label) {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    box_.add_css_class("home-stat");
+    box_.append(&label(title, "muted"));
+    let value = label(value, "home-stat-value");
+    box_.append(&value);
+    (box_, value)
+}
+fn ip_row(parent: &gtk::Box, title: &str, prominent: bool) -> gtk::Label {
+    let row = gtk::Box::new(
+        if prominent {
+            gtk::Orientation::Vertical
+        } else {
+            gtk::Orientation::Horizontal
+        },
+        6,
+    );
+    row.append(&label(title, "muted small"));
     let value = label("—", "ip-address");
     value.set_selectable(true);
     value.set_hexpand(true);
     value.set_wrap(true);
     value.set_wrap_mode(gtk::pango::WrapMode::Char);
+    value.set_max_width_chars(30);
     row.append(&value);
     parent.append(&row);
     value

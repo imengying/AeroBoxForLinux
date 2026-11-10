@@ -41,5 +41,5 @@ while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do
   if [ "$attempt" -ge 50 ]; then cat "$test_dir/weston.log"; exit 1; fi
   sleep 0.1
 done
-dbus-run-session -- "$binary" --data-dir "$test_dir/data" --smoke-test "$output_dir/overview.png"
-test -s "$output_dir/overview.png"
+dbus-run-session -- "$binary" --data-dir "$test_dir/data" --smoke-test "$output_dir/home.png"
+test -s "$output_dir/home.png"

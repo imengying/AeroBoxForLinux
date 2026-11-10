@@ -57,6 +57,13 @@ fn run() -> Result<gtk::glib::ExitCode> {
         }
     }
     let store = model::Store::open(dir)?;
+    // A dashboard of text and cards does not need a GPU context by default.
+    // Mesa's software GPU path can otherwise load LLVM and large render caches.
+    // Configure this before any GTK or network worker exists; explicit user
+    // renderer overrides still take precedence.
+    if !store.state.settings.hardware_acceleration && std::env::var_os("GSK_RENDERER").is_none() {
+        unsafe { std::env::set_var("GSK_RENDERER", "cairo") };
+    }
     let service = engine::Service::new(store);
     let result = ui::run(service.clone(), smoke);
     if let Err(e) = service.shutdown() {

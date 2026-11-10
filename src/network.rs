@@ -12,8 +12,25 @@ pub struct NetworkInfo {
 
 #[derive(Clone, Debug, Default)]
 pub struct MemoryUsage {
-    pub app_bytes: Option<u64>,
-    pub core_bytes: Option<u64>,
+    /// Total for AeroBox and its running core, never a partial process total.
+    pub total_bytes: Option<u64>,
+    pub basis: MemoryBasis,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MemoryBasis {
+    #[default]
+    Proportional,
+    Resident,
+}
+
+impl MemoryBasis {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Proportional => "PSS",
+            Self::Resident => "RSS",
+        }
+    }
 }
 
 /// None means the running configuration has TUN routing and no usable local
@@ -145,23 +162,62 @@ fn parse_ip(body: &str, ipv6: bool) -> Result<String> {
 }
 
 pub(crate) fn memory_usage(core_pid: Option<u32>) -> MemoryUsage {
-    MemoryUsage {
-        app_bytes: resident_bytes(std::process::id()),
-        core_bytes: core_pid.and_then(resident_bytes),
+    aggregate_memory(
+        process_memory(std::process::id()),
+        core_pid.map(process_memory),
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProcessMemory {
+    pss: Option<u64>,
+    rss: Option<u64>,
+}
+
+fn process_memory(pid: u32) -> ProcessMemory {
+    let rollup = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok();
+    ProcessMemory {
+        pss: rollup.as_deref().and_then(|data| parse_kib(data, "Pss:")),
+        rss: rollup
+            .as_deref()
+            .and_then(|data| parse_kib(data, "Rss:"))
+            .or_else(|| {
+                parse_kib(
+                    &fs::read_to_string(format!("/proc/{pid}/status")).ok()?,
+                    "VmRSS:",
+                )
+            }),
     }
 }
 
-fn resident_bytes(pid: u32) -> Option<u64> {
-    parse_resident_bytes(&fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+fn aggregate_memory(app: ProcessMemory, core: Option<ProcessMemory>) -> MemoryUsage {
+    let processes = [Some(app), core];
+    let pss = processes
+        .iter()
+        .flatten()
+        .try_fold(0_u64, |total, process| total.checked_add(process.pss?));
+    if pss.is_some() {
+        return MemoryUsage {
+            total_bytes: pss,
+            basis: MemoryBasis::Proportional,
+        };
+    }
+    // A privileged core may deny smaps access. Use RSS consistently for every
+    // process in that case; never combine app PSS with core RSS or omit a core.
+    MemoryUsage {
+        total_bytes: processes
+            .iter()
+            .flatten()
+            .try_fold(0_u64, |total, process| total.checked_add(process.rss?)),
+        basis: MemoryBasis::Resident,
+    }
 }
 
-fn parse_resident_bytes(status: &str) -> Option<u64> {
-    let row = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))?;
+fn parse_kib(data: &str, field: &str) -> Option<u64> {
+    let row = data.lines().find_map(|line| line.strip_prefix(field))?;
     let mut fields = row.split_whitespace();
     let kib: u64 = fields.next()?.parse().ok()?;
-    (fields.next()? == "kB")
+    (fields.next()? == "kB" && fields.next().is_none())
         .then(|| kib.checked_mul(1024))
         .flatten()
 }
@@ -253,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_ip_responses_and_reads_real_rss() {
+    fn validates_ip_responses() {
         assert_eq!(parse_ip(" 1.1.1.1\n", false).unwrap(), "1.1.1.1");
         assert_eq!(
             parse_ip("2606:4700:4700::1111", true).unwrap(),
@@ -262,12 +318,54 @@ mod tests {
         assert!(parse_ip("<html>error</html>", false).is_err());
         assert!(parse_ip("1.1.1.1", true).is_err());
         assert!(parse_ip("::", true).is_err());
+    }
+
+    #[test]
+    fn memory_totals_share_pages_proportionally_and_use_one_fallback_basis() {
+        let app = ProcessMemory {
+            pss: Some(3000),
+            rss: Some(5000),
+        };
+        let core = ProcessMemory {
+            pss: Some(2000),
+            rss: Some(4000),
+        };
+        let total = aggregate_memory(app, Some(core));
+        assert_eq!(total.total_bytes, Some(5000));
+        assert_eq!(total.basis, MemoryBasis::Proportional);
+        assert_eq!(aggregate_memory(app, None).total_bytes, Some(3000));
+
+        let restricted_core = ProcessMemory { pss: None, ..core };
+        let fallback = aggregate_memory(app, Some(restricted_core));
+        assert_eq!(fallback.total_bytes, Some(9000));
+        assert_eq!(fallback.basis, MemoryBasis::Resident);
+        assert_eq!(fallback.basis.label(), "RSS");
         assert_eq!(
-            parse_resident_bytes("Name: core\nVmRSS:\t2048 kB\nVmSwap: 0 kB"),
-            Some(2 * 1024 * 1024)
+            aggregate_memory(app, Some(ProcessMemory::default())).total_bytes,
+            None
         );
-        assert_eq!(parse_resident_bytes("VmRSS: 2048 MB"), None);
-        assert_eq!(parse_resident_bytes("VmRSS: 18446744073709551615 kB"), None);
-        assert!(memory_usage(None).app_bytes.is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            aggregate_memory(ProcessMemory::default(), Some(core)).total_bytes,
+            None
+        );
+    }
+
+    #[test]
+    fn reads_exact_proc_memory_fields_and_rejects_invalid_totals() {
+        let rollup = "Pss_Anon: 12 kB\nPss:\t2048 kB\nRss: 4096 kB\nSwapPss: 10 kB\n";
+        assert_eq!(parse_kib(rollup, "Pss:"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_kib("VmRSS: 2048 kB", "VmRSS:"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_kib("Pss: 2048 MB", "Pss:"), None);
+        assert_eq!(parse_kib("Pss: 18446744073709551615 kB", "Pss:"), None);
+        let huge = ProcessMemory {
+            pss: Some(u64::MAX),
+            rss: Some(u64::MAX),
+        };
+        assert_eq!(aggregate_memory(huge, Some(huge)).total_bytes, None);
+        assert!(
+            memory_usage(None)
+                .total_bytes
+                .is_some_and(|bytes| bytes > 0)
+        );
     }
 }

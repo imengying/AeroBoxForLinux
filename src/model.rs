@@ -27,6 +27,7 @@ pub fn pretty(value: &impl Serialize) -> String {
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
+    pub hardware_acceleration: bool,
     pub core_path: String,
     pub active_profile: String,
     pub auto_start: bool,
@@ -56,6 +57,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "system".into(),
+            hardware_acceleration: false,
             core_path: String::new(),
             active_profile: String::new(),
             auto_start: false,
@@ -75,7 +77,7 @@ impl Default for Settings {
             bypass_lan: true,
             auto_detect_ip: true,
             update_subscriptions_on_start: false,
-            log_level: "info".into(),
+            log_level: "error".into(),
             test_url: "https://www.gstatic.com/generate_204".into(),
             test_timeout: 5000,
             width: 1180,
@@ -134,7 +136,7 @@ impl Profile {
             rulesets: vec![],
             script: String::new(),
             config: json!({
-                "log":{"level":"info","timestamp":true},
+                "log":{"level":"error","timestamp":true},
                 "dns":{"servers":[{"type":"udp","tag":"dns-local","server":"223.5.5.5"}],"final":"dns-local"},
                 "inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080}],
                 "outbounds":[{"type":"selector","tag":"proxy","outbounds":["direct"],"interrupt_exist_connections":true},{"type":"direct","tag":"direct"}],
@@ -526,15 +528,42 @@ mod tests {
         .unwrap();
         settings.validate().unwrap();
         assert_eq!(settings.theme, "dark");
+        assert!(!settings.hardware_acceleration);
         assert!(settings.auto_start && settings.ipv6);
         assert_eq!(settings.routing_mode, "rule");
         assert!(!settings.tun_enabled);
+        assert_eq!(settings.log_level, "error");
         assert!(
             serde_json::to_value(settings)
                 .unwrap()
                 .get("request_proxy")
                 .is_none()
         );
+    }
+    #[test]
+    fn error_is_the_log_default_without_overwriting_saved_choices() {
+        let fresh = State::default();
+        assert_eq!(fresh.settings.log_level, "error");
+        assert!(
+            fresh
+                .profiles
+                .iter()
+                .all(|profile| profile.config["log"]["level"] == "error")
+        );
+        for level in ["info", "debug", "warn", "error"] {
+            let saved: Settings = serde_json::from_value(json!({"log_level": level})).unwrap();
+            assert_eq!(saved.log_level, level);
+        }
+    }
+    #[test]
+    fn renderer_preference_preserves_an_explicit_acceleration_choice() {
+        assert!(!Settings::default().hardware_acceleration);
+        let settings: Settings =
+            serde_json::from_value(json!({"hardware_acceleration": true})).unwrap();
+        assert!(settings.hardware_acceleration);
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert!(restored.hardware_acceleration);
     }
     #[test]
     fn adding_presets_preserves_edits_and_reconnects_renamed_rules() {

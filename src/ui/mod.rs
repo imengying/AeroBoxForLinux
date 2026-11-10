@@ -1,5 +1,5 @@
 mod editors;
-mod overview;
+mod home;
 mod settings;
 
 use adw::prelude::*;
@@ -21,7 +21,7 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
-    Overview,
+    Home,
     Nodes,
     Profiles,
     Subscriptions,
@@ -32,7 +32,7 @@ enum Page {
 }
 impl Page {
     const ALL: [Self; 8] = [
-        Self::Overview,
+        Self::Home,
         Self::Nodes,
         Self::Subscriptions,
         Self::Profiles,
@@ -43,7 +43,7 @@ impl Page {
     ];
     fn title(self) -> &'static str {
         match self {
-            Self::Overview => "概览",
+            Self::Home => "首页",
             Self::Nodes => "节点",
             Self::Profiles => "配置",
             Self::Subscriptions => "订阅",
@@ -55,7 +55,7 @@ impl Page {
     }
     fn icon(self) -> &'static str {
         match self {
-            Self::Overview => "view-grid-symbolic",
+            Self::Home => "go-home-symbolic",
             Self::Nodes => "network-wireless-symbolic",
             Self::Profiles => "document-properties-symbolic",
             Self::Subscriptions => "folder-download-symbolic",
@@ -147,7 +147,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
                         Ok(result)
                     },
                     |ui, result: Result<()>| {
-                        ui.refresh(Page::Overview);
+                        ui.refresh(Page::Home);
                         if let Err(e) = result {
                             ui.error("启动失败", format!("{e:#}"));
                         }
@@ -180,13 +180,16 @@ struct Ui {
     service: Arc<Service>,
     toast: adw::ToastOverlay,
     body: gtk::Box,
+    scroll: gtk::ScrolledWindow,
+    floating: gtk::Overlay,
+    home_action: RefCell<Option<gtk::Button>>,
     nav: gtk::ListBox,
     page: Cell<Page>,
     split: adw::OverlaySplitView,
     spinner: gtk::Spinner,
     jobs: Cell<usize>,
     last_pid: Cell<Option<u32>>,
-    dashboard: RefCell<Option<Rc<overview::Dashboard>>>,
+    dashboard: RefCell<Option<Rc<home::Dashboard>>>,
     log_buffer: RefCell<Option<gtk::TextBuffer>>,
     node_group: RefCell<String>,
 }
@@ -297,7 +300,10 @@ impl Ui {
             .child(&clamp)
             .vexpand(true)
             .build();
-        content.append(&scroll);
+        let floating = gtk::Overlay::new();
+        floating.set_child(Some(&scroll));
+        floating.set_vexpand(true);
+        content.append(&floating);
         split.set_content(Some(&content));
         let toast = adw::ToastOverlay::new();
         toast.set_child(Some(&split));
@@ -312,8 +318,11 @@ impl Ui {
             service,
             toast,
             body,
+            scroll,
+            floating,
+            home_action: RefCell::new(None),
             nav,
-            page: Cell::new(Page::Overview),
+            page: Cell::new(Page::Home),
             split,
             spinner,
             jobs: Cell::new(0),
@@ -331,7 +340,7 @@ impl Ui {
                 }
             }
         });
-        ui.refresh(Page::Overview);
+        ui.refresh(Page::Home);
         let weak = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_secs(1), move || {
             let Some(ui) = weak.upgrade() else {
@@ -339,8 +348,8 @@ impl Ui {
             };
             let status = ui.service.status();
             if ui.last_pid.replace(status.pid) != status.pid {
-                if ui.page.get() == Page::Overview {
-                    ui.refresh(Page::Overview)
+                if ui.page.get() == Page::Home {
+                    ui.refresh(Page::Home)
                 } else if ui.page.get() == Page::Profiles {
                     ui.refresh(Page::Profiles)
                 }
@@ -443,6 +452,13 @@ impl Ui {
         self.page.set(page);
         self.dashboard.replace(None);
         self.body.remove_css_class("settings-page");
+        self.body.remove_css_class("home-page");
+        self.body.set_spacing(24);
+        self.body.set_margin_bottom(32);
+        self.scroll.vadjustment().set_value(0.0);
+        if let Some(button) = self.home_action.borrow_mut().take() {
+            self.floating.remove_overlay(&button);
+        }
         self.log_buffer.replace(None);
         while let Some(child) = self.body.first_child() {
             self.body.remove(&child)
@@ -454,7 +470,7 @@ impl Ui {
         heading.append(&titles);
         self.body.append(&heading);
         match page {
-            Page::Overview => self.overview(&heading),
+            Page::Home => self.home(),
             Page::Nodes => self.nodes(&heading),
             Page::Profiles => self.profiles(&heading),
             Page::Subscriptions => self.subscriptions(&heading),
@@ -1638,11 +1654,6 @@ fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
     row.append(&text);
     row
 }
-fn detail_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
-    let row = resource_row(icon, title, subtitle);
-    row.add_css_class("detail-row");
-    row
-}
 fn empty(icon: &str, title: &str, description: &str) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
     margin(&root, 24, 24, 54, 54);
@@ -1832,6 +1843,7 @@ fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
 
 fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let step = Cell::new(0);
+    let floating_y = Cell::new(None::<f32>);
     let parent = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1853,16 +1865,47 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             2 => screenshot(&ui.window, &parent.join("nodes.png")),
             3 => screenshot(&ui.window, &parent.join("subscriptions.png")),
             4 => screenshot(&ui.window, &parent.join("rules.png")),
-            5 => screenshot(&ui.window, &parent.join("overview-dark.png")),
-            6 => screenshot(&ui.window, &parent.join("overview-narrow.png")),
-            7 => app
+            5 => screenshot(&ui.window, &parent.join("home-dark.png")),
+            6 => screenshot(&ui.window, &parent.join("home-narrow.png")),
+            7 => screenshot(&ui.window, &parent.join("home-compact.png")),
+            8 => screenshot(&ui.window, &parent.join("home-scrolled.png")),
+            9 => app
                 .active_window()
                 .context("配置编辑器没有打开")
                 .and_then(|w| screenshot(&w, &parent.join("profile-editor.png"))),
-            8 => screenshot(&ui.window, &parent.join("settings.png")),
-            9 => screenshot(&ui.window, &parent.join("settings-network.png")),
+            10 => screenshot(&ui.window, &parent.join("settings.png")),
+            11 => screenshot(&ui.window, &parent.join("settings-network.png")),
             _ => Ok(()),
-        };
+        }
+        .and_then(|()| {
+            if current == 7 || current == 8 {
+                let button = ui.home_action.borrow();
+                let bounds = button
+                    .as_ref()
+                    .context("首页启动按钮不存在")?
+                    .compute_bounds(&ui.floating)
+                    .context("启动按钮尚未分配位置")?;
+                let height = ui.floating.height() as f32;
+                anyhow::ensure!(
+                    bounds.x() >= 0.0
+                        && bounds.x() < 56.0
+                        && bounds.y() > height - 110.0
+                        && bounds.y() + bounds.height() <= height,
+                    "启动按钮没有固定在内容区左下角"
+                );
+                if let Some(previous) = floating_y.get() {
+                    anyhow::ensure!(
+                        (bounds.y() - previous).abs() < 1.0,
+                        "滚动页面移动了悬浮启动按钮"
+                    );
+                }
+                floating_y.set(Some(bounds.y()));
+            }
+            if current == 1 {
+                anyhow::ensure!(ui.home_action.borrow().is_none(), "启动按钮泄漏到配置页");
+            }
+            Ok(())
+        });
         if let Err(e) = capture {
             eprintln!("Wayland smoke screenshot {current}: {e:#}");
             failed.set(true);
@@ -1875,7 +1918,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             2 => ui.navigate(Page::Subscriptions),
             3 => ui.navigate(Page::Rules),
             4 => {
-                ui.navigate(Page::Overview);
+                ui.navigate(Page::Home);
                 apply_theme("dark");
             }
             5 => {
@@ -1883,12 +1926,19 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 ui.window.set_default_size(790, 800);
             }
             6 => {
+                ui.window.set_default_size(700, 600);
+            }
+            7 => {
+                let adjustment = ui.scroll.vadjustment();
+                adjustment.set_value(adjustment.upper());
+            }
+            8 => {
                 ui.window.set_default_size(1180, 800);
                 ui.navigate(Page::Profiles);
                 let profile = ui.service.snapshot().profiles[0].clone();
                 editors::profile(&ui.window, ui.service.clone(), profile, ui.saved());
             }
-            7 => {
+            9 => {
                 if let Err(e) = editors::smoke_profile(&ui.window, ui.service.clone()) {
                     eprintln!("Wayland smoke editor: {e:#}");
                     failed.set(true);
@@ -1902,7 +1952,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 }
                 ui.navigate(Page::Settings);
             }
-            8 => {
+            10 => {
                 if let Err(e) = settings::smoke_settings(&ui, false) {
                     eprintln!("Wayland smoke settings: {e:#}");
                     failed.set(true);
@@ -1910,7 +1960,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     return glib::ControlFlow::Break;
                 }
             }
-            9 => {
+            11 => {
                 if let Err(e) = settings::smoke_settings(&ui, true) {
                     eprintln!("Wayland smoke settings: {e:#}");
                     failed.set(true);
@@ -1921,7 +1971,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();
                 let app = app.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: overview, theme, narrow window, collections, editor, settings and clipboard passed")}app.quit();});
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings and clipboard passed")}app.quit();});
                 return glib::ControlFlow::Break;
             }
             _ => {

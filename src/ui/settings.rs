@@ -34,6 +34,9 @@ impl Ui {
         appearance.add(&update_subs);
         let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
         appearance.add(&detect_ip);
+        let acceleration = switch_row("硬件加速", "重启应用后生效", settings.hardware_acceleration);
+        acceleration.set_tooltip_text(Some("开启后使用系统图形加速，可能增加内存占用"));
+        appearance.add(&acceleration);
         self.body.append(&appearance);
 
         let network = group("网络");
@@ -186,7 +189,7 @@ impl Ui {
             levels
                 .iter()
                 .position(|l| *l == settings.log_level)
-                .unwrap_or(2) as u32,
+                .unwrap_or(4) as u32,
         );
         core.add(&log);
         self.body.append(&core);
@@ -270,6 +273,7 @@ impl Ui {
             next.dns_cache = cache.is_active();
             next.block_ads = ads.is_active();
             next.auto_detect_ip = detect_ip.is_active();
+            next.hardware_acceleration = acceleration.is_active();
             next.update_subscriptions_on_start = update_subs.is_active();
             next.tun_enabled = tun.is_active();
             next.tun_stack = match stack.selected() {
@@ -339,6 +343,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.block_ads
                 && !settings.dns_cache
                 && settings.tun_enabled
+                && settings.hardware_acceleration
                 && settings.tun_stack == "gvisor"
                 && settings.tun_mtu == 1400,
             "设置控件没有持久化"
@@ -363,6 +368,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ("广告拦截", true),
         ("DNS 缓存", false),
         ("启用 TUN", true),
+        ("硬件加速", true),
     ] {
         let row = widgets
             .iter()

@@ -1,11 +1,11 @@
 @define-color accent_bg_color #087f83;
 @define-color accent_fg_color #ffffff;
 @define-color accent_color #087f83;
-.aerobox-window { font-size: 11.5pt; background: #f7f9fb; color: #263442; }
+.aerobox-window { font-family: "Noto Sans", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; font-size: 16px; background: #f7f9fb; color: #263442; }
 .aerobox-window.dark { background: #161d24; color: #e3eaf0; }
 .app-sidebar { background: #eef2f5; border-right: 1px solid alpha(#728292, .13); }
 .dark .app-sidebar { background: #111920; }
-.brand { font-size: 21px; font-weight: 800; letter-spacing: -.5px; }
+.brand { font-size: 21px; font-weight: 700; }
 .nav-list { background: transparent; }
 .nav-list row { border-radius: 10px; margin: 3px 0; padding: 0; color: #637181; }
 .nav-list row:selected { background: #d8edeb; color: #067b79; }
@@ -14,16 +14,16 @@
 .nav-list row:hover { background: alpha(#087f83, .07); }
 .nav-item { min-height: 46px; font-weight: 500; }
 .nav-list row:selected .nav-item { font-weight: 700; }
-.page-title { font-size: 29px; font-weight: 800; letter-spacing: -.7px; }
+.page-title { font-size: 26px; font-weight: 700; }
 .section-title { font-size: 16px; font-weight: 700; }
-.muted { color: #687989; }
-.dark .muted { color: #91a2af; }
-.small { font-size: 13px; }
+.muted { color: #526273; }
+.dark .muted { color: #aebdc9; }
+.small { font-size: 14px; }
 .surface-card { border-radius: 16px; background: #ffffff; border: 1px solid #e4eaf0; box-shadow: 0 2px 3px alpha(#213b53,.025); }
 .dark .surface-card { background: #1d2832; border-color: #2b3945; box-shadow: none; }
-.metric-value { font-size: 26px; font-feature-settings: "tnum"; font-weight: 750; letter-spacing: -.5px; }
+.metric-value { font-size: 26px; font-feature-settings: "tnum"; font-weight: 600; }
 .metric-icon { color: #6e9ca0; }
-.pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: #758493; font-size: 13px; font-weight: 650; }
+.pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: #758493; font-size: 14px; font-weight: 600; }
 .dark .pill { background: #2b3945; color: #aabac7; }
 .pill.active { background: #e1f3eb; color: #288263; }
 .dark .pill.active { background: #1f433b; color: #7bd3b1; }
@@ -34,22 +34,20 @@
 .row-icon { background: #edf5f5; color: #538e92; border-radius: 11px; min-width: 42px; min-height: 42px; }
 .dark .row-icon { background: #263b45; color: #8fbfc4; }
 .resource-name { font-size: 16px; font-weight: 700; }
-.resource-subtitle { color: #6c7d8c; font-size: 13px; }
-.dark .resource-subtitle, .dark .empty-description { color: #9babb8; }
+.resource-subtitle { color: #526273; font-size: 14px; }
+.dark .resource-subtitle, .dark .empty-description { color: #aebdc9; }
 .resource-row { padding: 14px 20px; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
-.detail-row { min-height: 48px; }
-.detail-row + .detail-row { border-top: 1px solid alpha(#728292,.13); }
 .empty-icon { color: #86abaa; background: alpha(#087f83,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
 .empty-title { font-size: 19px; font-weight: 700; }
-.empty-description { color: #6c7d8c; }
+.empty-description { color: #526273; }
 .search { border-radius: 10px; min-height: 36px; }
 .node-card { padding: 14px 16px; min-width: 186px; }
 .node-card.selected { border-color: #1b9d98; background: #effaf7; }
 .dark .node-card.selected { border-color: #51a9a4; background: #203d3d; }
 .node-card button { padding: 4px; }
 .log-view, .log-view text { font-family: monospace; font-size: 14px; background: transparent; }
-.editor-root { font-size: 11.5pt; background: @window_bg_color; }
+.editor-root { font-family: "Noto Sans", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; font-size: 16px; background: @window_bg_color; }
 .editor-toolbar { padding: 8px 16px; border-bottom: 1px solid alpha(@borders,.5); }
 .settings-group { margin-bottom: 4px; }
 .page-content > preferencesgroup { margin-top: 4px; }
@@ -67,11 +65,30 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .dark .download { color: #61d6c2; }
 .dark .upload { color: #8cadff; }
 .settings-page preferencesgroup .title { font-size: 16px; }
-.settings-page preferencesgroup .subtitle { font-size: 14px; color: #687989; opacity: 1; }
-.settings-page preferencesgroup .description { font-size: 14px; color: #687989; opacity: 1; }
+.settings-page preferencesgroup .subtitle { font-size: 14px; color: #526273; opacity: 1; }
+.settings-page preferencesgroup .description { font-size: 14px; color: #526273; opacity: 1; }
 .dark .settings-page preferencesgroup .subtitle, .dark .settings-page preferencesgroup .description { color: #a3b4c2; }
 .settings-page entry { font-size: 16px; }
 
-.quick-switches { padding: 16px 20px; border-top: 1px solid alpha(#728292,.13); }
-.ip-address { font-size: 16px; font-family: monospace; }
+.ip-address { font-size: 15px; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 56px; }
+
+.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: #526273; }
+.dark .dim-label { color: #aebdc9; }
+.home-top > flowboxchild { padding: 0; }
+.home-network { padding: 20px; min-width: 278px; }
+.home-network .exit-ip { font-size: 24px; font-weight: 600; }
+.speed-card { padding: 18px; min-width: 112px; }
+.speed-value { font-size: 32px; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 12px 20px; }
+.mode-selector { border-radius: 12px; background: #eef2f5; padding: 4px; }
+.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 8px 22px; font-weight: 600; }
+.mode-selector button:checked { background: #ffffff; color: #087f83; box-shadow: 0 1px 3px alpha(#213b53,.12); }
+.dark .mode-selector { background: #15212b; }
+.dark .mode-selector button:checked { background: #30424f; color: #77dad1; }
+.home-switch { padding: 18px 20px; min-height: 30px; }
+.home-stat { padding: 18px 20px; }
+.home-stat + .home-stat { border-left: 1px solid alpha(#728292,.18); }
+.home-stat-value { font-size: 24px; font-weight: 600; font-feature-settings: "tnum"; }
+.home-start { border-radius: 18px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
+.home-start image { -gtk-icon-size: 22px; }

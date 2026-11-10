@@ -43,7 +43,7 @@ fn native_generation_resolves_resources_without_mutating_source() {
     .unwrap();
     let result = s.generate(&id).unwrap();
     assert_eq!(result["outbounds"][0]["outbounds"], json!(["node"]));
-    assert_eq!(result["log"]["level"], "info");
+    assert_eq!(result["log"]["level"], "error");
     assert!(
         result["route"]["rule_set"][0]["path"]
             .as_str()
@@ -52,7 +52,7 @@ fn native_generation_resolves_resources_without_mutating_source() {
     );
     assert_eq!(
         s.snapshot().profiles.last().unwrap().config["log"]["level"],
-        "info"
+        "error"
     );
 }
 #[test]
@@ -164,7 +164,7 @@ fn real_core_roundtrip() {
         .unwrap();
     s.start()
         .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
-    assert!(s.memory_usage().core_bytes.is_some_and(|bytes| bytes > 0));
+    assert!(s.memory_usage().total_bytes.is_some_and(|bytes| bytes > 0));
     let until = Instant::now() + Duration::from_secs(5);
     while s.api("GET", "/version", None).is_err() {
         assert!(Instant::now() < until);
