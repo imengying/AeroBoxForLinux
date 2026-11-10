@@ -284,11 +284,13 @@ impl Ui {
         });
         content.append(&header);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 20);
+        body.set_hexpand(true);
         body.add_css_class("page-content");
         margin(&body, 24, 24, 12, 24);
         let clamp = adw::Clamp::builder()
             .maximum_size(1030)
             .tightening_threshold(850)
+            .hexpand(true)
             .child(&body)
             .build();
         let scroll = gtk::ScrolledWindow::builder()

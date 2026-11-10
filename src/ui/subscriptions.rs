@@ -79,6 +79,7 @@ impl Ui {
             }
         });
         let list = gtk::FlowBox::new();
+        list.set_hexpand(true);
         list.set_widget_name("subscriptions-grid");
         list.add_css_class("subscriptions-grid");
         list.set_selection_mode(gtk::SelectionMode::None);

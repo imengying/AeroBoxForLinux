@@ -58,6 +58,7 @@ impl Ui {
         heading.append(&test);
         let grid = gtk::FlowBox::new();
         grid.add_css_class("nodes-grid");
+        grid.set_hexpand(true);
         grid.set_widget_name("subscription-nodes");
         grid.set_selection_mode(gtk::SelectionMode::None);
         grid.set_activate_on_single_click(true);
