@@ -54,11 +54,6 @@ impl Ui {
             }
         });
         let state = self.service.snapshot();
-        let active_profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile)
-            .cloned();
         if state.subscriptions.is_empty() {
             self.body
                 .append(&empty("folder-download-symbolic", "暂无订阅", ""));
@@ -83,8 +78,44 @@ impl Ui {
                 );
             }
         });
+        let list = gtk::ListBox::new();
+        list.set_widget_name("subscriptions-list");
+        list.add_css_class("subscriptions-list");
+        list.set_selection_mode(gtk::SelectionMode::None);
+        list.set_activate_on_single_click(true);
+        let ids: Vec<_> = state
+            .subscriptions
+            .iter()
+            .map(|sub| sub.id.clone())
+            .collect();
+        let indicators = Rc::new(RefCell::new(Vec::<(gtk::Stack, gtk::Spinner)>::new()));
         for item in state.subscriptions {
-            let card = card(gtk::Orientation::Vertical, 12);
+            let card = gtk::Box::new(gtk::Orientation::Vertical, 10);
+            let card_row = gtk::ListBoxRow::new();
+            card_row.set_widget_name("subscription-card");
+            card_row.set_activatable(true);
+            card_row.set_selectable(false);
+            let selected = item.id == state.settings.active_subscription;
+            if selected {
+                card_row.add_css_class("subscription-selected");
+            }
+            card_row.update_property(&[gtk::accessible::Property::Label(&item.name)]);
+            card_row.update_state(&[gtk::accessible::State::Selected(Some(selected))]);
+            let indicator = gtk::Stack::new();
+            indicator.set_size_request(22, 22);
+            indicator.set_valign(gtk::Align::Center);
+            indicator.add_named(
+                &gtk::Image::from_icon_name("object-select-symbolic"),
+                Some("chosen"),
+            );
+            indicator.add_named(
+                &gtk::Box::new(gtk::Orientation::Horizontal, 0),
+                Some("empty"),
+            );
+            let spinner = gtk::Spinner::new();
+            indicator.add_named(&spinner, Some("busy"));
+            indicator.set_visible_child_name(if selected { "chosen" } else { "empty" });
+            indicators.borrow_mut().push((indicator.clone(), spinner));
             let count = item
                 .nodes
                 .iter()
@@ -92,6 +123,7 @@ impl Ui {
                 .count();
             let meta = format!("{} 个节点 · {}", count, updated(item.updated));
             let row = resource_row("folder-download-symbolic", &item.name, &meta);
+            row.append(&indicator);
             let edit = icon_button("document-edit-symbolic", "订阅设置");
             let weak = Rc::downgrade(self);
             let sub = item.clone();
@@ -167,54 +199,45 @@ impl Ui {
             label.add_css_class("dim-label");
             details.append(&label);
             footer.append(&details);
-            if let Some(profile) = active_profile.as_ref() {
-                let linked = profile.subscriptions.contains(&item.id);
-                let use_subscription =
-                    gtk::Button::with_label(if linked { "已使用" } else { "使用" });
-                use_subscription.set_valign(gtk::Align::Center);
-                use_subscription.set_sensitive(!linked);
-                use_subscription.set_tooltip_text(Some(&format!("用于配置「{}」", profile.name)));
-                let weak = Rc::downgrade(self);
-                let subscription_id = item.id.clone();
-                let profile_id = profile.id.clone();
-                use_subscription.connect_clicked(move |button| {
-                    if let Some(ui) = weak.upgrade() {
-                        let subscription_id = subscription_id.clone();
-                        let view_subscription = subscription_id.clone();
-                        let profile_id = profile_id.clone();
-                        ui.button_task(
-                            button,
-                            "应用中…",
-                            move |s| {
-                                s.associate_subscription_with_profile(&subscription_id, &profile_id)
-                            },
-                            move |ui, result| match result {
-                                Ok(()) => {
-                                    ui.node_subscription.replace(view_subscription);
-                                    ui.notify("已用于当前配置");
-                                    ui.refresh(Page::Subscriptions);
-                                }
-                                Err(error) => ui.error("应用订阅失败", format!("{error:#}")),
-                            },
-                        );
-                    }
-                });
-                footer.append(&use_subscription);
-            }
-            let nodes = gtk::Button::with_label("节点");
-            nodes.set_valign(gtk::Align::Center);
-            nodes.add_css_class("flat");
-            let weak = Rc::downgrade(self);
-            nodes.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    ui.node_subscription.replace(item.id.clone());
-                    ui.navigate(Page::Nodes);
-                }
-            });
-            footer.append(&nodes);
             card.append(&footer);
-            self.body.append(&card);
+            card_row.set_child(Some(&card));
+            list.append(&card_row);
         }
+        let weak = Rc::downgrade(self);
+        let busy = Rc::new(Cell::new(false));
+        list.connect_row_activated(move |list, row| {
+            if busy.replace(true) {
+                return;
+            }
+            let (Some(ui), Some(id)) = (weak.upgrade(), ids.get(row.index() as usize)) else {
+                busy.set(false);
+                return;
+            };
+            let id = id.clone();
+            let (indicator, spinner) = indicators.borrow()[row.index() as usize].clone();
+            indicator.set_visible_child_name("busy");
+            spinner.start();
+            list.set_sensitive(false);
+            let list = list.downgrade();
+            let busy = busy.clone();
+            ui.task_result(
+                move |s| s.select_subscription(&id),
+                move |ui, result| {
+                    busy.set(false);
+                    spinner.stop();
+                    if let Some(list) = list.upgrade() {
+                        list.set_sensitive(true);
+                    }
+                    ui.subscription_revision
+                        .set(ui.service.subscription_revision());
+                    ui.refresh(Page::Subscriptions);
+                    if let Err(error) = result {
+                        ui.error("切换订阅失败", format!("{error:#}"));
+                    }
+                },
+            );
+        });
+        self.body.append(&list);
     }
 
     pub(super) fn import_subscription(self: &Rc<Self>) {
@@ -277,22 +300,6 @@ impl Ui {
         auto_update
             .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
         let updates = adw::PreferencesGroup::new();
-        let state = self.service.snapshot();
-        let active_profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile);
-        let use_current = switch_row(
-            "用于当前配置",
-            active_profile
-                .map(|p| p.name.as_str())
-                .unwrap_or("未选择配置"),
-            active_profile.is_some(),
-        );
-        use_current.set_sensitive(active_profile.is_some());
-        use_current.set_widget_name("subscription-import-use-current");
-        let profile_id = active_profile.map(|p| p.id.clone());
-        updates.add(&use_current);
         updates.add(&auto_update);
         updates.add(&interval);
         form.append(&updates);
@@ -409,7 +416,6 @@ impl Ui {
             let name = name.text().trim().to_owned();
             let auto_update = auto_update.is_active();
             let interval = interval.value() as u32;
-            let profile_id = profile_id.clone().filter(|_| use_current.is_active());
             let window = weak_window.clone();
             let error = error.clone();
             let busy = busy.clone();
@@ -425,15 +431,12 @@ impl Ui {
                     }
                     sub.auto_update = auto_update && !sub.source.is_empty();
                     sub.update_interval_hours = interval;
-                    let id = sub.id.clone();
-                    s.import_subscription_for_profile(sub, profile_id.as_deref())?;
-                    Ok(id)
+                    s.import_subscription(sub)
                 },
                 move |ui, result| {
                     busy.set(false);
                     match result {
-                        Ok(id) => {
-                            ui.node_subscription.replace(id);
+                        Ok(()) => {
                             if let Some(window) = window.upgrade() {
                                 window.close();
                             }
@@ -450,6 +453,59 @@ impl Ui {
         });
         window.present();
     }
+}
+
+pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) -> Result<()> {
+    use anyhow::ensure;
+    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut result = vec![];
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            result.extend(descendants(&widget));
+            result.push(widget);
+        }
+        result
+    }
+    ensure!(ui.jobs.get() == 0, "订阅选用未完成");
+    let widgets = descendants(&ui.body);
+    ensure!(
+        !widgets
+            .iter()
+            .filter_map(|w| w.downcast_ref::<gtk::Button>())
+            .any(|b| matches!(b.label().as_deref(), Some("使用" | "已使用"))),
+        "仍然需要使用按钮"
+    );
+    let list = widgets
+        .iter()
+        .find(|w| w.widget_name() == "subscriptions-list")
+        .context("缺少订阅列表")?
+        .clone()
+        .downcast::<gtk::ListBox>()
+        .unwrap();
+    let state = ui.service.snapshot();
+    ensure!(
+        state.settings.active_subscription == state.subscriptions[active].id,
+        "点击没有选用订阅"
+    );
+    for (index, _) in state.subscriptions.iter().enumerate() {
+        let row = list.row_at_index(index as i32).unwrap();
+        ensure!(
+            row.has_css_class("subscription-selected") == (index == active),
+            "订阅高亮不准确"
+        );
+    }
+    if let Some(index) = click {
+        let row = list.row_at_index(index as i32).unwrap();
+        list.emit_by_name::<()>("row-activated", &[&row]);
+        ensure!(
+            list.row_at_index(active as i32)
+                .unwrap()
+                .has_css_class("subscription-selected"),
+            "选用成功前丢失原高亮"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
@@ -476,8 +532,10 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
             sub.source.is_empty() && !sub.auto_update && sub.nodes.len() == 1,
             "本地导入状态无效"
         );
-        ensure!(state.profiles.iter().any(|p| p.id == state.settings.active_profile && p.subscriptions.contains(&sub.id)),
-            "导入的订阅没有用于当前配置");
+        ensure!(
+            state.settings.active_subscription == sub.id,
+            "导入的订阅没有选用"
+        );
         return Ok(());
     }
     let window = ui

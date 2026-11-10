@@ -89,6 +89,14 @@ impl Ui {
         let lan = switch_row("允许局域网访问", "", settings.allow_lan);
         lan.set_tooltip_text(Some("允许同一网络的设备使用本地代理端口"));
         network.add(&lan);
+        let mixed_port = adw::SpinRow::with_range(1.0, 65535.0, 1.0);
+        mixed_port.set_title("代理端口");
+        mixed_port.set_value(settings.mixed_port as f64);
+        network.add(&mixed_port);
+        let api_port = adw::SpinRow::with_range(1.0, 65535.0, 1.0);
+        api_port.set_title("控制端口");
+        api_port.set_value(settings.api_port as f64);
+        network.add(&api_port);
         network_page.append(&network);
         let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
@@ -100,9 +108,6 @@ impl Ui {
         dns.add(&hijack);
         let cache = switch_row("DNS 缓存", "", settings.dns_cache);
         dns.add(&cache);
-        let ads = switch_row("广告拦截", "", settings.block_ads);
-        ads.set_tooltip_text(Some("使用自动更新的广告规则集"));
-        routing.add(&ads);
         network_page.append(&routing);
         network_page.append(&dns);
 
@@ -235,7 +240,7 @@ impl Ui {
         data.add(&dir);
         data.add(
             &adw::ActionRow::builder()
-                .title("AeroBox")
+                .title("AeroBox 版本")
                 .subtitle(option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
                 .build(),
         );
@@ -260,11 +265,12 @@ impl Ui {
             next.system_proxy = proxy.is_active();
             next.ipv6 = ipv6.is_active();
             next.allow_lan = lan.is_active();
+            next.mixed_port = mixed_port.value() as u16;
+            next.api_port = api_port.value() as u16;
             next.bypass_lan = bypass.is_active();
             next.sniff = sniff.is_active();
             next.dns_hijack = hijack.is_active();
             next.dns_cache = cache.is_active();
-            next.block_ads = ads.is_active();
             next.auto_detect_ip = detect_ip.is_active();
             next.hardware_acceleration = acceleration.is_active();
             next.update_subscriptions_on_start = update_subs.is_active();
@@ -351,7 +357,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.text_scale == 150
                 && settings.crisp_text
                 && settings.allow_lan
-                && settings.block_ads
                 && !settings.dns_cache
                 && settings.tun_enabled
                 && settings.hardware_acceleration
@@ -383,7 +388,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     for (title, value) in [
         ("IPv6", false),
         ("允许局域网访问", true),
-        ("广告拦截", true),
         ("DNS 缓存", false),
         ("启用 TUN", true),
         ("硬件加速", true),

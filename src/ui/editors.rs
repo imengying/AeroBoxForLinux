@@ -8,11 +8,11 @@ use sourceview::prelude::*;
 
 use crate::{
     engine::Service,
-    model::{self, Profile, RuleSet, Subscription},
+    model::{self, RuleSet, Subscription},
 };
 
 type Saved = Rc<dyn Fn()>;
-type SaveText = Box<dyn Fn(String) -> Result<()>>;
+type SaveText = (Arc<dyn Fn(String) -> Result<()> + Send + Sync>, Saved);
 
 struct EditorWindow {
     window: adw::Window,
@@ -216,358 +216,6 @@ impl SourceEditor {
 
 /// Common fields update only the fields the user actually changed. The full JSON
 /// remains authoritative for every other field, including unknown core options.
-#[derive(Clone, Debug, PartialEq)]
-struct CommonFields {
-    mixed: bool,
-    host: String,
-    port: u16,
-    dns: String,
-    final_outbound: String,
-}
-impl CommonFields {
-    fn from_config(config: &Value) -> Self {
-        let inbounds = config["inbounds"].as_array();
-        let mixed = inbounds.and_then(|items| items.iter().find(|v| v["type"] == "mixed"));
-        let dns = config["dns"]["servers"]
-            .as_array()
-            .and_then(|servers| servers.first());
-        Self {
-            mixed: mixed.is_some(),
-            host: mixed
-                .and_then(|v| v["listen"].as_str())
-                .unwrap_or("127.0.0.1")
-                .into(),
-            port: mixed
-                .and_then(|v| v["listen_port"].as_u64())
-                .unwrap_or(2080) as u16,
-            dns: dns.and_then(|v| v["server"].as_str()).unwrap_or("").into(),
-            final_outbound: config["route"]["final"].as_str().unwrap_or("").into(),
-        }
-    }
-}
-
-fn object_child<'a>(value: &'a mut Value, key: &str) -> Result<&'a mut Value> {
-    ensure!(value.is_object(), "配置必须是 JSON 对象");
-    if value.get(key).is_none() {
-        value[key] = json!({});
-    }
-    ensure!(value[key].is_object(), "{key} 必须是一个对象");
-    Ok(&mut value[key])
-}
-fn apply_common(config: &mut Value, before: &CommonFields, after: &CommonFields) -> Result<()> {
-    ensure!(config.is_object(), "配置必须是 JSON 对象");
-    if (before.mixed, &before.host, before.port) != (after.mixed, &after.host, after.port) {
-        if config.get("inbounds").is_none() {
-            config["inbounds"] = json!([]);
-        }
-        let inbounds = config["inbounds"]
-            .as_array_mut()
-            .context("入站必须是数组")?;
-        if before.mixed != after.mixed || before.host != after.host || before.port != after.port {
-            if after.mixed {
-                ensure!(!after.host.trim().is_empty(), "监听地址不能为空");
-                ensure!(after.port != 0, "监听端口必须介于 1 到 65535");
-                let (index, created) =
-                    if let Some(index) = inbounds.iter().position(|v| v["type"] == "mixed") {
-                        (index, false)
-                    } else {
-                        inbounds.push(json!({"type":"mixed","tag":"mixed-in"}));
-                        (inbounds.len() - 1, true)
-                    };
-                if created || before.host != after.host {
-                    inbounds[index]["listen"] = json!(after.host.trim());
-                }
-                if created || before.port != after.port {
-                    inbounds[index]["listen_port"] = json!(after.port);
-                }
-            } else {
-                inbounds.retain(|v| v["type"] != "mixed");
-            }
-        }
-    }
-    if before.final_outbound != after.final_outbound {
-        object_child(config, "route")?["final"] = json!(after.final_outbound.trim());
-    }
-    if before.dns != after.dns {
-        let dns = object_child(config, "dns")?;
-        if dns.get("servers").is_none() {
-            dns["servers"] = json!([]);
-        }
-        let servers = dns["servers"]
-            .as_array_mut()
-            .context("DNS 服务器必须是数组")?;
-        ensure!(!after.dns.trim().is_empty(), "DNS 地址不能为空");
-        if servers.is_empty() {
-            servers.push(json!({"type":"udp","tag":"dns-local","server":after.dns.trim()}));
-        } else {
-            ensure!(servers[0].is_object(), "DNS 服务器必须是对象");
-            servers[0]["server"] = json!(after.dns.trim());
-        }
-    }
-    Ok(())
-}
-
-pub fn profile(
-    parent: &adw::ApplicationWindow,
-    service: Arc<Service>,
-    item: Profile,
-    on_saved: Saved,
-) {
-    let editor = EditorWindow::new(parent, "编辑配置", "");
-    let stack = tabs(&editor.body);
-    let (scroll, form) = form_page();
-    let initial = CommonFields::from_config(&item.config);
-
-    let basic = group("配置", "");
-    let name = entry("名称", &item.name);
-    basic.add(&name);
-    form.append(&basic);
-
-    let inbound = group("本地代理", "");
-    let mixed = switch("混合代理", "", initial.mixed);
-    let host = entry("监听地址", &initial.host);
-    let port = gtk::SpinButton::with_range(1.0, 65535.0, 1.0);
-    port.set_value(initial.port as f64);
-    port.set_valign(gtk::Align::Center);
-    port.set_width_chars(7);
-    let port_row = adw::ActionRow::builder()
-        .title("监听端口")
-        .activatable_widget(&port)
-        .build();
-    port_row.add_suffix(&port);
-    host.set_sensitive(initial.mixed);
-    port_row.set_sensitive(initial.mixed);
-    let host_for_toggle = host.clone();
-    let port_for_toggle = port_row.clone();
-    mixed.connect_active_notify(move |row| {
-        host_for_toggle.set_sensitive(row.is_active());
-        port_for_toggle.set_sensitive(row.is_active());
-    });
-    inbound.add(&mixed);
-    inbound.add(&host);
-    inbound.add(&port_row);
-    form.append(&inbound);
-
-    let routing = group("路由与 DNS", "");
-    let dns = entry("DNS 服务器", &initial.dns);
-    let outbound = entry("默认出口", &initial.final_outbound);
-    routing.add(&dns);
-    routing.add(&outbound);
-    form.append(&routing);
-    stack.add_titled(&scroll, Some("general"), "常用设置");
-
-    let (resource_scroll, resources) = form_page();
-    let state = service.snapshot();
-    let subscriptions = group("订阅", "");
-    let mut sub_controls = Vec::new();
-    if state.subscriptions.is_empty() {
-        subscriptions.add(
-            &adw::ActionRow::builder()
-                .title("尚未添加订阅")
-                .subtitle("")
-                .build(),
-        );
-    }
-    for subscription in &state.subscriptions {
-        let row = switch(
-            &subscription.name,
-            &format!("{} 个节点", subscription.nodes.len()),
-            item.subscriptions.contains(&subscription.id),
-        );
-        subscriptions.add(&row);
-        sub_controls.push((subscription.id.clone(), row));
-    }
-    resources.append(&subscriptions);
-    let rulesets = group("规则集", "");
-    let mut rule_controls = Vec::new();
-    if state.rulesets.is_empty() {
-        rulesets.add(
-            &adw::ActionRow::builder()
-                .title("尚未添加规则集")
-                .subtitle("")
-                .build(),
-        );
-    }
-    for rule in &state.rulesets {
-        let row = switch(
-            &rule.name,
-            if rule.binary {
-                "SRS 二进制规则集"
-            } else {
-                "JSON 源规则集"
-            },
-            item.rulesets.contains(&rule.id),
-        );
-        rulesets.add(&row);
-        rule_controls.push((rule.id.clone(), row));
-    }
-    resources.append(&rulesets);
-    stack.add_titled(&resource_scroll, Some("resources"), "引用资源");
-
-    let config = SourceEditor::new(
-        &model::pretty(&item.config),
-        "json",
-        true,
-        "网络开关在应用设置中统一管理",
-    );
-    let config_tools = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let format = gtk::Button::with_label("格式化 JSON");
-    format.add_css_class("compact-action");
-    let config_buffer = config.buffer.clone();
-    let error_for_format = editor.error.clone();
-    format.connect_clicked(move |_| match parse_json_buffer(&config_buffer) {
-        Ok(value) => {
-            config_buffer.set_text(&model::pretty(&value));
-            error_for_format.set_visible(false);
-        }
-        Err(err) => show_error(&error_for_format, err),
-    });
-    config_tools.append(&format);
-    config.root.prepend(&config_tools);
-    stack.add_titled(&config.root, Some("config"), "配置 JSON");
-
-    let read_draft: Rc<dyn Fn() -> Result<Profile>> = Rc::new(move || {
-        ensure!(!name.text().trim().is_empty(), "请填写配置名称");
-        let mut value = parse_json_buffer(&config.buffer)?;
-        let common = CommonFields {
-            mixed: mixed.is_active(),
-            host: host.text().into(),
-            port: port.value_as_int() as u16,
-            dns: dns.text().into(),
-            final_outbound: outbound.text().into(),
-        };
-        apply_common(&mut value, &initial, &common)?;
-        let mut next = item.clone();
-        next.name = name.text().trim().into();
-        next.config = value;
-        next.subscriptions = sub_controls
-            .iter()
-            .filter(|(_, r)| r.is_active())
-            .map(|(id, _)| id.clone())
-            .collect();
-        if next
-            .selected_node
-            .as_ref()
-            .is_some_and(|node| !next.subscriptions.contains(&node.subscription_id))
-        {
-            next.selected_node = None;
-        }
-        next.rulesets = rule_controls
-            .iter()
-            .filter(|(_, r)| r.is_active())
-            .map(|(id, _)| id.clone())
-            .collect();
-        Ok(next)
-    });
-    let preview = gtk::Button::with_label("预览生成结果");
-    let check = gtk::Button::with_label("检查配置");
-    for (button, check_core) in [(&preview, false), (&check, true)] {
-        button.add_css_class("compact-action");
-        let service = service.clone();
-        let read_draft = read_draft.clone();
-        let weak_window = editor.window.downgrade();
-        let error = editor.error.clone();
-        button.connect_clicked(move |button| {
-            let draft = match read_draft() {
-                Ok(draft) => draft,
-                Err(e) => {
-                    show_error(&error, e);
-                    return;
-                }
-            };
-            error.set_visible(false);
-            button.set_sensitive(false);
-            let idle_label = if check_core {
-                "检查配置"
-            } else {
-                "预览生成结果"
-            };
-            button.set_label(if check_core {
-                "检查中…"
-            } else {
-                "生成中…"
-            });
-            let state = service.snapshot();
-            let work = service.clone();
-            let (send, recv) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result = work.generate_profile(&state, &draft).and_then(|config| {
-                    if check_core {
-                        work.check(&config)?;
-                    }
-                    Ok(config)
-                });
-                let _ = send.send(result);
-            });
-            let weak_window = weak_window.clone();
-            let error = error.clone();
-            let button = button.clone();
-            glib::timeout_add_local(Duration::from_millis(30), move || {
-                if weak_window.upgrade().is_none() {
-                    return glib::ControlFlow::Break;
-                }
-                match recv.try_recv() {
-                    Ok(result) => {
-                        button.set_sensitive(true);
-                        button.set_label(idle_label);
-                        match result {
-                            Ok(config) => {
-                                if let Some(window) = weak_window.upgrade() {
-                                    code(
-                                        &window,
-                                        if check_core {
-                                            "检查通过 · 生成的配置"
-                                        } else {
-                                            "生成的配置"
-                                        },
-                                        &model::pretty(&config),
-                                        "json",
-                                        None,
-                                    );
-                                }
-                            }
-                            Err(e) => show_error(&error, e),
-                        }
-                        glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(_) => {
-                        button.set_sensitive(true);
-                        button.set_label(idle_label);
-                        show_error(&error, "配置处理任务意外结束");
-                        glib::ControlFlow::Break
-                    }
-                }
-            });
-        });
-        config_tools.append(button);
-    }
-    let weak_window = editor.window.downgrade();
-    let error = editor.error.clone();
-    editor.save.connect_clicked(move |_| {
-        let result = read_draft().and_then(|next| {
-            service.update(|state| {
-                if let Some(old) = state.profiles.iter_mut().find(|p| p.id == next.id) {
-                    *old = next;
-                } else {
-                    state.profiles.push(next);
-                }
-                Ok(())
-            })
-        });
-        match result {
-            Ok(()) => {
-                on_saved();
-                if let Some(w) = weak_window.upgrade() {
-                    w.close();
-                }
-            }
-            Err(err) => show_error(&error, err),
-        }
-    });
-    editor.window.present();
-}
-
 pub fn subscription(
     parent: &adw::ApplicationWindow,
     service: Arc<Service>,
@@ -750,6 +398,20 @@ pub fn ruleset(
     basic.add(&source);
     basic.add(&format);
     basic.add(&interval);
+    let actions = ["direct", "proxy", "reject"];
+    let action = adw::ComboRow::builder()
+        .title("匹配后")
+        .model(&gtk::StringList::new(&["直连", "代理", "拦截"]))
+        .selected(
+            actions
+                .iter()
+                .position(|value| *value == item.action)
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    let enabled = switch("启用", "", item.enabled);
+    basic.add(&action);
+    basic.add(&enabled);
     form.append(&basic);
     stack.add_titled(&scroll, Some("general"), "基本信息");
     let content = SourceEditor::new(&model::pretty(&item.content), "json", true, "");
@@ -823,8 +485,11 @@ pub fn ruleset(
     });
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
-    editor.save.connect_clicked(move |_| {
-        let result = (|| -> Result<()> {
+    let cancel = editor.cancel.downgrade();
+    let body = editor.body.downgrade();
+    let saving = editor.saving.clone();
+    editor.save.connect_clicked(move |button| {
+        let result = (|| -> Result<RuleSet> {
             ensure!(!name.text().trim().is_empty(), "请填写规则集名称");
             let binary = format.selected() == 1;
             let source_text = source.text().trim().to_owned();
@@ -836,40 +501,87 @@ pub fn ruleset(
             } else {
                 None
             };
-            service.update(|state| {
-                let mut next = state
-                    .rulesets
-                    .iter()
-                    .find(|r| r.id == item.id)
-                    .cloned()
-                    .unwrap_or_else(|| item.clone());
-                let previous_name = next.name.clone();
-                next.name = name.text().trim().into();
-                next.source = source_text;
-                next.update_interval_hours = interval.value() as u32;
-                next.binary = binary;
-                // A completed background update stays intact when only metadata
-                // was edited. Explicit content edits remain authoritative.
-                if let Some(value) = value
-                    && (item.binary || value != item.content)
-                {
-                    next.content = value;
-                }
-                model::rename_rule_references(state, &next.id, &previous_name, &next.name);
-                if let Some(old) = state.rulesets.iter_mut().find(|r| r.id == next.id) {
-                    *old = next;
-                } else {
-                    state.rulesets.push(next);
-                }
-                Ok(())
-            })
+            let mut next = service
+                .snapshot()
+                .rulesets
+                .into_iter()
+                .find(|r| r.id == item.id)
+                .unwrap_or_else(|| item.clone());
+            next.name = name.text().trim().into();
+            next.source = source_text;
+            next.update_interval_hours = interval.value() as u32;
+            next.binary = binary;
+            next.action = actions[action.selected() as usize].into();
+            next.enabled = enabled.is_active();
+            // A completed background update stays intact when only metadata
+            // was edited. Explicit content edits remain authoritative.
+            if let Some(value) = value
+                && (item.binary || value != item.content)
+            {
+                next.content = value;
+            }
+            Ok(next)
         })();
         match result {
-            Ok(()) => {
-                on_saved();
-                if let Some(w) = weak.upgrade() {
-                    w.close();
+            Ok(next) => {
+                saving.set(true);
+                error.set_visible(false);
+                button.set_sensitive(false);
+                let spinner = gtk::Spinner::new();
+                spinner.start();
+                let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                progress.append(&spinner);
+                progress.append(&gtk::Label::new(Some("保存中…")));
+                button.set_child(Some(&progress));
+                if let Some(cancel) = cancel.upgrade() {
+                    cancel.set_sensitive(false);
                 }
+                if let Some(body) = body.upgrade() {
+                    body.set_sensitive(false);
+                }
+                let service = service.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(service.save_ruleset(next));
+                });
+                let weak = weak.clone();
+                let error = error.clone();
+                let button = button.downgrade();
+                let cancel = cancel.clone();
+                let body = body.clone();
+                let saving = saving.clone();
+                let on_saved = on_saved.clone();
+                glib::timeout_add_local(Duration::from_millis(40), move || {
+                    let result = match rx.try_recv() {
+                        Ok(result) => result,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            return glib::ControlFlow::Continue;
+                        }
+                        Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
+                    };
+                    saving.set(false);
+                    spinner.stop();
+                    if let Some(button) = button.upgrade() {
+                        button.set_label("保存");
+                        button.set_sensitive(true);
+                    }
+                    if let Some(cancel) = cancel.upgrade() {
+                        cancel.set_sensitive(true);
+                    }
+                    if let Some(body) = body.upgrade() {
+                        body.set_sensitive(true);
+                    }
+                    match result {
+                        Ok(()) => {
+                            on_saved();
+                            if let Some(window) = weak.upgrade() {
+                                window.close();
+                            }
+                        }
+                        Err(error_text) => show_error(&error, error_text),
+                    }
+                    glib::ControlFlow::Break
+                });
             }
             Err(err) => show_error(&error, err),
         }
@@ -888,24 +600,13 @@ pub fn nodes(
         &format!("{} · 节点", item.name),
         &model::pretty(&item.nodes),
         "json",
-        Some(Box::new(move |text| {
-            let nodes = aerobox_for_linux::subscription::parse(&text)?;
-            service.update(|state| {
-                let current = state
-                    .subscriptions
-                    .iter_mut()
-                    .find(|s| s.id == item.id)
-                    .context("订阅已被删除")?;
-                ensure!(
-                    current.nodes == item.nodes && current.updated == item.updated,
-                    "订阅已在后台更新，请重新打开节点后编辑"
-                );
-                current.nodes = nodes;
-                Ok(())
-            })?;
-            on_saved();
-            Ok(())
-        })),
+        Some((
+            Arc::new(move |text| {
+                let nodes = aerobox_for_linux::subscription::parse(&text)?;
+                service.save_subscription_nodes(&item, nodes)
+            }),
+            on_saved,
+        )),
     );
 }
 
@@ -1015,17 +716,62 @@ pub fn code(
     editor.body.append(&source.root);
     let weak = editor.window.downgrade();
     let err = editor.error.clone();
-    if let Some(save) = on_save {
-        editor
-            .save
-            .connect_clicked(move |_| match save(source.text()) {
-                Ok(()) => {
-                    if let Some(w) = weak.upgrade() {
-                        w.close();
-                    }
-                }
-                Err(e) => show_error(&err, e),
+    if let Some((save, on_saved)) = on_save {
+        let saving = editor.saving.clone();
+        let cancel = editor.cancel.clone();
+        let body = editor.body.clone();
+        editor.save.connect_clicked(move |button| {
+            if saving.replace(true) {
+                return;
+            }
+            err.set_visible(false);
+            let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let spinner = gtk::Spinner::builder().spinning(true).build();
+            progress.append(&spinner);
+            progress.append(&gtk::Label::new(Some("保存中…")));
+            button.set_child(Some(&progress));
+            button.set_sensitive(false);
+            cancel.set_sensitive(false);
+            body.set_sensitive(false);
+            let text = source.text();
+            let work = save.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(work(text));
             });
+            let weak = weak.clone();
+            let err = err.clone();
+            let saving = saving.clone();
+            let cancel = cancel.clone();
+            let body = body.clone();
+            let button = button.clone();
+            let on_saved = on_saved.clone();
+            glib::timeout_add_local(Duration::from_millis(40), move || {
+                let result = match rx.try_recv() {
+                    Ok(result) => result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        return glib::ControlFlow::Continue;
+                    }
+                    Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
+                };
+                saving.set(false);
+                spinner.stop();
+                button.set_label("保存");
+                button.set_sensitive(true);
+                cancel.set_sensitive(true);
+                body.set_sensitive(true);
+                match result {
+                    Ok(()) => {
+                        on_saved();
+                        if let Some(w) = weak.upgrade() {
+                            w.close();
+                        }
+                    }
+                    Err(error) => show_error(&err, error),
+                }
+                glib::ControlFlow::Break
+            });
+        });
     } else {
         editor.save.set_label("完成");
         editor.save.connect_clicked(move |_| {
@@ -1049,21 +795,14 @@ pub fn rule_content(
             &format!("{} · 规则", item.name),
             &model::pretty(&item.content),
             "json",
-            Some(Box::new(move |text| {
-                let value: Value = serde_json::from_str(&text)?;
-                validate_rules(&value)?;
-                service.update(|state| {
-                    let rule = state
-                        .rulesets
-                        .iter_mut()
-                        .find(|r| r.id == item.id)
-                        .context("规则集已被删除")?;
-                    rule.content = value;
-                    Ok(())
-                })?;
-                on_saved();
-                Ok(())
-            })),
+            Some((
+                Arc::new(move |text| {
+                    let value: Value = serde_json::from_str(&text)?;
+                    validate_rules(&value)?;
+                    service.save_rule_source(&item.id, &text)
+                }),
+                on_saved,
+            )),
         );
         return;
     }
@@ -1209,7 +948,27 @@ fn validate_rules(value: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn smoke_ruleset(parent: &adw::ApplicationWindow, service: Arc<Service>) -> Result<()> {
+pub(super) fn smoke_ruleset(
+    parent: &adw::ApplicationWindow,
+    service: Arc<Service>,
+    verify: bool,
+) -> Result<()> {
+    if verify {
+        let rule = service
+            .snapshot()
+            .rulesets
+            .into_iter()
+            .find(|r| r.id == model::BUILTIN_DOMESTIC_ID)
+            .context("缺少规则")?;
+        ensure!(
+            rule.is_remote()
+                && rule.update_interval_hours == 12
+                && rule.action == "direct"
+                && rule.enabled,
+            "规则保存没有生效"
+        );
+        return Ok(());
+    }
     fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
         let mut result = Vec::new();
         let mut child = root.first_child();
@@ -1260,132 +1019,12 @@ pub(super) fn smoke_ruleset(parent: &adw::ApplicationWindow, service: Arc<Servic
     );
     source.set_text(&original_source);
     interval.set_value(12.0);
-    let before = service
-        .snapshot()
-        .rulesets
-        .into_iter()
-        .find(|r| r.id == model::BUILTIN_DOMESTIC_ID)
-        .context("缺少测试规则")?;
     let save = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<gtk::Button>())
         .find(|b| b.label().as_deref() == Some("保存"))
         .context("缺少保存按钮")?;
     save.emit_clicked();
-    let saved = service
-        .snapshot()
-        .rulesets
-        .into_iter()
-        .find(|r| r.id == before.id)
-        .context("规则保存失败")?;
-    ensure!(
-        saved.is_remote() && saved.update_interval_hours == 12 && saved.content == before.content,
-        "在线规则更新设置没有正确保存"
-    );
-    Ok(())
-}
-
-/// Exercises real GTK controls during the opt-in Wayland smoke run.
-pub(super) fn smoke_profile(parent: &adw::ApplicationWindow, service: Arc<Service>) -> Result<()> {
-    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-        let mut result = Vec::new();
-        let mut child = root.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            result.extend(descendants(&widget));
-            result.push(widget);
-        }
-        result
-    }
-    fn button(widgets: &[gtk::Widget], label: &str) -> Result<gtk::Button> {
-        widgets
-            .iter()
-            .filter_map(|w| w.clone().downcast::<gtk::Button>().ok())
-            .find(|b| b.label().as_deref() == Some(label))
-            .with_context(|| format!("找不到{label}按钮"))
-    }
-    let app = parent.application().context("缺少应用")?;
-    let window = app.active_window().context("配置编辑器未打开")?;
-    ensure!(
-        window != parent.clone().upcast::<gtk::Window>(),
-        "配置编辑器未打开"
-    );
-    let widgets = descendants(&window);
-    let name = widgets
-        .iter()
-        .filter_map(|w| w.clone().downcast::<adw::EntryRow>().ok())
-        .find(|row| row.title() == "名称")
-        .context("缺少名称输入")?;
-    let host = widgets
-        .iter()
-        .filter_map(|w| w.clone().downcast::<adw::EntryRow>().ok())
-        .find(|row| row.title() == "监听地址")
-        .context("缺少监听地址输入")?;
-    let buffer = widgets
-        .iter()
-        .filter_map(|w| w.clone().downcast::<sourceview::View>().ok())
-        .filter_map(|view| view.buffer().downcast::<sourceview::Buffer>().ok())
-        .find(|buffer| buffer.language().is_some_and(|lang| lang.id() == "json"))
-        .context("缺少配置 JSON 编辑器")?;
-    let before = service.snapshot();
-    let original = before
-        .profiles
-        .iter()
-        .find(|p| p.name == name.text())
-        .context("找不到测试配置")?;
-    let save = button(&widgets, "保存")?;
-    buffer.set_text("{");
-    name.set_text("冒烟测试 · 当前草稿");
-    save.emit_clicked();
-    ensure!(window.is_visible(), "无效 JSON 意外关闭了编辑器");
-    ensure!(
-        serde_json::to_value(&before)? == serde_json::to_value(service.snapshot())?,
-        "无效 JSON 被保存"
-    );
-    ensure!(
-        widgets
-            .iter()
-            .any(|w| w.has_css_class("error") && w.is_visible()),
-        "缺少 JSON 错误提示"
-    );
-    let mut config = original.config.clone();
-    config["inbounds"][0]["listen_port"] = json!(17777);
-    config["route"]["final"] = json!("direct");
-    buffer.set_text(&model::pretty(&config));
-    host.set_text("127.0.0.2");
-    save.emit_clicked();
-    let after = service.snapshot();
-    let saved = after
-        .profiles
-        .iter()
-        .find(|p| p.id == original.id)
-        .context("配置未保存")?;
-    ensure!(saved.name == "冒烟测试 · 当前草稿", "保存没有使用当前名称");
-    ensure!(
-        saved.config["inbounds"][0]["listen"] == "127.0.0.2",
-        "保存没有使用当前监听地址"
-    );
-    ensure!(
-        saved.config["inbounds"][0]["listen_port"] == 17777,
-        "保存覆盖了 JSON 中的监听端口"
-    );
-    ensure!(
-        saved.config["route"]["final"] == "direct",
-        "保存覆盖了 JSON 中的默认出口"
-    );
-    let draft = Profile::new("取消后不应存在");
-    let draft_id = draft.id.clone();
-    profile(parent, service.clone(), draft, Rc::new(|| {}));
-    let cancel_window = app
-        .windows()
-        .into_iter()
-        .find(|w| w.is_visible() && *w != parent.clone().upcast::<gtk::Window>())
-        .context("取消测试编辑器未打开")?;
-    button(&descendants(&cancel_window), "取消")?.emit_clicked();
-    ensure!(
-        !service.snapshot().profiles.iter().any(|p| p.id == draft_id),
-        "取消操作写入了配置"
-    );
     Ok(())
 }
 
@@ -1413,48 +1052,5 @@ mod tests {
         ] {
             assert!(common_rule(kind, invalid).is_err());
         }
-    }
-    #[test]
-    fn unchanged_form_preserves_manual_json() {
-        let original = Profile::new("test").config;
-        let initial = CommonFields::from_config(&original);
-        let mut changed = original.clone();
-        changed["inbounds"][0]["listen_port"] = json!(7777);
-        changed["dns"]["servers"][0]["server"] = json!("1.1.1.1");
-        changed["future"] = json!({"unknown":true});
-        let expected = changed.clone();
-        apply_common(&mut changed, &initial, &initial).unwrap();
-        assert_eq!(changed, expected);
-    }
-    #[test]
-    fn edit_preserves_advanced_inbound_fields() {
-        let mut config = Profile::new("test").config;
-        config["inbounds"][0]["users"] = json!([{"username":"u","password":"p"}]);
-        let before = CommonFields::from_config(&config);
-        let mut after = before.clone();
-        after.port = 1080;
-        apply_common(&mut config, &before, &after).unwrap();
-        assert_eq!(config["inbounds"][0]["listen_port"], 1080);
-        assert_eq!(config["inbounds"][0]["users"][0]["password"], "p");
-    }
-    #[test]
-    fn changed_host_preserves_port_edited_as_json() {
-        let mut config = Profile::new("test").config;
-        let before = CommonFields::from_config(&config);
-        let mut after = before.clone();
-        after.host = "0.0.0.0".into();
-        config["inbounds"][0]["listen_port"] = json!(7777);
-        apply_common(&mut config, &before, &after).unwrap();
-        assert_eq!(config["inbounds"][0]["listen"], "0.0.0.0");
-        assert_eq!(config["inbounds"][0]["listen_port"], 7777);
-    }
-    #[test]
-    fn malformed_sections_fail_without_panic() {
-        let original = Profile::new("test").config;
-        let before = CommonFields::from_config(&original);
-        let mut after = before.clone();
-        after.port = 1080;
-        let mut config = json!({"inbounds":"broken"});
-        assert!(apply_common(&mut config, &before, &after).is_err());
     }
 }

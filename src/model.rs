@@ -31,7 +31,9 @@ pub struct Settings {
     pub crisp_text: bool,
     pub hardware_acceleration: bool,
     pub core_path: String,
-    pub active_profile: String,
+    pub active_subscription: String,
+    pub mixed_port: u16,
+    pub api_port: u16,
     pub auto_start: bool,
     pub auto_restart: bool,
     pub system_proxy: bool,
@@ -45,7 +47,6 @@ pub struct Settings {
     pub sniff: bool,
     pub dns_hijack: bool,
     pub dns_cache: bool,
-    pub block_ads: bool,
     pub bypass_lan: bool,
     pub auto_detect_ip: bool,
     pub update_subscriptions_on_start: bool,
@@ -63,10 +64,12 @@ impl Default for Settings {
             crisp_text: true,
             hardware_acceleration: false,
             core_path: String::new(),
-            active_profile: String::new(),
+            active_subscription: String::new(),
+            mixed_port: 2080,
+            api_port: 9090,
             auto_start: false,
             auto_restart: false,
-            system_proxy: false,
+            system_proxy: true,
             routing_mode: "rule".into(),
             ipv6: true,
             tun_enabled: false,
@@ -77,7 +80,6 @@ impl Default for Settings {
             sniff: true,
             dns_hijack: true,
             dns_cache: true,
-            block_ads: false,
             bypass_lan: true,
             auto_detect_ip: true,
             update_subscriptions_on_start: false,
@@ -92,6 +94,10 @@ impl Default for Settings {
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.mixed_port > 0 && self.api_port > 0 && self.mixed_port != self.api_port,
+            "本地代理与控制端口须为不同的非零端口"
+        );
         ensure!(
             (100..=150).contains(&self.text_scale),
             "文字大小须在 100% 到 150% 之间"
@@ -170,6 +176,7 @@ pub struct Subscription {
     pub auto_update: bool,
     pub update_interval_hours: u32,
     pub nodes: Vec<Value>,
+    pub selected_node: Option<String>,
     pub updated: u64,
     pub upload: u64,
     pub download: u64,
@@ -185,6 +192,7 @@ impl Default for Subscription {
             auto_update: true,
             update_interval_hours: 24,
             nodes: vec![],
+            selected_node: None,
             updated: 0,
             upload: 0,
             download: 0,
@@ -201,6 +209,8 @@ pub struct RuleSet {
     pub name: String,
     pub source: String,
     pub binary: bool,
+    pub enabled: bool,
+    pub action: String,
     pub content: Value,
     pub updated: u64,
     pub update_interval_hours: u32,
@@ -212,6 +222,8 @@ impl Default for RuleSet {
             name: "新规则集".into(),
             source: String::new(),
             binary: false,
+            enabled: true,
+            action: "direct".into(),
             content: json!({"version":3,"rules":[]}),
             updated: 0,
             update_interval_hours: 24,
@@ -230,163 +242,76 @@ pub fn is_online_source(source: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
-pub const BUILTIN_LAN_ID: &str = "aeb00000-0000-4000-8000-000000000001";
 pub const BUILTIN_DOMESTIC_ID: &str = "aeb00000-0000-4000-8000-000000000002";
 pub const BUILTIN_ADS_ID: &str = "aeb00000-0000-4000-8000-000000000003";
 pub const BUILTIN_CHINA_IP_ID: &str = "aeb00000-0000-4000-8000-000000000004";
 
-/// Maintained online lists. Small initial rules let the first connection start
-/// before the core refreshes and caches the full online source.
-pub fn builtin_resources() -> (Vec<Profile>, Vec<RuleSet>) {
-    let rulesets = vec![
-        RuleSet {
-            id: BUILTIN_LAN_ID.into(),
-            name: "局域网".into(),
-            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.json".into(),
-            content: json!({"version":3,"rules":[{"ip_cidr":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","169.254.0.0/16","100.64.0.0/10","::1/128","fc00::/7","fe80::/10"]},{"domain_suffix":["localhost","local","lan"]}]}),
-            ..RuleSet::default()
-        },
-        RuleSet {
-            id: BUILTIN_DOMESTIC_ID.into(),
-            name: "中国大陆域名".into(),
-            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json".into(),
-            content: json!({"version":3,"rules":[{"domain_suffix":["baidu.com","qq.com","tencent.com","aliyun.com","alipay.com","taobao.com","tmall.com","jd.com","bilibili.com","163.com","126.com","sina.com.cn","weibo.com","zhihu.com","douban.com","mi.com"]}]}),
-            ..RuleSet::default()
-        },
-        RuleSet {
-            id: BUILTIN_ADS_ID.into(),
-            name: "广告拦截".into(),
-            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.json".into(),
-            content: json!({"version":3,"rules":[{"domain_suffix":["doubleclick.net","googlesyndication.com","googleadservices.com","adservice.google.com","ad.qq.com","pos.baidu.com","cpro.baidu.com"]}]}),
-            ..RuleSet::default()
-        },
-        RuleSet {
-            id: BUILTIN_CHINA_IP_ID.into(),
-            name: "中国大陆 IP".into(),
-            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.json".into(),
-            ..RuleSet::default()
-        },
-    ];
-    let mut profiles = vec![];
-    for (index, name) in ["智能分流", "代理优先", "直连网络"].iter().enumerate() {
-        let mut profile = Profile::new(name);
-        profile.id = format!("aeb10000-0000-4000-8000-{:012}", index + 1);
-        profile.rulesets = rulesets.iter().map(|r| r.id.clone()).collect();
-        profile.config["route"]["rules"] = json!([]);
-        if index == 0 {
-            profile.config["route"]["rules"] = json!([
-                {"rule_set":["中国大陆域名", "中国大陆 IP"],"action":"route","outbound":"direct"}
-            ]);
-            profile.config["dns"]["rules"] = json!([
-                {"rule_set":"中国大陆域名","action":"route","server":"dns-local"}
-            ]);
-        }
-        if index == 2 {
-            profile.config["route"]["final"] = json!("direct");
+/// The same three official SagerNet lists used by AeroBox for Android.
+pub fn builtin_resources() -> Vec<RuleSet> {
+    [
+        (
+            BUILTIN_CHINA_IP_ID,
+            "中国大陆 IP",
+            "sing-geoip",
+            "geoip-cn.srs",
+        ),
+        (
+            BUILTIN_DOMESTIC_ID,
+            "中国大陆域名",
+            "sing-geosite",
+            "geosite-cn.srs",
+        ),
+        (
+            BUILTIN_ADS_ID,
+            "广告拦截",
+            "sing-geosite",
+            "geosite-category-ads-all.srs",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, repo, file)| RuleSet {
+        id: id.into(),
+        name: name.into(),
+        binary: true,
+        enabled: id != BUILTIN_ADS_ID,
+        action: if id == BUILTIN_ADS_ID {
+            "reject"
         } else {
-            profile.config["dns"]["servers"].as_array_mut().unwrap().push(json!({
-                "type":"https","tag":"dns-remote","server":"1.1.1.1","path":"/dns-query","detour":"proxy"
-            }));
-            profile.config["dns"]["final"] = json!("dns-remote");
+            "direct"
         }
-        profiles.push(profile);
-    }
-    (profiles, rulesets)
+        .into(),
+        source: format!("https://raw.githubusercontent.com/SagerNet/{repo}/rule-set/{file}"),
+        ..RuleSet::default()
+    })
+    .collect()
 }
 
-/// Add missing presets while preserving existing edits, selection and IDs.
+pub fn builtin_seed(id: &str) -> Option<&'static [u8]> {
+    match id {
+        BUILTIN_CHINA_IP_ID => Some(include_bytes!("../resources/rules/geoip-cn.srs")),
+        BUILTIN_DOMESTIC_ID => Some(include_bytes!("../resources/rules/geosite-cn.srs")),
+        BUILTIN_ADS_ID => Some(include_bytes!(
+            "../resources/rules/geosite-category-ads-all.srs"
+        )),
+        _ => None,
+    }
+}
+
 pub fn add_builtin_resources(state: &mut State) -> Result<usize> {
-    let (mut profiles, rulesets) = builtin_resources();
     let mut added = 0;
-    for rule in rulesets {
-        if let Some(existing) = state
-            .rulesets
-            .iter()
-            .find(|r| r.id == rule.id || r.name == rule.name)
-        {
-            for profile in &mut profiles {
-                for id in &mut profile.rulesets {
-                    if *id == rule.id {
-                        *id = existing.id.clone();
-                    }
-                }
-                replace_rule_tag(&mut profile.config, &rule.name, &existing.name);
-            }
-        } else {
+    for rule in builtin_resources() {
+        if !state.rulesets.iter().any(|r| r.id == rule.id) {
+            ensure!(
+                !state.rulesets.iter().any(|r| r.name == rule.name),
+                "已有同名规则集：{}",
+                rule.name
+            );
             state.rulesets.push(rule);
             added += 1;
         }
     }
-    for mut profile in profiles {
-        if state.profiles.iter().any(|p| p.id == profile.id) {
-            continue;
-        }
-        if state.profiles.iter().any(|p| p.name == profile.name) {
-            profile.name.push_str("（内置）");
-        }
-        state.profiles.push(profile);
-        added += 1;
-    }
-    if state.settings.active_profile.is_empty() {
-        state.settings.active_profile = state
-            .profiles
-            .first()
-            .map(|p| p.id.clone())
-            .unwrap_or_default();
-    }
     state.validate()?;
     Ok(added)
-}
-
-/// Explicitly connect built-in lists to their maintained sources. Custom lists,
-/// names and contents are kept; the seed remains available for the first start.
-pub fn use_online_builtin_rules(state: &mut State) -> Result<()> {
-    for builtin in builtin_resources().1 {
-        if let Some(rule) = state.rulesets.iter_mut().find(|r| r.id == builtin.id) {
-            rule.source = builtin.source;
-            rule.binary = false;
-            rule.update_interval_hours = 24;
-        } else if !state.rulesets.iter().any(|r| r.name == builtin.name) {
-            state.rulesets.push(builtin);
-        }
-    }
-    state.validate()
-}
-
-fn replace_rule_tag(value: &mut Value, from: &str, to: &str) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object {
-                if key == "rule_set" {
-                    if child.as_str() == Some(from) {
-                        *child = json!(to);
-                    } else if let Some(tags) = child.as_array_mut() {
-                        for tag in tags {
-                            if tag.as_str() == Some(from) {
-                                *tag = json!(to);
-                            }
-                        }
-                    }
-                } else {
-                    replace_rule_tag(child, from, to);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                replace_rule_tag(item, from, to);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub fn rename_rule_references(state: &mut State, id: &str, from: &str, to: &str) {
-    for profile in &mut state.profiles {
-        if profile.rulesets.iter().any(|linked| linked == id) {
-            replace_rule_tag(&mut profile.config, from, to);
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -394,66 +319,156 @@ pub fn rename_rule_references(state: &mut State, id: &str, from: &str, to: &str)
 pub struct State {
     pub schema: u32,
     pub settings: Settings,
-    pub profiles: Vec<Profile>,
     pub subscriptions: Vec<Subscription>,
     pub rulesets: Vec<RuleSet>,
 }
 impl Default for State {
     fn default() -> Self {
-        let (profiles, rulesets) = builtin_resources();
         Self {
-            schema: 1,
-            settings: Settings {
-                active_profile: profiles[0].id.clone(),
-                ..Settings::default()
-            },
-            profiles,
+            schema: 2,
+            settings: Settings::default(),
             subscriptions: vec![],
-            rulesets,
+            rulesets: builtin_resources(),
         }
     }
 }
 impl State {
+    pub fn normalize_selection(&mut self) {
+        for sub in &mut self.subscriptions {
+            if sub.selected_node.as_ref().is_none_or(|tag| {
+                !sub.nodes
+                    .iter()
+                    .any(|n| n["tag"] == *tag && is_connection_node(n))
+            }) {
+                sub.selected_node = sub
+                    .nodes
+                    .iter()
+                    .find(|n| is_connection_node(n))
+                    .and_then(|n| n["tag"].as_str())
+                    .map(str::to_owned);
+            }
+        }
+        if !self.settings.active_subscription.is_empty()
+            && !self
+                .subscriptions
+                .iter()
+                .any(|s| s.id == self.settings.active_subscription)
+        {
+            self.settings.active_subscription = self
+                .subscriptions
+                .iter()
+                .find(|s| s.selected_node.is_some())
+                .map(|s| s.id.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    /// A transient generation helper; configurations are never stored separately.
+    pub fn current_profile(&self) -> Result<Profile> {
+        let sub = self
+            .subscriptions
+            .iter()
+            .find(|s| s.id == self.settings.active_subscription)
+            .context("请先导入并选择订阅")?;
+        let node = sub
+            .selected_node
+            .as_deref()
+            .and_then(|tag| {
+                sub.nodes
+                    .iter()
+                    .find(|n| n["tag"] == tag && is_connection_node(n))
+            })
+            .or_else(|| sub.nodes.iter().find(|n| is_connection_node(n)))
+            .context("当前订阅没有可连接节点，请更新或更换订阅")?;
+        let mut profile = Profile::new(&sub.name);
+        profile.id = sub.id.clone();
+        profile.subscriptions = vec![sub.id.clone()];
+        profile.selected_node = Some(NodeSelection {
+            subscription_id: sub.id.clone(),
+            node_tag: node["tag"].as_str().unwrap().into(),
+        });
+        profile.rulesets = self
+            .rulesets
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.id.clone())
+            .collect();
+        profile.config["inbounds"][0]["listen_port"] = json!(self.settings.mixed_port);
+        profile.config["experimental"]["clash_api"]["external_controller"] =
+            json!(format!("127.0.0.1:{}", self.settings.api_port));
+        profile.config["experimental"]["clash_api"]["secret"] = json!(sub.id);
+        profile.config["dns"]["servers"].as_array_mut().unwrap().push(json!({"type":"https","tag":"dns-remote","server":"1.1.1.1","path":"/dns-query","detour":"proxy"}));
+        profile.config["dns"]["final"] = json!("dns-remote");
+        let mut routes = vec![];
+        let mut dns = vec![];
+        // Reject policy precedes domestic direct rules. Mode overrides are
+        // inserted by config::apply_settings ahead of all these rules.
+        let mut rules: Vec<_> = self.rulesets.iter().filter(|r| r.enabled).collect();
+        rules.sort_by_key(|r| r.action != "reject");
+        for rule in rules {
+            routes.push(if rule.action == "reject" {
+                json!({"rule_set":rule.name,"action":"reject"})
+            } else {
+                json!({"rule_set":rule.name,"action":"route","outbound":rule.action})
+            });
+            if matches!(rule.id.as_str(), BUILTIN_DOMESTIC_ID | BUILTIN_ADS_ID) {
+                dns.push(if rule.action == "reject" { json!({"rule_set":rule.name,"action":"reject"}) } else {
+                    json!({"rule_set":rule.name,"action":"route","server":if rule.action == "direct" {"dns-local"} else {"dns-remote"}})
+                });
+            }
+        }
+        profile.config["route"]["rules"] = json!(routes);
+        profile.config["dns"]["rules"] = json!(dns);
+        Ok(profile)
+    }
+
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "不支持的数据格式版本 {}", self.schema);
+        ensure!(
+            self.schema == 2,
+            "不支持的数据格式版本 {}；本版本仅支持全新订阅数据，原文件未更改",
+            self.schema
+        );
         self.settings.validate()?;
         let mut ids = HashSet::new();
         for (id, name) in self
-            .profiles
+            .subscriptions
             .iter()
             .map(|v| (&v.id, &v.name))
-            .chain(self.subscriptions.iter().map(|v| (&v.id, &v.name)))
             .chain(self.rulesets.iter().map(|v| (&v.id, &v.name)))
         {
             ensure!(uuid::Uuid::parse_str(id).is_ok(), "无效的资源 ID");
             ensure!(ids.insert(id), "资源 ID 重复");
             ensure!(!name.trim().is_empty(), "名称不能为空");
         }
-        for p in &self.profiles {
-            ensure!(p.config.is_object(), "配置必须是 JSON 对象");
-            for id in &p.subscriptions {
-                ensure!(
-                    self.subscriptions.iter().any(|s| &s.id == id),
-                    "配置「{}」引用的订阅不存在",
-                    p.name
-                )
-            }
-            for id in &p.rulesets {
-                ensure!(
-                    self.rulesets.iter().any(|s| &s.id == id),
-                    "配置「{}」引用的规则集不存在",
-                    p.name
-                )
-            }
-        }
+        ensure!(
+            self.settings.active_subscription.is_empty()
+                || self
+                    .subscriptions
+                    .iter()
+                    .any(|s| s.id == self.settings.active_subscription),
+            "当前订阅不存在"
+        );
         for s in &self.subscriptions {
             ensure!(
                 (1..=168).contains(&s.update_interval_hours),
                 "订阅更新间隔必须在 1 到 168 小时之间"
             );
             validate_nodes(&s.nodes)?;
+            ensure!(
+                s.selected_node.as_ref().is_none_or(|tag| s
+                    .nodes
+                    .iter()
+                    .any(|n| n["tag"] == *tag && is_connection_node(n))),
+                "订阅所选节点不存在"
+            );
         }
+        let mut rule_tags = HashSet::new();
         for rule in &self.rulesets {
+            ensure!(rule_tags.insert(&rule.name), "规则集名称重复");
+            ensure!(
+                matches!(rule.action.as_str(), "direct" | "proxy" | "reject"),
+                "规则集动作无效"
+            );
             ensure!(
                 (1..=168).contains(&rule.update_interval_hours),
                 "规则集更新间隔须在 1 到 168 小时之间"
@@ -504,6 +519,33 @@ pub struct Store {
     pub state: State,
 }
 impl Store {
+    /// Explicit user action only: archive the entire old state without parsing
+    /// or migrating it. Restore it if creating the new state fails.
+    pub fn reset(dir: Option<PathBuf>) -> Result<(Self, Option<PathBuf>)> {
+        let dir = match dir {
+            Some(dir) => dir,
+            None => config_home()?.join("AeroBoxForLinux"),
+        };
+        fs::create_dir_all(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        let path = dir.join("state.json");
+        let backup = path
+            .exists()
+            .then(|| dir.join(format!("state.backup-{}-{}.json", now(), id())));
+        if let Some(backup) = &backup {
+            fs::rename(&path, backup)?;
+        }
+        match Self::open(Some(dir)) {
+            Ok(store) => Ok((store, backup)),
+            Err(error) => {
+                if let Some(backup) = backup {
+                    fs::rename(backup, path).context("创建新数据失败且无法恢复旧文件")?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn open(dir: Option<PathBuf>) -> Result<Self> {
         let dir = match dir {
             Some(p) => p,
@@ -514,8 +556,13 @@ impl Store {
         let path = dir.join("state.json");
         let state = if path.exists() {
             let bytes = fs::read(&path)?;
-            serde_json::from_slice::<State>(&bytes)
-                .context("无法读取 AeroBox 数据；原文件未更改")?
+            let value: Value =
+                serde_json::from_slice(&bytes).context("无法读取 AeroBox 数据；原文件未更改")?;
+            ensure!(
+                value["schema"] == 2 && value.get("profiles").is_none(),
+                "不支持旧版数据结构；请使用新的数据目录，原文件未更改"
+            );
+            serde_json::from_value::<State>(value).context("无法读取 AeroBox 数据；原文件未更改")?
         } else {
             State::default()
         };
@@ -529,19 +576,7 @@ impl Store {
     pub fn update(&mut self, edit: impl FnOnce(&mut State) -> Result<()>) -> Result<()> {
         let mut next = self.state.clone();
         edit(&mut next)?;
-        for profile in &mut next.profiles {
-            if profile.selected_node.as_ref().is_some_and(|selected| {
-                !profile.subscriptions.contains(&selected.subscription_id)
-                    || !next.subscriptions.iter().any(|sub| {
-                        sub.id == selected.subscription_id
-                            && sub.nodes.iter().any(|node| {
-                                node["tag"] == selected.node_tag && is_connection_node(node)
-                            })
-                    })
-            }) {
-                profile.selected_node = None;
-            }
-        }
+        next.normalize_selection();
         next.validate()?;
         atomic_write(
             &self.dir.join("state.json"),
@@ -578,33 +613,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 }
 pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
     match kind {
-        "profiles" => {
-            state.profiles.retain(|p| p.id != id);
-            if state.settings.active_profile == id {
-                state.settings.active_profile = state
-                    .profiles
-                    .first()
-                    .map(|p| p.id.clone())
-                    .unwrap_or_default()
-            }
-        }
         "subscriptions" => {
             state.subscriptions.retain(|s| s.id != id);
-            for p in &mut state.profiles {
-                p.subscriptions.retain(|s| s != id);
-                if p.selected_node
-                    .as_ref()
-                    .is_some_and(|selected| selected.subscription_id == id)
-                {
-                    p.selected_node = None;
-                }
-            }
+            state.normalize_selection();
         }
         "rulesets" => {
             state.rulesets.retain(|s| s.id != id);
-            for p in &mut state.profiles {
-                p.rulesets.retain(|s| s != id)
-            }
         }
         _ => bail!("未知资源类型"),
     };
@@ -615,114 +629,116 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn error_is_the_log_default_without_overwriting_saved_choices() {
-        let fresh = State::default();
-        assert_eq!(fresh.settings.log_level, "error");
-        assert!(
-            fresh
-                .profiles
-                .iter()
-                .all(|profile| profile.config["log"]["level"] == "error")
+    fn explicit_reset_archives_legacy_state_without_touching_the_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = br#"{"schema":1,"profiles":[]}"#;
+        fs::write(dir.path().join("state.json"), legacy).unwrap();
+        fs::create_dir(dir.path().join("core")).unwrap();
+        fs::write(dir.path().join("core/sing-box"), b"core fixture").unwrap();
+        let (store, backup) = Store::reset(Some(dir.path().into())).unwrap();
+        assert_eq!(store.state.schema, 2);
+        assert!(store.state.subscriptions.is_empty());
+        assert_eq!(fs::read(backup.unwrap()).unwrap(), legacy);
+        assert_eq!(
+            fs::read(dir.path().join("core/sing-box")).unwrap(),
+            b"core fixture"
         );
+    }
+    #[test]
+    fn defaults_are_single_subscription_and_enable_desktop_proxy() {
+        let state = State::default();
+        assert_eq!(state.schema, 2);
+        assert!(state.settings.system_proxy);
+        assert_eq!(state.settings.log_level, "error");
+        assert!(!state.settings.hardware_acceleration);
+        assert!(state.current_profile().is_err());
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(value.get("profiles").is_none());
+        assert!(value["settings"].get("active_profile").is_none());
         for level in ["info", "debug", "warn", "error"] {
-            let saved: Settings = serde_json::from_value(json!({"log_level": level})).unwrap();
+            let saved: Settings = serde_json::from_value(
+                json!({"log_level":level,"hardware_acceleration":true,"system_proxy":false}),
+            )
+            .unwrap();
             assert_eq!(saved.log_level, level);
+            assert!(saved.hardware_acceleration);
+            assert!(!saved.system_proxy);
         }
     }
     #[test]
-    fn renderer_preference_preserves_an_explicit_acceleration_choice() {
-        assert!(!Settings::default().hardware_acceleration);
-        let settings: Settings =
-            serde_json::from_value(json!({"hardware_acceleration": true})).unwrap();
-        assert!(settings.hardware_acceleration);
-        let restored: Settings =
-            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
-        assert!(restored.hardware_acceleration);
+    fn android_rule_sources_have_real_binary_seeds() {
+        let state = State::default();
+        assert_eq!(state.rulesets.len(), 3);
+        for rule in &state.rulesets {
+            assert!(rule.binary && rule.is_remote());
+            assert!(rule.source.contains("/SagerNet/sing-"));
+            let seed = builtin_seed(&rule.id).unwrap();
+            assert!(seed.starts_with(b"SRS") && seed.len() > 1000);
+        }
     }
     #[test]
-    fn adding_presets_preserves_edits_and_reconnects_renamed_rules() {
-        let mut state = State::default();
-        let active = state.settings.active_profile.clone();
-        state.profiles[0].name = "我的配置".into();
-        rename_rule_references(
-            &mut state,
-            BUILTIN_DOMESTIC_ID,
-            "中国大陆域名",
-            "自定义国内域名",
-        );
-        state.rulesets[1].name = "自定义国内域名".into();
-        state.rulesets[1].content["rules"] = json!([{"domain_suffix":"example.cn"}]);
-        let before = pretty(&state);
-        assert_eq!(add_builtin_resources(&mut state).unwrap(), 0);
-        assert_eq!(pretty(&state), before);
-        state.profiles.clear();
-        state.settings.active_profile.clear();
-        assert_eq!(add_builtin_resources(&mut state).unwrap(), 3);
-        assert_eq!(state.settings.active_profile, active);
-        assert_eq!(
-            state.profiles[0].config["route"]["rules"][0]["rule_set"][0],
-            "自定义国内域名"
-        );
-        assert_eq!(
-            state.rulesets[1].content["rules"][0]["domain_suffix"],
-            "example.cn"
-        );
-        state.validate().unwrap();
-    }
-    #[test]
-    fn online_builtin_rules_preserve_custom_lists_and_profile_selection() {
-        let mut state = State::default();
-        let profiles = pretty(&state.profiles);
-        let active = state.settings.active_profile.clone();
-        state.rulesets[0].source.clear();
-        state.rulesets[0].name = "我的局域网".into();
-        let seed = state.rulesets[0].content.clone();
-        let custom = RuleSet {
-            name: "私人规则".into(),
-            ..RuleSet::default()
-        };
-        let custom_id = custom.id.clone();
-        state.rulesets.push(custom);
-        use_online_builtin_rules(&mut state).unwrap();
-        assert!(state.rulesets[0].is_remote());
-        assert_eq!(state.rulesets[0].name, "我的局域网");
-        assert_eq!(state.rulesets[0].content, seed);
-        assert!(
-            !state
-                .rulesets
-                .iter()
-                .find(|r| r.id == custom_id)
-                .unwrap()
-                .is_remote()
-        );
-        assert_eq!(profiles, pretty(&state.profiles));
-        assert_eq!(active, state.settings.active_profile);
-        state.rulesets[0].update_interval_hours = 0;
-        assert!(state.validate().is_err());
+    fn legacy_and_corrupt_data_are_rejected_without_overwriting() {
+        for original in [
+            br#"{"schema":1,"settings":{},"profiles":[],"subscriptions":[],"rulesets":[]}"#
+                .as_slice(),
+            b"not-json",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.json");
+            fs::write(&path, original).unwrap();
+            assert!(Store::open(Some(dir.path().into())).is_err());
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
     }
     #[test]
     fn failed_update_leaves_state_and_disk_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(Some(dir.path().into())).unwrap();
-        store.update(|_| Ok(())).unwrap();
-        let old = fs::read(dir.path().join("state.json")).unwrap();
+        let original = fs::read(dir.path().join("state.json")).unwrap();
         assert!(
             store
                 .update(|s| {
-                    s.profiles[0].name.clear();
+                    s.settings.mixed_port = s.settings.api_port;
                     Ok(())
                 })
                 .is_err()
         );
-        assert_eq!(old, fs::read(dir.path().join("state.json")).unwrap());
-        assert_eq!(store.state.profiles[0].name, "智能分流");
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), original);
     }
     #[test]
-    fn corrupt_state_is_not_replaced() {
+    fn removed_nodes_fall_back_within_subscription_and_deletion_selects_remaining() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        fs::write(&path, b"broken").unwrap();
-        assert!(Store::open(Some(dir.path().into())).is_err());
-        assert_eq!(fs::read(path).unwrap(), b"broken");
+        let mut store = Store::open(Some(dir.path().into())).unwrap();
+        let sub = Subscription {
+            nodes: vec![
+                json!({"type":"socks","tag":"first","server":"localhost","server_port":1080}),
+                json!({"type":"socks","tag":"second","server":"localhost","server_port":1081}),
+            ],
+            selected_node: Some("second".into()),
+            ..Subscription::default()
+        };
+        let id = sub.id.clone();
+        store
+            .update(|s| {
+                s.settings.active_subscription = id.clone();
+                s.subscriptions.push(sub);
+                Ok(())
+            })
+            .unwrap();
+        store
+            .update(|s| {
+                s.subscriptions[0].nodes.pop();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.state.subscriptions[0].selected_node.as_deref(),
+            Some("first")
+        );
+        store
+            .update(|s| remove_resource(s, "subscriptions", &id))
+            .unwrap();
+        assert!(store.state.settings.active_subscription.is_empty());
+        assert!(store.state.current_profile().is_err());
     }
 }

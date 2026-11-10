@@ -41,6 +41,49 @@ impl Ui {
             actions.append(button);
         }
         page.append(&actions);
+        let diagnose = gtk::Button::with_label("连接诊断");
+        diagnose.set_halign(gtk::Align::Start);
+        diagnose.set_widget_name("connection-diagnostics");
+        page.append(&diagnose);
+        let weak = Rc::downgrade(self);
+        diagnose.connect_clicked(move |button| {
+            if let Some(ui) = weak.upgrade() {
+                ui.button_task(
+                    button,
+                    "检测中…",
+                    |s| s.diagnose_connection(),
+                    |ui, result| {
+                        let report = match result {
+                            Ok(report) => report,
+                            Err(error) => format!("{error:#}"),
+                        };
+                        let executable = std::env::current_exe()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        let text = format!(
+                            "AeroBox {}\n程序：{}\n\n{}",
+                            option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+                            executable,
+                            report
+                        );
+                        let dialog = adw::MessageDialog::new(
+                            Some(&ui.window),
+                            Some("连接诊断"),
+                            Some(&text),
+                        );
+                        dialog.add_response("copy", "复制结果");
+                        dialog.add_response("close", "关闭");
+                        dialog.set_default_response(Some("close"));
+                        dialog.set_close_response("close");
+                        let clipboard = ui.window.clipboard();
+                        dialog.connect_response(Some("copy"), move |_, _| {
+                            clipboard.set_text(&text);
+                        });
+                        dialog.present();
+                    },
+                );
+            }
+        });
         let panel = Rc::new(CorePanel {
             version,
             path,
@@ -103,10 +146,7 @@ impl Ui {
                 ui.button_task(
                     button,
                     "检查中…",
-                    |s| {
-                        let profile = s.snapshot().settings.active_profile;
-                        s.check(&s.generate(&profile)?)
-                    },
+                    |s| s.check_current(),
                     |ui, result| match result {
                         Ok(()) => ui.notify("配置检查通过"),
                         Err(e) => ui.error("配置检查失败", format!("{e:#}")),

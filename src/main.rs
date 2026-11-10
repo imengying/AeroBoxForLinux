@@ -60,7 +60,19 @@ fn run() -> Result<gtk::glib::ExitCode> {
             bail!("界面测试需要空数据目录，已有数据未修改")
         }
     }
-    let store = model::Store::open(dir)?;
+    let store = match model::Store::open(dir.clone()) {
+        Ok(store) => store,
+        Err(error) if smoke.is_none() => {
+            if std::env::var_os("GSK_RENDERER").is_none() {
+                unsafe { std::env::set_var("GSK_RENDERER", "cairo") };
+            }
+            match ui::recover_store(dir, error)? {
+                Some(store) => store,
+                None => return Ok(gtk::glib::ExitCode::FAILURE),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     // A dashboard of text and cards does not need a GPU context by default.
     // Mesa's software GPU path can otherwise load LLVM and large render caches.
     // Configure this before any GTK or network worker exists; explicit user

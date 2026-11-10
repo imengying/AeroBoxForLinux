@@ -208,7 +208,7 @@ pub fn uri(input: &str) -> Result<Value> {
             if !q("plugin").is_empty() {
                 let p = q("plugin");
                 let (plugin, opts) = p.split_once(';').unwrap_or((&p, ""));
-                node["plugin"] = json!(plugin);
+                node["plugin"] = json!(supported_plugin(plugin)?);
                 node["plugin_opts"] = json!(opts)
             }
         }
@@ -289,6 +289,47 @@ fn validate_server(node: &Value) -> Result<()> {
     );
     Ok(())
 }
+
+fn supported_plugin(plugin: &str) -> Result<&str> {
+    match plugin {
+        "obfs" | "simple-obfs" | "obfs-local" => Ok("obfs-local"),
+        "v2ray-plugin" => Ok("v2ray-plugin"),
+        _ => bail!("此 Shadowsocks 插件不受支持（支持 obfs-local 和 v2ray-plugin）"),
+    }
+}
+
+fn plugin_options(value: &Value, plugin: &str) -> Result<String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.into());
+    }
+    let options = value
+        .as_object()
+        .context("Shadowsocks 插件参数须为文本或对象")?;
+    let mut output = Vec::new();
+    for (key, value) in options {
+        let key = if plugin == "obfs-local" {
+            match key.as_str() {
+                "mode" => "obfs",
+                "host" => "obfs-host",
+                other => other,
+            }
+        } else {
+            key.as_str()
+        };
+        ensure!(!key.contains([';', '=']), "插件参数名称无效");
+        match value {
+            Value::Bool(true) => output.push(key.to_owned()),
+            Value::Bool(false) | Value::Null => {}
+            Value::String(text) => {
+                ensure!(!text.contains(';'), "插件参数值不能包含分号");
+                output.push(format!("{key}={text}"));
+            }
+            Value::Number(number) => output.push(format!("{key}={number}")),
+            _ => bail!("插件参数须为文本、数字或开关"),
+        }
+    }
+    Ok(output.join(";"))
+}
 fn clash(v: &Value) -> Result<Value> {
     let typ = match v["type"].as_str().unwrap_or("") {
         "ss" => "shadowsocks",
@@ -329,8 +370,25 @@ fn clash(v: &Value) -> Result<Value> {
         }
     }
     if typ == "shadowsocks" {
-        n["method"] = v["cipher"].clone()
+        n["method"] = v["cipher"].clone();
+        if let Some(plugin) = v["plugin"].as_str().filter(|p| !p.is_empty()) {
+            let plugin = supported_plugin(plugin)?;
+            n["plugin"] = json!(plugin);
+            if let Some(options) = v.get("plugin-opts").or_else(|| v.get("plugin_opts")) {
+                n["plugin_opts"] = json!(plugin_options(options, plugin)?);
+            }
+        }
+        if let Some(uot) = v.get("udp-over-tcp").or_else(|| v.get("udp_over_tcp")) {
+            n["udp_over_tcp"] = if uot.is_boolean() {
+                json!({"enabled":uot,"version":v["udp-over-tcp-version"].as_u64().unwrap_or(2)})
+            } else {
+                uot.clone()
+            };
+        }
     };
+    if v["udp"] == false {
+        n["network"] = json!("tcp");
+    }
     if typ == "vmess" {
         n["security"] = json!(v["cipher"].as_str().unwrap_or("auto"))
     }
@@ -380,6 +438,33 @@ fn clash(v: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shadowsocks_clash_plugins_and_network_flags_survive_conversion() {
+        let source = json!({"proxies":[{"name":"fixture","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret","udp":false,"plugin":"obfs","plugin-opts":{"mode":"http","host":"example.com"},"udp-over-tcp":true,"udp-over-tcp-version":2}]});
+        let nodes = parse(&source.to_string()).unwrap();
+        assert_eq!(nodes[0]["method"], "aes-128-gcm");
+        assert_eq!(nodes[0]["password"], "fixture-secret");
+        assert_eq!(nodes[0]["plugin"], "obfs-local");
+        assert_eq!(nodes[0]["plugin_opts"], "obfs-host=example.com;obfs=http");
+        assert_eq!(nodes[0]["network"], "tcp");
+        assert_eq!(
+            nodes[0]["udp_over_tcp"],
+            json!({"enabled":true,"version":2})
+        );
+        let mut second = source;
+        second["proxies"][0]["plugin"] = json!("v2ray-plugin");
+        second["proxies"][0]["plugin-opts"] =
+            json!({"mode":"websocket","tls":true,"mux":false,"host":"example.com"});
+        let converted = parse(&second.to_string()).unwrap();
+        assert_eq!(
+            converted[0]["plugin_opts"],
+            "host=example.com;mode=websocket;tls"
+        );
+        second["proxies"][0]["plugin"] = json!("unsupported");
+        let error = parse(&second.to_string()).unwrap_err().to_string();
+        assert!(error.contains("不受支持"));
+        assert!(!error.contains("fixture-secret"));
+    }
     #[test]
     fn import_links_and_local_content_keep_their_meaning() {
         for input in [

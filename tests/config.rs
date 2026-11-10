@@ -15,6 +15,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn setup(service: &Service) {
+    service
+        .update(|state| {
+            state.settings.system_proxy = false;
+            let sub = aerobox_for_linux::model::Subscription {
+                nodes: vec![
+                    json!({"type":"socks","tag":"fixture","server":"127.0.0.1","server_port":9}),
+                ],
+                ..Default::default()
+            };
+            state.settings.active_subscription = sub.id.clone();
+            state.subscriptions.push(sub);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
@@ -22,6 +39,7 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
     };
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
     let rules = TcpListener::bind("127.0.0.1:0").unwrap();
     let source = format!("http://{}/rules.json", rules.local_addr().unwrap());
     rules.set_nonblocking(true).unwrap();
@@ -47,7 +65,7 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
                     {
                         thread::sleep(Duration::from_millis(10));
                     }
-                    let body = r#"{"version":3,"rules":[{"domain_suffix":"ads.example"}]}"#;
+                    let body = r#"{"version":3,"rules":[{"ip_cidr":"127.0.0.1/32"}]}"#;
                     let _ = write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -61,6 +79,21 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
             }
         }
     });
+    let remote_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let remote_port = remote_listener.local_addr().unwrap().port();
+    drop(remote_listener);
+    let remote_config = dir.path().join("remote.json");
+    std::fs::write(&remote_config,serde_json::to_vec(&json!({"log":{"level":"error"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":remote_port}],"outbounds":[{"type":"direct","tag":"direct"}]})).unwrap()).unwrap();
+    let _remote = CoreGuard(
+        Command::new(&binary)
+            .args(["run", "-c"])
+            .arg(&remote_config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    thread::sleep(Duration::from_millis(150));
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let api_address = api.local_addr().unwrap();
     let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -69,32 +102,35 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
     service
         .update(|state| {
             state.settings.core_path = binary;
-            state.settings.block_ads = true;
+            state
+                .rulesets
+                .iter_mut()
+                .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
+                .unwrap()
+                .enabled = true;
             state.settings.bypass_lan = false;
             state.settings.sniff = false;
             for rule in &mut state.rulesets {
                 rule.source.clear();
+                rule.binary = false;
+                rule.binary = false;
             }
             let ads = state
                 .rulesets
                 .iter_mut()
                 .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
                 .unwrap();
+            ads.id = aerobox_for_linux::model::id();
             ads.source = source;
             ads.content = json!({"version":3,"rules":[]});
             ads.update_interval_hours = 6;
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
-            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
-        state.profiles[0].config["dns"]["servers"] = json!([{"type":"hosts","tag":"test-hosts","predefined":{"ads.example":"127.0.0.1"}}]);
-        state.profiles[0].config["dns"]["final"] = json!("test-hosts");
-        state.profiles[0].config["route"]["default_domain_resolver"] = json!("test-hosts");
+            state.settings.mixed_port = proxy_address.port();
+            state.settings.api_port = api_address.port();
+            state.subscriptions[0].nodes[0]["server_port"] = json!(remote_port);
             Ok(())
         })
         .unwrap();
-    let generated = service
-        .generate(&service.snapshot().settings.active_profile)
-        .unwrap();
+    let generated = service.generate_current().unwrap();
     let remote = generated["route"]["rule_set"]
         .as_array()
         .unwrap()
@@ -127,7 +163,7 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
         .build()
         .unwrap();
     let url = format!(
-        "http://ads.example:{}/policy",
+        "http://127.0.0.1:{}/policy",
         origin.local_addr().unwrap().port()
     );
     let _ = client.get(&url).send();
@@ -192,7 +228,7 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
             .snapshot()
             .rulesets
             .iter()
-            .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
+            .find(|r| r.name == "广告拦截")
             .unwrap()
             .updated,
         0
@@ -201,52 +237,55 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
 }
 
 #[test]
-fn builtins_generate_with_editable_rules_and_leave_source_intact() {
+fn android_builtins_have_binary_seeds_and_only_enabled_policies_are_generated() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
-    service
-        .update(|state| {
-            state.settings.block_ads = true;
-            state.rulesets[2].name = "自定义广告".into();
-            state.rulesets[2].content["rules"] = json!([{"domain_suffix":"ads.example"}]);
-            Ok(())
-        })
-        .unwrap();
-    let state = service.snapshot();
-    let generated = service.generate(&state.settings.active_profile).unwrap();
+    setup(&service);
+    let first = service.generate_current().unwrap();
+    assert_eq!(first["route"]["rule_set"].as_array().unwrap().len(), 2);
+    let ads = aerobox_for_linux::model::BUILTIN_ADS_ID;
+    service.apply_ruleset_enabled(ads, true).unwrap();
+    let generated = service.generate_current().unwrap();
+    assert_eq!(generated["route"]["rule_set"].as_array().unwrap().len(), 3);
+    for rule in generated["route"]["rule_set"].as_array().unwrap() {
+        assert_eq!(rule["format"], "binary");
+        assert_eq!(rule["type"], "remote");
+        assert_eq!(rule["update_interval"], "24h");
+        let path = std::path::Path::new(rule["initial_path"].as_str().unwrap());
+        assert!(std::fs::read(path).unwrap().starts_with(b"SRS"));
+    }
+    let dns = &generated["dns"]["rules"];
+    assert!(
+        !dns.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["rule_set"] == "中国大陆 IP")
+    );
+    assert!(
+        dns.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["rule_set"] == "广告拦截" && r["action"] == "reject")
+    );
+    let mut custom = aerobox_for_linux::model::RuleSet {
+        name: "自定义".into(),
+        action: "proxy".into(),
+        content: json!({"version":3,"rules":[{"domain_suffix":"example.net"}]}),
+        ..Default::default()
+    };
+    service.save_ruleset(custom.clone()).unwrap();
+    let generated = service.generate_current().unwrap();
     assert!(
         generated["route"]["rules"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|r| r["rule_set"] == "自定义广告" && r["action"] == "reject")
+            .any(|r| r["rule_set"] == "自定义" && r["outbound"] == "proxy")
     );
-    assert!(
-        generated["dns"]["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["rule_set"] == "自定义广告" && r["action"] == "reject")
-    );
-    let ad_file = generated["route"]["rule_set"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["tag"] == "自定义广告")
-        .unwrap()["initial_path"]
-        .as_str()
-        .unwrap();
-    let content: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(ad_file).unwrap()).unwrap();
-    assert_eq!(content["rules"][0]["domain_suffix"], "ads.example");
-    assert_eq!(
-        service.snapshot().profiles[0].config,
-        state.profiles[0].config
-    );
+    custom.action = "unsupported".into();
+    assert!(service.save_ruleset(custom).is_err());
 }
 
-/// Parsing every generated combination through the real core catches schema
-/// mistakes. This test never starts TUN or modifies host routes.
 #[test]
 fn real_core_accepts_builtin_modes_and_network_controls() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
@@ -254,8 +293,9 @@ fn real_core_accepts_builtin_modes_and_network_controls() {
     };
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
     let mut state = service.snapshot();
-    let original: Vec<_> = state.profiles.iter().map(|p| p.config.clone()).collect();
+    let original = state.subscriptions[0].nodes.clone();
     for mode in ["rule", "global", "direct"] {
         for ipv6 in [false, true] {
             for stack in [None, Some("system"), Some("gvisor"), Some("mixed")] {
@@ -265,14 +305,15 @@ fn real_core_accepts_builtin_modes_and_network_controls() {
                     tun_enabled: stack.is_some(),
                     tun_stack: stack.unwrap_or("system").into(),
                     allow_lan: true,
-                    block_ads: true,
                     dns_cache: false,
                     sniff: false,
                     dns_hijack: false,
+                    active_subscription: state.settings.active_subscription.clone(),
                     ..Settings::default()
                 };
-                for profile in &state.profiles {
-                    let config = service.generate_profile(&state, profile).unwrap();
+                {
+                    let profile = state.current_profile().unwrap();
+                    let config = service.generate_profile(&state, &profile).unwrap();
                     let path = dir.path().join("check.json");
                     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
                     let output = std::process::Command::new(&binary)
@@ -290,14 +331,7 @@ fn real_core_accepts_builtin_modes_and_network_controls() {
             }
         }
     }
-    assert_eq!(
-        state
-            .profiles
-            .iter()
-            .map(|p| p.config.clone())
-            .collect::<Vec<_>>(),
-        original
-    );
+    assert_eq!(state.subscriptions[0].nodes, original);
 }
 
 struct CoreGuard(Child);
@@ -315,11 +349,18 @@ fn real_core_dns_modes_override_ads_and_flush_cached_answers() {
     };
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
     let mut state = service.snapshot();
-    state.settings.block_ads = true;
+    state
+        .rulesets
+        .iter_mut()
+        .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
+        .unwrap()
+        .enabled = true;
     state.settings.ipv6 = false;
     for rule in &mut state.rulesets {
         rule.source.clear();
+        rule.binary = false;
     }
     state
         .rulesets
@@ -328,7 +369,7 @@ fn real_core_dns_modes_override_ads_and_flush_cached_answers() {
         .unwrap()
         .content = json!({"version":3,"rules":[{"domain_suffix":"ads.example"}]});
     let mut config = service
-        .generate_profile(&state, &state.profiles[0])
+        .generate_profile(&state, &state.current_profile().unwrap())
         .unwrap();
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let api_address = api.local_addr().unwrap();
@@ -456,5 +497,62 @@ fn real_core_dns_modes_override_ads_and_flush_cached_answers() {
             &[0, 0],
             "disabled IPv6 must not leak AAAA answers in {mode}"
         );
+    }
+}
+
+#[test]
+fn a_new_remote_binary_rule_does_not_require_a_manual_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
+    service
+        .save_ruleset(aerobox_for_linux::model::RuleSet {
+            name: "自建在线规则".into(),
+            binary: true,
+            source: "http://127.0.0.1:9/rules.srs".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let config = service.generate_current().unwrap();
+    let remote = config["route"]["rule_set"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["tag"] == "自建在线规则")
+        .unwrap();
+    assert_eq!(remote["type"], "remote");
+    assert!(remote.get("initial_path").is_none());
+}
+
+#[test]
+fn real_core_accepts_converted_shadowsocks_sip003_plugins() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    service
+        .update(|s| {
+            s.settings.system_proxy = false;
+            s.settings.core_path = binary;
+            Ok(())
+        })
+        .unwrap();
+    for (plugin, options) in [
+        ("obfs", json!({"mode":"http","host":"example.com"})),
+        (
+            "v2ray-plugin",
+            json!({"mode":"websocket","host":"example.com","tls":true}),
+        ),
+    ] {
+        let source = json!({"proxies":[{"name":"fixture","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret","plugin":plugin,"plugin-opts":options}]});
+        let nodes = aerobox_for_linux::subscription::parse(&source.to_string()).unwrap();
+        service
+            .import_subscription(aerobox_for_linux::model::Subscription {
+                nodes,
+                ..Default::default()
+            })
+            .unwrap();
+        service.check_current().unwrap();
     }
 }

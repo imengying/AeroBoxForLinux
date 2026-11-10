@@ -25,12 +25,6 @@
 .dark .surface-card { background: #242830; border-color: #363c47; box-shadow: none; }
 .metric-value { font-size: 1.5em; font-feature-settings: "tnum"; font-weight: normal; }
 .metric-icon { color: #6888b4; }
-.pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: alpha(@window_fg_color, .78); font-size: 0.95em; font-weight: normal; }
-.dark .pill { background: #363c47; color: alpha(@window_fg_color, .78); }
-.pill.active { background: #e1f3eb; color: #288263; }
-.dark .pill.active { background: #1f433b; color: #7bd3b1; }
-.pill.accent { background: #e5eeff; color: #2878d7; }
-.dark .pill.accent { background: #263c5c; color: #a4c8ff; }
 .primary-action { border-radius: 12px; padding: 10px 18px; font-weight: 600; }
 .compact-action { border-radius: 8px; min-height: 30px; }
 .row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; min-width: 42px; min-height: 42px; }
@@ -53,7 +47,12 @@
 .node-line { padding: 12px 16px; min-height: 28px; }
 .node-check { color: @accent_color; }
 .node-delay { font-feature-settings: "tnum"; }
-.node-subscription { border-radius: 10px; min-height: 34px; }
+.subscriptions-list { background: transparent; }
+.subscriptions-list row { padding: 0; margin: 0 0 12px; border-radius: 16px; background: @view_bg_color; border: 1px solid alpha(@window_fg_color, .12); }
+.subscriptions-list row:hover { background: mix(@view_bg_color, @accent_bg_color, .04); }
+.subscriptions-list row.subscription-selected { background: #e5efff; border-color: #7da9e3; }
+.dark .subscriptions-list row.subscription-selected { background: #263b58; border-color: #527faf; }
+
 .log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
 .editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 8px 16px; border-bottom: 1px solid alpha(@borders,.5); }

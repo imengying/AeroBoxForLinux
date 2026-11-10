@@ -1,6 +1,6 @@
 use aerobox_for_linux::{
     engine::Service,
-    model::{self, NodeSelection, Profile, RuleSet, Settings, Store, Subscription},
+    model::{self, RuleSet, Settings, Store, Subscription},
 };
 use serde_json::json;
 use std::{
@@ -14,156 +14,203 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
 fn service() -> (tempfile::TempDir, Arc<Service>) {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(Some(dir.path().to_owned())).unwrap();
-    // Engine tests use loopback fixtures, never fetch the public builtin lists.
+    let mut store = Store::open(Some(dir.path().into())).unwrap();
     store
         .update(|state| {
-            for rule in &mut state.rulesets {
-                rule.source.clear();
-            }
+            state.settings.system_proxy = false;
+            state.settings.mixed_port = free_port();
+            state.settings.api_port = free_port();
+            state.settings.bypass_lan = false;
+            state.settings.sniff = false;
+            state.rulesets.clear();
             Ok(())
         })
         .unwrap();
     (dir, Service::new(store))
 }
-#[test]
-fn native_generation_resolves_resources_without_mutating_source() {
-    let (_dir, s) = service();
+fn dummy_subscription(service: &Service) -> String {
     let sub = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"node","server":"localhost","server_port":1080})],
+        nodes: vec![json!({"type":"socks","tag":"fixture","server":"127.0.0.1","server_port":9})],
         ..Subscription::default()
     };
-    let rule = RuleSet::default();
-    let mut p = Profile::new("test");
-    p.subscriptions.push(sub.id.clone());
-    p.rulesets.push(rule.id.clone());
-    let id = p.id.clone();
-    s.update(|state| {
-        state.subscriptions.push(sub);
-        state.rulesets.push(rule);
-        state.profiles.push(p);
-        Ok(())
-    })
-    .unwrap();
-    let result = s.generate(&id).unwrap();
-    assert_eq!(result["outbounds"][0]["outbounds"], json!(["node"]));
-    assert_eq!(result["log"]["level"], "error");
+    let id = sub.id.clone();
+    service.import_subscription(sub).unwrap();
+    id
+}
+struct FixtureProcess(std::process::Child);
+impl Drop for FixtureProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn controlled_node(binary: &str, address: &str) -> (tempfile::TempDir, FixtureProcess, u16) {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let config = json!({"log":{"level":"error"},"dns":{"servers":[{"type":"hosts","tag":"fixture-dns","predefined":{"choice.example":address,"aerobox.proxy.test":address}}],"final":"fixture-dns"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":port}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"default_domain_resolver":"fixture-dns","final":"direct"}});
+    let path = dir.path().join("core.json");
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut child = FixtureProcess(
+        Command::new(binary)
+            .args(["run", "-c"])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline && child.0.try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(10));
+    }
+    (dir, child, port)
+}
+
+fn local_tls_probe(dir: &std::path::Path, binary: &str) -> (String, u16, FixtureProcess) {
+    use std::io::BufRead;
+    let certificate = dir.join("test-ca.pem");
+    let key = dir.join("test-key.pem");
     assert!(
-        result["route"]["rule_set"][0]["path"]
-            .as_str()
+        Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1,DNS:aerobox.proxy.test",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-keyout"
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&certificate)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
             .unwrap()
-            .ends_with(".json")
+            .success()
     );
-    assert_eq!(
-        s.snapshot().profiles.last().unwrap().config["log"]["level"],
-        "error"
+    let code = r#"import http.server,ssl,sys,time
+class Handler(http.server.BaseHTTPRequestHandler):
+ def do_HEAD(self):
+  time.sleep(0.01);self.send_response(204);self.end_headers()
+ def do_GET(self):
+  body=b'AEROBOX_HTTPS_CHAIN_OK';self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+ def log_message(self,*args): pass
+server=http.server.HTTPServer(('127.0.0.1',0),Handler)
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(sys.argv[1],sys.argv[2])
+server.socket=context.wrap_socket(server.socket,server_side=True)
+print(server.server_port,flush=True);server.serve_forever()
+"#;
+    let mut process = FixtureProcess(
+        Command::new("python3")
+            .arg("-c")
+            .arg(code)
+            .arg(&certificate)
+            .arg(key)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
     );
-}
-#[test]
-fn duplicate_node_names_are_disambiguated_without_changing_subscriptions() {
-    let (_d, s) = service();
-    s.update(|state| {
-        let sub = Subscription {
-            nodes: vec![json!({"type":"direct","tag":"direct"})],
-            ..Subscription::default()
-        };
-        state.profiles[0].subscriptions.push(sub.id.clone());
-        state.subscriptions.push(sub);
-        Ok(())
-    })
-    .unwrap();
-    let before = s.snapshot();
-    let generated = s.generate(&before.settings.active_profile).unwrap();
-    let tags: Vec<_> = generated["outbounds"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|node| node["tag"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        tags.len(),
-        tags.iter().collect::<std::collections::HashSet<_>>().len()
-    );
-    assert_eq!(s.snapshot().subscriptions[0].nodes[0]["tag"], "direct");
-    assert_eq!(
-        s.generate(&before.settings.active_profile).unwrap(),
-        generated
-    );
-}
-
-#[test]
-fn duplicate_subscription_groups_rewrite_their_own_member_default_and_detour_tags() {
-    let (_dir, service) = service();
-    let original = vec![
-        json!({"type":"selector","tag":"proxy","outbounds":["direct","node"],"default":"direct"}),
-        json!({"type":"direct","tag":"direct"}),
-        json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080,"detour":"direct"}),
-        json!({"type":"urltest","tag":"auto","outbounds":["node"]}),
-    ];
-    let first = Subscription {
-        nodes: original.clone(),
-        ..Subscription::default()
-    };
-    let second = Subscription {
-        nodes: original.clone(),
-        ..Subscription::default()
-    };
-    service
-        .update(|state| {
-            state.profiles[0].subscriptions = vec![first.id.clone(), second.id.clone()];
-            state.subscriptions = vec![first, second];
-            Ok(())
-        })
+    let mut port = String::new();
+    std::io::BufReader::new(process.0.stdout.take().unwrap())
+        .read_line(&mut port)
         .unwrap();
-    let state = service.snapshot();
-    let generated = service.generate(&state.settings.active_profile).unwrap();
-    let outbounds = generated["outbounds"].as_array().unwrap();
-    for (index, sub) in state.subscriptions.iter().enumerate() {
-        let suffix = &sub.id[..8];
-        let proxy = format!("proxy · {suffix}");
-        let direct = format!("direct · {suffix}");
-        let node = if index == 0 {
-            "node".into()
-        } else {
-            format!("node · {suffix}")
-        };
-        let auto = if index == 0 {
-            "auto".into()
-        } else {
-            format!("auto · {suffix}")
-        };
-        let group = outbounds.iter().find(|item| item["tag"] == proxy).unwrap();
-        assert_eq!(group["outbounds"], json!([direct, node]));
-        assert_eq!(group["default"], direct);
-        assert_eq!(
-            outbounds.iter().find(|item| item["tag"] == node).unwrap()["detour"],
-            direct
-        );
-        assert_eq!(
-            outbounds.iter().find(|item| item["tag"] == auto).unwrap()["outbounds"],
-            json!([node])
-        );
-        assert_eq!(service.snapshot().subscriptions[index].nodes, original);
-    }
-    if let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") {
-        service
-            .update(|state| {
-                state.settings.core_path = binary;
-                Ok(())
-            })
-            .unwrap();
-        service.check(&generated).unwrap();
-    }
+    let wrapper = dir.join("test-core");
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexport SSL_CERT_FILE={}\nexec {} \"$@\"\n",
+            quote(&certificate.to_string_lossy()),
+            quote(binary)
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    (
+        wrapper.to_string_lossy().into_owned(),
+        port.trim().parse().unwrap(),
+        process,
+    )
 }
 
+fn open_echo_tunnel(proxy: std::net::SocketAddr) -> (TcpStream, thread::JoinHandle<()>) {
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = origin.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = origin.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0];
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => stream.write_all(&byte).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("origin echo: {error}"),
+            }
+        }
+    });
+    let mut stream = TcpStream::connect(proxy).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        stream,
+        "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+        response.push(byte[0]);
+        assert!(response.len() < 4096);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+    echo_byte(&mut stream);
+    (stream, worker)
+}
+fn echo_byte(stream: &mut TcpStream) {
+    stream.write_all(b"q").unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, *b"q");
+}
+fn assert_tunnel_closed(mut stream: TcpStream, worker: thread::JoinHandle<()>) {
+    match stream.read(&mut [0; 1]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("old connection was not closed: {other:?}"),
+    }
+    worker.join().unwrap();
+}
 #[test]
 fn failed_subscription_downloads_do_not_expose_url_credentials_in_errors_or_logs() {
     let (_dir, service) = service();
@@ -187,6 +234,7 @@ fn failed_subscription_downloads_do_not_expose_url_credentials_in_errors_or_logs
         assert!(!output.contains("private-password"));
     }
 }
+
 #[test]
 fn subscription_updates_preserve_all_original_node_names() {
     let (_d, s) = service();
@@ -282,12 +330,11 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
     assert_eq!(state.subscriptions.len(), 1);
     assert_eq!(state.subscriptions[0].name, "Example");
     assert_eq!(state.subscriptions[0].update_interval_hours, 12);
-    assert!(
-        state
-            .profiles
-            .iter()
-            .all(|profile| profile.subscriptions.is_empty())
+    assert_eq!(
+        state.settings.active_subscription,
+        state.subscriptions[0].id
     );
+    assert_eq!(state.subscriptions[0].selected_node.as_deref(), Some("one"));
     assert!(
         service
             .import_subscription(Subscription {
@@ -312,882 +359,6 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
             .is_err()
     );
     assert_eq!(service.snapshot().subscriptions.len(), 1);
-}
-
-#[test]
-fn importing_can_atomically_link_the_chosen_profile_without_selecting_another() {
-    let (_dir, service) = service();
-    let active = service.snapshot().settings.active_profile;
-    let other = service.snapshot().profiles[1].id.clone();
-    let sub = Subscription {
-        nodes: vec![
-            json!({"type":"direct","tag":"helper"}),
-            json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080}),
-        ],
-        ..Subscription::default()
-    };
-    let id = sub.id.clone();
-    service
-        .update(|state| {
-            state.profiles[1].config["outbounds"][0]["default"] = json!("direct");
-            Ok(())
-        })
-        .unwrap();
-    service
-        .import_subscription_for_profile(sub, Some(&other))
-        .unwrap();
-    let state = service.snapshot();
-    assert_eq!(state.settings.active_profile, active);
-    assert!(!state.profiles[0].subscriptions.contains(&id));
-    assert!(state.profiles[1].subscriptions.contains(&id));
-    let config = service.generate(&other).unwrap();
-    assert_eq!(config["outbounds"][0]["outbounds"], json!(["node"]));
-    assert_eq!(config["outbounds"][0]["default"], "node");
-    service
-        .update(|state| {
-            state.profiles[0].config["outbounds"] = json!([{"type":"direct","tag":"direct"}]);
-            Ok(())
-        })
-        .unwrap();
-    let before = serde_json::to_value(service.snapshot()).unwrap();
-    let sub = Subscription {
-        nodes: vec![json!({"type":"direct","tag":"direct"})],
-        ..Subscription::default()
-    };
-    assert!(
-        service
-            .import_subscription_for_profile(sub, Some(&active))
-            .is_err()
-    );
-    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), before);
-}
-
-#[test]
-fn linking_nodes_preserves_rule_default_until_an_explicit_choice() {
-    let (_dir, service) = service();
-    let sub = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080})],
-        ..Subscription::default()
-    };
-    let id = sub.id.clone();
-    let active = service.snapshot().settings.active_profile;
-    service
-        .import_subscription_for_profile(sub, Some(&active))
-        .unwrap();
-    for final_tag in ["direct", "custom"] {
-        let mut state = service.snapshot();
-        let profile = &mut state.profiles[0];
-        profile.config["outbounds"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"type":"selector","tag":"custom","outbounds":["direct"]}));
-        profile.config["route"]["final"] = json!(final_tag);
-        let config = service
-            .generate_profile(&state, &state.profiles[0])
-            .unwrap();
-        let mode_target = |mode: &str| {
-            config["route"]["rules"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|rule| rule["clash_mode"] == mode)
-                .unwrap()["outbound"]
-                .clone()
-        };
-        assert_eq!(config["route"]["final"], final_tag);
-        assert_eq!(mode_target("rule"), final_tag);
-        assert_eq!(mode_target("global"), "proxy");
-        let dns = config["dns"]["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|rule| rule["clash_mode"] == "global")
-            .unwrap()["server"]
-            .as_str()
-            .unwrap();
-        assert_eq!(
-            config["dns"]["servers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|server| server["tag"] == dns)
-                .unwrap()["detour"],
-            "proxy"
-        );
-        state.profiles[0].selected_node = Some(NodeSelection {
-            subscription_id: id.clone(),
-            node_tag: "node".into(),
-        });
-        let chosen = service
-            .generate_profile(&state, &state.profiles[0])
-            .unwrap();
-        assert_eq!(chosen["route"]["final"], "proxy");
-        assert_eq!(state.profiles[0].config["route"]["final"], final_tag);
-    }
-}
-
-#[test]
-fn offline_node_selection_filters_helpers_maps_duplicates_and_survives_reopening() {
-    let (dir, service) = service();
-    let helpers = vec![
-        json!({"type":"selector","tag":"group","outbounds":["same"]}),
-        json!({"type":"urltest","tag":"auto","outbounds":["same"]}),
-        json!({"type":"direct","tag":"direct"}),
-        json!({"type":"block","tag":"block"}),
-        json!({"type":"dns","tag":"dns"}),
-    ];
-    let mut first = Subscription {
-        nodes: helpers,
-        ..Subscription::default()
-    };
-    first
-        .nodes
-        .push(json!({"type":"socks","tag":"same","server":"127.0.0.1","server_port":10001}));
-    let second = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"same","server":"127.0.0.1","server_port":10002})],
-        ..Subscription::default()
-    };
-    let (a, b) = (first.id.clone(), second.id.clone());
-    service.import_subscription(first.clone()).unwrap();
-    service.import_subscription(second.clone()).unwrap();
-    assert_eq!(service.subscription_nodes(&a).unwrap().len(), 1);
-    let before = service.snapshot();
-    service.select_subscription_node(&a, "same").unwrap();
-    service.select_subscription_node(&b, "same").unwrap();
-    let profile = service.snapshot().profiles[0].clone();
-    assert_eq!(
-        profile.selected_node,
-        Some(NodeSelection {
-            subscription_id: b.clone(),
-            node_tag: "same".into()
-        })
-    );
-    let b_nodes = service.subscription_nodes(&b).unwrap();
-    assert!(b_nodes[0].selected && !b_nodes[0].available);
-    assert!(!service.subscription_nodes(&a).unwrap()[0].selected);
-    let config = service.generate(&profile.id).unwrap();
-    let actual = config["outbounds"][0]["default"].as_str().unwrap();
-    assert_eq!(
-        config["outbounds"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|n| n["tag"] == actual)
-            .unwrap()["server_port"],
-        10002
-    );
-    assert_eq!(
-        service.snapshot().settings.routing_mode,
-        before.settings.routing_mode
-    );
-    assert_eq!(
-        service.snapshot().settings.active_profile,
-        before.settings.active_profile
-    );
-    assert_eq!(service.snapshot().subscriptions[0].nodes, first.nodes);
-    assert_eq!(service.snapshot().subscriptions[1].nodes, second.nodes);
-    assert!(service.select_subscription_node(&a, "auto").is_err());
-    assert!(service.test_subscription_node(&b, "same").is_err());
-    let reopened = Service::new(Store::open(Some(dir.path().into())).unwrap());
-    assert!(reopened.subscription_nodes(&b).unwrap()[0].selected);
-    reopened.update(|state| {
-        state.subscriptions.iter_mut().find(|s|s.id==b).unwrap().nodes = vec![json!({"type":"socks","tag":"replacement","server":"127.0.0.1","server_port":10002})];Ok(())
-    }).unwrap();
-    assert!(reopened.snapshot().profiles[0].selected_node.is_none());
-    assert!(reopened.generate(&profile.id).is_ok());
-    reopened
-        .select_subscription_node(&b, "replacement")
-        .unwrap();
-    reopened
-        .update(|state| model::remove_resource(state, "subscriptions", &b))
-        .unwrap();
-    assert!(reopened.snapshot().profiles[0].selected_node.is_none());
-}
-#[test]
-fn process_stops_and_is_reaped() {
-    let (dir, s) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let api_worker = thread::spawn(move || {
-        for method in ["PATCH", "GET"] {
-            let (mut stream, _) = api.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = [0; 4096];
-            let size = stream.read(&mut request).unwrap();
-            assert!(
-                String::from_utf8_lossy(&request[..size])
-                    .starts_with(&format!("{method} /configs "))
-            );
-            let body = if method == "GET" {
-                r#"{"mode":"rule"}"#
-            } else {
-                ""
-            };
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-    });
-    let bin = dir.path().join("core-test");
-    fs::write(&bin,"#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\necho ready\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
-    s.update(|state| {
-        state.settings.core_path = bin.to_string_lossy().to_string();
-        state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-            json!(api_address.to_string());
-        Ok(())
-    })
-    .unwrap();
-    s.start()
-        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
-    api_worker.join().unwrap();
-    let pid = s.status().pid.unwrap();
-    assert!(s.start().is_err());
-    s.stop().unwrap();
-    assert!(!s.status().running);
-    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
-}
-#[test]
-fn real_core_roundtrip() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let (_d, s) = service();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    let proxy_socket = TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy_address = proxy_socket.local_addr().unwrap();
-    drop(proxy_socket);
-    s.update(|state| {
-        state.settings.core_path = binary;
-        state.profiles[0].config["inbounds"] = json!([{
-            "type":"mixed", "listen":"127.0.0.1", "listen_port":proxy_address.port()
-        }]);
-        state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-            json!(address.to_string());
-        Ok(())
-    })
-    .unwrap();
-    s.check_profile(&s.snapshot().settings.active_profile)
-        .unwrap();
-    let stopped_info = s.core_info().unwrap();
-    assert!(!stopped_info.status.running);
-    assert!(!stopped_info.version.is_empty());
-    assert_eq!(stopped_info.routing_mode, "rule");
-    s.restart()
-        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
-    let running_info = s.core_info().unwrap();
-    assert_eq!(running_info.binary, stopped_info.binary);
-    assert_eq!(running_info.version, stopped_info.version);
-    assert!(running_info.status.running);
-    assert!(s.memory_usage().total_bytes.is_some_and(|bytes| bytes > 0));
-    let until = Instant::now() + Duration::from_secs(5);
-    while s.api("GET", "/version", None).is_err() {
-        assert!(Instant::now() < until);
-        thread::sleep(Duration::from_millis(20))
-    }
-    let proxies = s.api("GET", "/proxies", None).unwrap();
-    assert!(proxies["proxies"].get("proxy").is_some());
-    let pid = s.status().pid;
-    for mode in ["direct", "global", "rule"] {
-        s.set_routing_mode(mode).unwrap();
-        assert_eq!(s.snapshot().settings.routing_mode, mode);
-        assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], mode);
-        assert_eq!(s.status().pid, pid, "mode change must not restart the core");
-    }
-    assert!(s.set_routing_mode("unsupported").is_err());
-    s.select_outbound("proxy", "direct").unwrap();
-    assert!(s.select_outbound("proxy", "missing").is_err());
-    assert!(s.select_outbound("direct", "direct").is_err());
-    let traffic = s.traffic().unwrap();
-    assert_eq!(
-        (traffic.download, traffic.upload, traffic.connections),
-        (0, 0, 0)
-    );
-
-    // A completed proxied request must still count towards session totals.
-    let server = TcpListener::bind("127.0.0.1:0").unwrap();
-    let server_address = server.local_addr().unwrap();
-    let worker = thread::spawn(move || {
-        let (mut stream, _) = server.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut request = [0; 4096];
-        assert!(stream.read(&mut request).unwrap() > 0);
-        let body = "x".repeat(16 * 1024);
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
-    });
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .proxy(reqwest::Proxy::http(format!("http://{proxy_address}")).unwrap())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    assert_eq!(
-        client
-            .get(format!("http://{server_address}/traffic-check"))
-            .send()
-            .unwrap()
-            .bytes()
-            .unwrap()
-            .len(),
-        16 * 1024
-    );
-    worker.join().unwrap();
-    let until = Instant::now() + Duration::from_secs(3);
-    loop {
-        let traffic = s.traffic().unwrap();
-        if traffic.download >= 16 * 1024 && traffic.upload > 0 && traffic.connections == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() < until,
-            "completed request missing from traffic totals: {traffic:?}"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    s.restart().unwrap();
-    assert!(s.status().running);
-    assert_ne!(s.status().pid, pid);
-    // The core cache contains "direct", but the next startup must obey the
-    // app's mode selection made while it is stopped.
-    s.set_routing_mode("direct").unwrap();
-    s.stop().unwrap();
-    s.set_routing_mode("global").unwrap();
-    s.start()
-        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
-    s.set_routing_mode("rule").unwrap();
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "rule");
-    s.set_routing_mode("global").unwrap();
-
-    // The current API state can differ from the saved preference. A failed
-    // change must restore that actual state, not the preference.
-    s.api("PATCH", "/configs", Some(&json!({"mode":"rule"})))
-        .unwrap();
-    assert_eq!(s.runtime_mode().unwrap(), "rule");
-    assert_eq!(s.snapshot().settings.routing_mode, "global");
-
-    // If persistence fails after the API accepted the new mode, restore the
-    // previous live mode and preserve the last successfully saved settings.
-    let state_path = s.dir().join("state.json");
-    let backup_path = s.dir().join("state.saved");
-    fs::rename(&state_path, &backup_path).unwrap();
-    fs::create_dir(&state_path).unwrap();
-    let save_result = s.set_routing_mode("direct");
-    fs::remove_dir(&state_path).unwrap();
-    fs::rename(&backup_path, &state_path).unwrap();
-    assert!(save_result.is_err());
-    assert_eq!(s.snapshot().settings.routing_mode, "global");
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "rule");
-    s.set_routing_mode("global").unwrap();
-
-    let pid = s.status().pid;
-    let mut settings = s.snapshot().settings;
-    settings.theme = "dark".into();
-    s.apply_settings(settings.clone()).unwrap();
-    assert_eq!(
-        s.status().pid,
-        pid,
-        "appearance changes must not restart the core"
-    );
-    settings.core_path = "/no/such/sing-box".into();
-    assert!(s.apply_settings(settings).is_err());
-    assert_eq!(
-        s.status().pid,
-        pid,
-        "failed preflight must leave the current core running"
-    );
-    assert_eq!(s.snapshot().settings.theme, "dark");
-
-    // A valid executable which fails only at startup exercises rollback after
-    // the old core has been stopped, not just validation errors.
-    let failing_core = s.dir().join("fails-on-start");
-    fs::write(
-        &failing_core,
-        "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&failing_core, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut settings = s.snapshot().settings;
-    let old_binary = settings.core_path.clone();
-    settings.core_path = failing_core.to_string_lossy().into_owned();
-    s.api("PATCH", "/configs", Some(&json!({"mode":"direct"})))
-        .unwrap();
-    assert!(s.apply_settings(settings).is_err());
-    assert!(s.status().running);
-    assert_eq!(s.snapshot().settings.core_path, old_binary);
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "direct");
-    s.stop().unwrap();
-
-    assert!(s.traffic().is_err());
-
-    let ruleset = RuleSet {
-        binary: true,
-        ..RuleSet::default()
-    };
-    let ruleset_id = ruleset.id.clone();
-    s.update(|state| {
-        state.rulesets.push(ruleset);
-        Ok(())
-    })
-    .unwrap();
-    assert!(s.rule_source(&ruleset_id).unwrap().contains("rules"));
-    s.save_rule_source(
-        &ruleset_id,
-        r#"{"version":3,"rules":[{"domain_suffix":["example.com"]}]}"#,
-    )
-    .unwrap();
-    let restored: serde_json::Value =
-        serde_json::from_str(&s.rule_source(&ruleset_id).unwrap()).unwrap();
-    let suffix = &restored["rules"][0]["domain_suffix"];
-    // sing-box normalizes single-element lists to their equivalent scalar form.
-    assert!(suffix == "example.com" || suffix == &json!(["example.com"]));
-}
-
-#[test]
-fn real_core_survives_the_starting_worker_thread() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let (_dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy_address = proxy.local_addr().unwrap();
-    drop((api, proxy));
-    service
-        .update(|state| {
-            state.settings.core_path = binary;
-            state.settings.auto_restart = false;
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
-            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
-            Ok(())
-        })
-        .unwrap();
-    let worker_service = service.clone();
-    thread::spawn(move || worker_service.start())
-        .join()
-        .unwrap()
-        .unwrap();
-    let until = Instant::now() + Duration::from_millis(800);
-    while Instant::now() < until {
-        thread::sleep(Duration::from_millis(20));
-        service.poll();
-    }
-    let active = service.status().running && service.api("GET", "/version", None).is_ok();
-    service.stop().unwrap();
-    assert!(
-        active,
-        "core died when its starting worker exited:\n{}",
-        service.logs()
-    );
-}
-
-#[test]
-fn real_core_subscription_association_and_import_apply_transactionally() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let (_dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mixed_address = mixed.local_addr().unwrap();
-    drop((api, mixed));
-    service
-        .update(|state| {
-            state.settings.core_path = binary;
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(mixed_address.port());
-            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
-            Ok(())
-        })
-        .unwrap();
-    let profile = service.snapshot().settings.active_profile;
-    let sub = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"node-a","server":"127.0.0.1","server_port":9})],
-        ..Subscription::default()
-    };
-    let id = sub.id.clone();
-    service.import_subscription(sub).unwrap();
-    service.start().unwrap();
-    let before_pid = service.status().pid;
-    service
-        .associate_subscription_with_profile(&id, &profile)
-        .unwrap();
-    assert_ne!(service.status().pid, before_pid);
-    assert_eq!(
-        service.api("GET", "/proxies/proxy", None).unwrap()["all"],
-        json!(["node-a"])
-    );
-    let unchanged = serde_json::to_value(service.snapshot()).unwrap();
-    let pid = service.status().pid;
-    let invalid = Subscription {
-        nodes: vec![json!({"type":"unknown-protocol","tag":"bad"})],
-        ..Subscription::default()
-    };
-    assert!(
-        service
-            .import_subscription_for_profile(invalid, Some(&profile))
-            .is_err()
-    );
-    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), unchanged);
-    assert_eq!(service.status().pid, pid);
-    let valid = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"node-b","server":"127.0.0.1","server_port":9})],
-        ..Subscription::default()
-    };
-    let state_file = service.dir().join("state.json");
-    let backup = service.dir().join("state.backup");
-    fs::rename(&state_file, &backup).unwrap();
-    fs::create_dir(&state_file).unwrap();
-    let result = service.import_subscription_for_profile(valid.clone(), Some(&profile));
-    fs::remove_dir(&state_file).unwrap();
-    fs::rename(&backup, &state_file).unwrap();
-    assert!(result.is_err());
-    assert_eq!(service.status().pid, pid);
-    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), unchanged);
-    service
-        .import_subscription_for_profile(valid, Some(&profile))
-        .unwrap();
-    assert_ne!(service.status().pid, pid);
-    assert_eq!(
-        service.api("GET", "/proxies/proxy", None).unwrap()["all"],
-        json!(["node-a", "node-b"])
-    );
-    service.stop().unwrap();
-}
-
-fn controlled_node(binary: &str, address: &str) -> (tempfile::TempDir, Arc<Service>, u16) {
-    let (dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = mixed.local_addr().unwrap().port();
-    service.update(|state| {
-        state.settings.core_path=binary.into();state.settings.routing_mode="direct".into();
-        let config=&mut state.profiles[0].config;
-        config["inbounds"][0]["listen_port"]=json!(port);
-        config["experimental"]["clash_api"]["external_controller"]=json!(api_address.to_string());
-        config["dns"]["servers"]=json!([{"type":"hosts","tag":"test-hosts","predefined":{"choice.example":address}}]);
-        config["dns"]["final"]=json!("test-hosts");config["route"]["default_domain_resolver"]=json!("test-hosts");Ok(())
-    }).unwrap();
-    drop((api, mixed));
-    service.start().unwrap();
-    (dir, service, port)
-}
-
-struct FixtureProcess(std::process::Child);
-impl Drop for FixtureProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn local_tls_probe(dir: &std::path::Path, binary: &str) -> (String, u16, FixtureProcess) {
-    use std::io::BufRead;
-    let certificate = dir.join("test-ca.pem");
-    let key = dir.join("test-key.pem");
-    assert!(
-        Command::new("openssl")
-            .args([
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-days",
-                "1",
-                "-subj",
-                "/CN=127.0.0.1",
-                "-addext",
-                "subjectAltName=IP:127.0.0.1",
-                "-keyout"
-            ])
-            .arg(&key)
-            .arg("-out")
-            .arg(&certificate)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    );
-    let code = r#"import http.server,ssl,sys,time
-class Handler(http.server.BaseHTTPRequestHandler):
- def do_HEAD(self):
-  time.sleep(0.01);self.send_response(204);self.end_headers()
- def log_message(self,*args): pass
-server=http.server.HTTPServer(('127.0.0.1',0),Handler)
-context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(sys.argv[1],sys.argv[2])
-server.socket=context.wrap_socket(server.socket,server_side=True)
-print(server.server_port,flush=True);server.serve_forever()
-"#;
-    let mut process = FixtureProcess(
-        Command::new("python3")
-            .arg("-c")
-            .arg(code)
-            .arg(&certificate)
-            .arg(key)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut port = String::new();
-    std::io::BufReader::new(process.0.stdout.take().unwrap())
-        .read_line(&mut port)
-        .unwrap();
-    let wrapper = dir.join("test-core");
-    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
-    fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nexport SSL_CERT_FILE={}\nexec {} \"$@\"\n",
-            quote(&certificate.to_string_lossy()),
-            quote(binary)
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-    (
-        wrapper.to_string_lossy().into_owned(),
-        port.trim().parse().unwrap(),
-        process,
-    )
-}
-
-#[test]
-fn real_subscription_nodes_control_global_and_rule_traffic_and_restore_selection() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let origin_a = TcpListener::bind("127.0.0.2:0").unwrap();
-    let port = origin_a.local_addr().unwrap().port();
-    let origin_b = TcpListener::bind(("127.0.0.3", port)).unwrap();
-    let done = Arc::new(AtomicBool::new(false));
-    let workers:Vec<_>=[(origin_a,"node-A"),(origin_b,"node-B")].into_iter().map(|(listener,body)| {
-        listener.set_nonblocking(true).unwrap();let done=done.clone();
-        thread::spawn(move || {
-            let until=Instant::now()+Duration::from_secs(30);
-            while !done.load(Ordering::Relaxed) && Instant::now()<until {
-                match listener.accept() {
-                    Ok((mut socket,_))=> {
-                        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                        let _=socket.read(&mut [0;4096]);
-                        thread::sleep(Duration::from_millis(2));
-                        let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
-                    }
-                    Err(e) if e.kind()==std::io::ErrorKind::WouldBlock=>thread::sleep(Duration::from_millis(5)),
-                    Err(e)=>panic!("{e}"),
-                }
-            }
-        })
-    }).collect();
-    let (_a_dir, node_a, port_a) = controlled_node(&binary, "127.0.0.2");
-    let (_b_dir, node_b, port_b) = controlled_node(&binary, "127.0.0.3");
-    let (dir, service) = service();
-    let (test_binary, tls_port, _tls) = local_tls_probe(dir.path(), &binary);
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mixed_address = mixed.local_addr().unwrap();
-    drop((api, mixed));
-    let update_path = dir.path().join("subscription.json");
-    let second_node =
-        json!({"type":"socks","tag":"same","server":"127.0.0.1","server_port":port_b});
-    fs::write(
-        &update_path,
-        serde_json::to_vec(&json!({"outbounds":[second_node]})).unwrap(),
-    )
-    .unwrap();
-    service
-        .update(|state| {
-            state.settings.core_path = test_binary;
-            state.settings.test_url = format!("https://127.0.0.1:{tls_port}/latency");
-            state.settings.test_timeout = 2000;
-            let config = &mut state.profiles[0].config;
-            config["inbounds"][0]["listen_port"] = json!(mixed_address.port());
-            config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
-            config["outbounds"].as_array_mut().unwrap().extend([
-                json!({"type":"selector","tag":"unrelated","outbounds":["unavailable"]}),
-                json!({"type":"socks","tag":"unavailable","server":"127.0.0.1","server_port":9}),
-            ]);
-            config["route"]["final"] = json!("unrelated");
-            config["route"]["rules"].as_array_mut().unwrap().push(
-                json!({"domain":"custom-rule.example","action":"route","outbound":"unrelated"}),
-            );
-            Ok(())
-        })
-        .unwrap();
-    let a = Subscription {
-        nodes: vec![json!({"type":"socks","tag":"same","server":"127.0.0.1","server_port":port_a})],
-        ..Subscription::default()
-    };
-    let b = Subscription {
-        source: update_path.to_string_lossy().into_owned(),
-        ..Subscription::default()
-    };
-    let (a_id, b_id) = (a.id.clone(), b.id.clone());
-    service.import_subscription(a).unwrap();
-    service.import_subscription(b).unwrap();
-    service.select_subscription_node(&a_id, "same").unwrap();
-    service.start().unwrap();
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .proxy(reqwest::Proxy::http(format!("http://{mixed_address}")).unwrap())
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap();
-    let response = || {
-        client
-            .get(format!("http://choice.example:{port}/choice"))
-            .send()
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .text()
-            .unwrap()
-    };
-    assert_eq!(response(), "node-A");
-    assert_eq!(service.runtime_mode().unwrap(), "rule");
-    service.set_routing_mode("global").unwrap();
-    assert_eq!(response(), "node-A");
-    let pid = service.status().pid;
-    service.select_subscription_node(&b_id, "same").unwrap();
-    assert_ne!(
-        service.status().pid,
-        pid,
-        "new subscription must be safely loaded"
-    );
-    assert_eq!(service.runtime_mode().unwrap(), "global");
-    assert_eq!(response(), "node-B");
-    assert!(service.subscription_nodes_runtime(&b_id).unwrap()[0].selected);
-    assert!(!service.subscription_nodes_runtime(&a_id).unwrap()[0].selected);
-    let pid = service.status().pid;
-    service.select_subscription_node(&a_id, "same").unwrap();
-    assert_eq!(service.status().pid, pid);
-    assert_eq!(response(), "node-A");
-    let (connection, echo) = open_echo_tunnel(mixed_address);
-    service.select_subscription_node(&b_id, "same").unwrap();
-    assert_tunnel_closed(connection, echo);
-    assert_eq!(service.status().pid, pid);
-    assert_eq!(response(), "node-B");
-    let selected = service.snapshot().profiles[0].selected_node.clone();
-    let state_path = dir.path().join("state.json");
-    let backup = dir.path().join("saved-state");
-    fs::rename(&state_path, &backup).unwrap();
-    fs::create_dir(&state_path).unwrap();
-    let result = service.select_subscription_node(&a_id, "same");
-    fs::remove_dir(&state_path).unwrap();
-    fs::rename(&backup, &state_path).unwrap();
-    assert!(result.is_err());
-    assert_eq!(response(), "node-B");
-    assert_eq!(service.snapshot().profiles[0].selected_node, selected);
-    assert!(service.subscription_nodes_runtime(&b_id).unwrap()[0].selected);
-    assert!(service.test_subscription_node(&a_id, "same").unwrap() > 0);
-    assert_eq!(
-        response(),
-        "node-B",
-        "testing another node must not select it"
-    );
-    assert!(
-        service.subscription_nodes_runtime(&a_id).unwrap()[0]
-            .delay_ms
-            .is_some()
-    );
-    // An outside controller changes the cache; runtime rows show that actual
-    // choice, but restart restores the user's explicitly persisted choice.
-    let proxies = service.api("GET", "/proxies/proxy", None).unwrap();
-    let first = proxies["all"][0].as_str().unwrap();
-    service
-        .api("PUT", "/proxies/proxy", Some(&json!({"name":first})))
-        .unwrap();
-    assert!(service.subscription_nodes_runtime(&a_id).unwrap()[0].selected);
-    service.stop().unwrap();
-    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
-    service.start().unwrap();
-    assert_eq!(response(), "node-B");
-    service.reload().unwrap();
-    assert_eq!(response(), "node-B");
-    fs::write(
-        &update_path,
-        serde_json::to_vec(&json!({"outbounds":[{"type":"direct","tag":"helper"},second_node]}))
-            .unwrap(),
-    )
-    .unwrap();
-    service.update_subscription(&b_id).unwrap();
-    assert_eq!(response(), "node-B");
-    assert_eq!(service.snapshot().profiles[0].selected_node, selected);
-    let bad = Subscription {
-        nodes: vec![
-            json!({"type":"shadowsocks","tag":"invalid","server":"127.0.0.1","server_port":443,"method":"invalid-cipher","password":"fixture"}),
-        ],
-        ..Subscription::default()
-    };
-    let bad_id = bad.id.clone();
-    service.import_subscription(bad).unwrap();
-    let before = service.snapshot();
-    assert!(
-        service
-            .select_subscription_node(&bad_id, "invalid")
-            .is_err()
-    );
-    assert_eq!(
-        service.snapshot().profiles[0].subscriptions,
-        before.profiles[0].subscriptions
-    );
-    assert_eq!(service.snapshot().profiles[0].selected_node, selected);
-    assert_eq!(response(), "node-B");
-    let generated = service
-        .generate(&service.snapshot().settings.active_profile)
-        .unwrap();
-    assert_eq!(
-        service.snapshot().profiles[0].config["route"]["final"],
-        "unrelated"
-    );
-    assert!(
-        generated["route"]["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["domain"] == "custom-rule.example" && r["outbound"] == "unrelated")
-    );
-    let mut replacement = second_node;
-    replacement["tag"] = json!("replacement");
-    fs::write(
-        &update_path,
-        serde_json::to_vec(&json!({"outbounds":[replacement]})).unwrap(),
-    )
-    .unwrap();
-    service.update_subscription(&b_id).unwrap();
-    assert!(service.snapshot().profiles[0].selected_node.is_none());
-    assert_eq!(response(), "node-A");
-    assert!(service.subscription_nodes_runtime(&a_id).unwrap()[0].selected);
-    service.stop().unwrap();
-    node_a.stop().unwrap();
-    node_b.stop().unwrap();
-    done.store(true, Ordering::Relaxed);
-    for worker in workers {
-        worker.join().unwrap();
-    }
 }
 
 #[test]
@@ -1224,12 +395,12 @@ fn real_core_terminates_when_the_application_is_killed() {
     service
         .update(|state| {
             state.settings.core_path = binary;
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
-            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
+            state.settings.mixed_port = proxy_address.port();
+            state.settings.api_port = api_address.port();
             Ok(())
         })
         .unwrap();
+    dummy_subscription(&service);
     let mut application = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "core_crash_test_helper", "--nocapture"])
         .env("AEROBOX_TEST_CRASH_DIRECTORY", dir.path())
@@ -1341,67 +512,6 @@ fn pidfd_guardian_stops_a_core_without_parent_death_signals() {
 }
 
 #[test]
-fn real_core_applies_new_subscription_nodes_and_preserves_them_on_invalid_update() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let (dir, service) = service();
-    let source = dir.path().join("nodes.json");
-    let sub = Subscription {
-        source: source.to_string_lossy().into_owned(),
-        nodes: vec![json!({"type":"direct","tag":"old-node"})],
-        ..Subscription::default()
-    };
-    let id = sub.id.clone();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let proxy_address = proxy.local_addr().unwrap();
-    drop((api, proxy));
-    service
-        .update(|state| {
-            state.settings.core_path = binary;
-            state.profiles[0].subscriptions.push(id.clone());
-            state.subscriptions.push(sub);
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
-            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
-                json!(api_address.to_string());
-            Ok(())
-        })
-        .unwrap();
-    service.start().unwrap();
-    fs::write(
-        &source,
-        r#"{"outbounds":[{"type":"direct","tag":"new-node"}]}"#,
-    )
-    .unwrap();
-    let updater = service.clone();
-    thread::spawn(move || updater.update_due_subscriptions())
-        .join()
-        .unwrap()
-        .unwrap();
-    assert!(
-        service.api("GET", "/proxies", None).unwrap()["proxies"]
-            .get("new-node")
-            .is_some()
-    );
-    let pid = service.status().pid;
-    fs::write(
-        &source,
-        r#"{"outbounds":[{"type":"invalid-core-protocol","tag":"broken"}]}"#,
-    )
-    .unwrap();
-    assert!(service.update_subscription(&id).is_err());
-    assert_eq!(service.status().pid, pid);
-    assert_eq!(
-        service.snapshot().subscriptions[0].nodes[0]["tag"],
-        "new-node"
-    );
-    assert!(service.api("GET", "/version", None).is_ok());
-    service.stop().unwrap();
-}
-
-#[test]
 fn offline_settings_save_without_an_installed_core() {
     let (_dir, s) = service();
     let settings = Settings {
@@ -1428,192 +538,6 @@ fn stopped_system_proxy_preference_is_saved_without_changing_the_desktop() {
     service.set_system_proxy_enabled(false).unwrap();
     assert!(!service.snapshot().settings.system_proxy);
     assert!(!service.status().proxy);
-}
-
-#[test]
-fn isolated_gnome_proxy_browser_helper() {
-    let Ok(root) = std::env::var("AEROBOX_TEST_GNOME_DIRECTORY") else {
-        return;
-    };
-    let binary = std::env::var("SINGBOX_TEST_CORE").unwrap();
-    let root = std::path::PathBuf::from(root);
-    let (_remote_dir, remote) = service();
-    let (_app_dir, app) = service();
-    let port = || {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
-    let remote_port = port();
-    let app_port = port();
-    let remote_api = port();
-    let app_api = port();
-    remote.update(|state| {
-        state.settings.core_path=binary.clone();
-        state.settings.routing_mode="direct".into();
-        let config=&mut state.profiles[0].config;
-        config["inbounds"][0]["listen_port"]=json!(remote_port);
-        config["experimental"]["clash_api"]["external_controller"]=json!(format!("127.0.0.1:{remote_api}"));
-        config["dns"]["servers"]=json!([{"type":"hosts","tag":"test-hosts","predefined":{"aerobox.proxy.test":"127.0.0.2"}}]);
-        config["dns"]["final"]=json!("test-hosts");
-        config["route"]["default_domain_resolver"]=json!("test-hosts");
-        Ok(())
-    }).unwrap();
-    remote.start().unwrap();
-    app.update(|state| {
-        state.settings.core_path = binary;
-        state.settings.routing_mode = "global".into();
-        let config = &mut state.profiles[0].config;
-        config["inbounds"][0]["listen_port"] = json!(app_port);
-        config["experimental"]["clash_api"]["external_controller"] =
-            json!(format!("127.0.0.1:{app_api}"));
-        Ok(())
-    })
-    .unwrap();
-    let profile = app.snapshot().settings.active_profile;
-    let sub = Subscription {
-        nodes: vec![
-            json!({"type":"socks","tag":"controlled-node","server":"127.0.0.1","server_port":remote_port}),
-        ],
-        ..Subscription::default()
-    };
-    app.import_subscription_for_profile(sub, Some(&profile))
-        .unwrap();
-    app.start().unwrap();
-    let get = |schema: &str, key: &str| -> String {
-        let output = Command::new("gsettings")
-            .args(["get", schema, key])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    };
-    let before = get("org.gnome.system.proxy", "mode");
-    app.set_system_proxy_enabled(true).unwrap();
-    assert_eq!(get("org.gnome.system.proxy", "mode"), "'manual'");
-    for kind in ["http", "https", "socks"] {
-        assert_eq!(
-            get(&format!("org.gnome.system.proxy.{kind}"), "host"),
-            "'127.0.0.1'"
-        );
-        assert_eq!(
-            get(&format!("org.gnome.system.proxy.{kind}"), "port"),
-            app_port.to_string()
-        );
-    }
-    let origin = TcpListener::bind("127.0.0.2:0").unwrap();
-    origin.set_nonblocking(true).unwrap();
-    let origin_port = origin.local_addr().unwrap().port();
-    let done = Arc::new(AtomicBool::new(false));
-    let server_done = done.clone();
-    let worker = thread::spawn(move || {
-        let until = Instant::now() + Duration::from_secs(30);
-        let mut count = 0;
-        while !server_done.load(Ordering::Relaxed) && Instant::now() < until {
-            match origin.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    let _ = stream.read(&mut [0; 4096]);
-                    let body = "<html><body>AEROBOX_GNOME_PROXY_CHAIN_OK</body></html>";
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    count += 1;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10))
-                }
-                Err(e) => panic!("{e}"),
-            }
-        }
-        count
-    });
-    let mut browser = Command::new("chromium");
-    browser
-        .args([
-            "--headless",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-sync",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-quic",
-            "--dump-dom",
-        ])
-        .arg(format!(
-            "--user-data-dir={}",
-            root.join("browser").display()
-        ))
-        .arg(format!(
-            "http://aerobox.proxy.test:{origin_port}/through-system-proxy"
-        ));
-    let output = aerobox_for_linux::engine::run_command(browser, Duration::from_secs(25));
-    done.store(true, Ordering::Relaxed);
-    let hits = worker.join().unwrap();
-    app.set_system_proxy_enabled(false).unwrap();
-    assert_eq!(get("org.gnome.system.proxy", "mode"), before);
-    let app_traffic = app.traffic().unwrap();
-    let remote_traffic = remote.traffic().unwrap();
-    app.stop().unwrap();
-    remote.stop().unwrap();
-    assert!(output.unwrap().contains("AEROBOX_GNOME_PROXY_CHAIN_OK"));
-    assert!(hits > 0 && app_traffic.download > 0 && remote_traffic.download > 0);
-    println!(
-        "GNOME readback: mode=manual, HTTP/HTTPS/SOCKS=loopback; Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded; previous mode restored"
-    );
-}
-
-#[test]
-fn gnome_system_proxy_reaches_a_node_from_chromium_and_restores_the_session() {
-    if std::env::var("SINGBOX_TEST_CORE").is_err() {
-        return;
-    }
-    for program in ["dbus-run-session", "gsettings", "chromium"] {
-        if !Command::new("which")
-            .arg(program)
-            .stdout(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return;
-        }
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let mut command = Command::new("dbus-run-session");
-    command
-        .arg("--")
-        .arg(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "isolated_gnome_proxy_browser_helper",
-            "--nocapture",
-        ])
-        .env("AEROBOX_TEST_GNOME_DIRECTORY", dir.path())
-        .env("XDG_CURRENT_DESKTOP", "GNOME")
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
-        .env("XDG_CACHE_HOME", dir.path().join("cache"))
-        .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("GSETTINGS_BACKEND", "dconf");
-    for key in [
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-    ] {
-        command.env_remove(key);
-    }
-    let output = aerobox_for_linux::engine::run_command(command, Duration::from_secs(45)).unwrap();
-    assert!(output.contains("Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded"));
 }
 
 #[test]
@@ -1750,301 +674,498 @@ fn concurrent_manual_and_automatic_updates_do_not_override_an_edit() {
 }
 
 #[test]
-fn real_core_downloads_follow_runtime_mode_and_stopped_downloads_are_direct() {
+fn gnome_system_proxy_reaches_a_node_from_chromium_and_restores_the_session() {
+    if std::env::var("SINGBOX_TEST_CORE").is_err() {
+        return;
+    }
+    for program in ["dbus-run-session", "gsettings", "chromium"] {
+        if !Command::new("which")
+            .arg(program)
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new("dbus-run-session");
+    command
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "isolated_gnome_proxy_browser_helper",
+            "--nocapture",
+        ])
+        .env("AEROBOX_TEST_GNOME_DIRECTORY", dir.path())
+        .env("XDG_CURRENT_DESKTOP", "GNOME")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("GSETTINGS_BACKEND", "dconf");
+    for key in [
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ] {
+        command.env_remove(key);
+    }
+    let output = aerobox_for_linux::engine::run_command(command, Duration::from_secs(45)).unwrap();
+    assert!(output.contains("Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded"));
+}
+
+#[test]
+fn subscription_is_the_only_source_and_offline_choices_are_persisted() {
+    let (dir, service) = service();
+    assert!(service.start().is_err());
+    let first = Subscription {
+        nodes: vec![
+            json!({"type":"direct","tag":"helper"}),
+            json!({"type":"selector","tag":"group","outbounds":["proxy"]}),
+            json!({"type":"socks","tag":"proxy","server":"127.0.0.1","server_port":10001}),
+        ],
+        ..Subscription::default()
+    };
+    let a = first.id.clone();
+    service.import_subscription(first.clone()).unwrap();
+    assert_eq!(service.snapshot().settings.active_subscription, a);
+    assert_eq!(service.subscription_nodes(&a).unwrap().len(), 1);
+    let second = Subscription {
+        nodes: vec![json!({"type":"socks","tag":"proxy","server":"127.0.0.1","server_port":10002})],
+        ..Subscription::default()
+    };
+    let b = second.id.clone();
+    service.import_subscription(second).unwrap();
+    assert_eq!(service.snapshot().settings.active_subscription, b);
+    service.select_subscription(&a).unwrap();
+    let generated = service.generate_current().unwrap();
+    let target = generated["outbounds"][0]["default"].as_str().unwrap();
+    assert_ne!(target, "proxy");
+    assert_eq!(
+        generated["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["tag"] == target)
+            .unwrap()["server_port"],
+        10001
+    );
+    assert_eq!(service.snapshot().subscriptions[0].nodes, first.nodes);
+    assert!(service.select_subscription_node(&a, "group").is_err());
+    service.select_subscription_node(&b, "proxy").unwrap();
+    let reopened = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    assert_eq!(reopened.snapshot().settings.active_subscription, b);
+    assert!(reopened.subscription_nodes(&b).unwrap()[0].selected);
+    reopened.delete_resource("subscriptions", &b).unwrap();
+    assert_eq!(reopened.snapshot().settings.active_subscription, a);
+    reopened.delete_resource("subscriptions", &a).unwrap();
+    assert!(reopened.start().is_err());
+}
+
+#[test]
+fn real_subscription_selection_reloads_atomically_and_keeps_nodes_across_restart() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
         return;
     };
-    let (_dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    drop(api);
-    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mixed_address = mixed.local_addr().unwrap();
-    drop(mixed);
-    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
-    let unavailable_port = unavailable.local_addr().unwrap().port();
-    drop(unavailable);
+    let origin_a = TcpListener::bind("127.0.0.2:0").unwrap();
+    let port = origin_a.local_addr().unwrap().port();
+    let origin_b = TcpListener::bind(("127.0.0.3", port)).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let workers:Vec<_>=[(origin_a,"A"),(origin_b,"B")].into_iter().map(|(listener,body)| {
+        listener.set_nonblocking(true).unwrap();let done=done.clone();
+        thread::spawn(move||{let until=Instant::now()+Duration::from_secs(35);while !done.load(Ordering::Relaxed)&&Instant::now()<until {
+            match listener.accept(){Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let _=stream.read(&mut[0;4096]);let _=write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{body}");},Err(e)if e.kind()==std::io::ErrorKind::WouldBlock=>thread::sleep(Duration::from_millis(5)),Err(e)=>panic!("{e}")}
+        }})
+    }).collect();
+    let (_ad, _an, ap) = controlled_node(&binary, "127.0.0.2");
+    let (_bd, _bn, bp) = controlled_node(&binary, "127.0.0.3");
+    let (dir, service) = service();
+    let (wrapper, tls_port, _tls) = local_tls_probe(dir.path(), &binary);
+    service
+        .update(|s| {
+            s.settings.core_path = wrapper;
+            s.settings.test_url = format!("https://127.0.0.1:{tls_port}/latency");
+            s.settings.test_timeout = 2000;
+            Ok(())
+        })
+        .unwrap();
+    let a = Subscription {
+        nodes: vec![
+            json!({"type":"socks","tag":"one","server":"127.0.0.1","server_port":ap}),
+            json!({"type":"socks","tag":"two","server":"127.0.0.1","server_port":bp}),
+        ],
+        ..Subscription::default()
+    };
+    let a_id = a.id.clone();
+    service.import_subscription(a).unwrap();
+    let worker = service.clone();
+    thread::spawn(move || worker.start())
+        .join()
+        .unwrap()
+        .unwrap();
+    thread::sleep(Duration::from_millis(150));
+    service.poll();
+    assert!(
+        service.status().running,
+        "short startup worker killed the core"
+    );
+    let mixed = format!("127.0.0.1:{}", service.snapshot().settings.mixed_port);
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::all(format!("http://{mixed}")).unwrap())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let response = || {
+        client
+            .get(format!("http://choice.example:{port}/probe"))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .unwrap()
+    };
+    assert_eq!(response(), "A");
+    service.set_routing_mode("global").unwrap();
+    assert_eq!(response(), "A");
+    let certificate =
+        reqwest::Certificate::from_pem(&fs::read(dir.path().join("test-ca.pem")).unwrap()).unwrap();
+    for scheme in ["http", "socks5h"] {
+        let tls_client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(format!("{scheme}://{mixed}")).unwrap())
+            .add_root_certificate(certificate.clone())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        assert_eq!(
+            tls_client
+                .get(format!("https://127.0.0.1:{tls_port}/request"))
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "AEROBOX_HTTPS_CHAIN_OK"
+        );
+    }
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let original_port = service.snapshot().settings.mixed_port;
+    let mut broken = service.snapshot().settings;
+    broken.mixed_port = taken.local_addr().unwrap().port();
+    assert!(service.apply_settings(broken).is_err());
+    assert_eq!(service.snapshot().settings.mixed_port, original_port);
+    assert_eq!(response(), "A");
+
+    let pid = service.status().pid;
+    let (connection, echo) = open_echo_tunnel(mixed.parse().unwrap());
+    service.select_subscription_node(&a_id, "two").unwrap();
+    assert_tunnel_closed(connection, echo);
+    assert_eq!(service.status().pid, pid);
+    assert_eq!(response(), "B");
+    assert!(service.test_subscription_node(&a_id, "one").unwrap() > 0);
+    assert_eq!(response(), "B");
+    let path = dir.path().join("state.json");
+    let backup = dir.path().join("saved");
+    fs::rename(&path, &backup).unwrap();
+    fs::create_dir(&path).unwrap();
+    let failed = service.select_subscription_node(&a_id, "one");
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&backup, &path).unwrap();
+    assert!(failed.is_err());
+    assert_eq!(response(), "B");
+    assert!(service.subscription_nodes_runtime(&a_id).unwrap()[1].selected);
+    service
+        .api("PUT", "/proxies/proxy", Some(&json!({"name":"one"})))
+        .unwrap();
+    assert!(service.subscription_nodes_runtime(&a_id).unwrap()[0].selected);
+    service.restart().unwrap();
+    assert_eq!(response(), "B");
+    assert_eq!(service.runtime_mode().unwrap(), "global");
+    let bad = Subscription {
+        nodes: vec![
+            json!({"type":"shadowsocks","tag":"bad","server":"127.0.0.1","server_port":443,"method":"invalid-cipher","password":"fixture"}),
+        ],
+        ..Subscription::default()
+    };
+    assert!(service.import_subscription(bad).is_err());
+    assert_eq!(service.snapshot().subscriptions.len(), 1);
+    assert_eq!(response(), "B");
+    let b = Subscription {
+        nodes: vec![json!({"type":"socks","tag":"one","server":"127.0.0.1","server_port":ap})],
+        ..Subscription::default()
+    };
+    let b_id = b.id.clone();
+    service.import_subscription(b).unwrap();
+    assert_eq!(service.snapshot().settings.active_subscription, b_id);
+    assert_eq!(response(), "A");
+    service.select_subscription(&a_id).unwrap();
+    assert_eq!(response(), "B");
+    let source = dir.path().join("update.json");
+    fs::write(&source,serde_json::to_vec(&json!({"outbounds":[{"type":"socks","tag":"replacement","server":"127.0.0.1","server_port":ap}]})).unwrap()).unwrap();
+    service
+        .update(|s| {
+            s.subscriptions
+                .iter_mut()
+                .find(|s| s.id == a_id)
+                .unwrap()
+                .source = source.to_string_lossy().into_owned();
+            Ok(())
+        })
+        .unwrap();
+    service.update_subscription(&a_id).unwrap();
+    assert_eq!(
+        service.snapshot().subscriptions[0].selected_node.as_deref(),
+        Some("replacement")
+    );
+    assert_eq!(response(), "A");
+    let reject = RuleSet {
+        name: "拒绝测试".into(),
+        content: json!({"version":3,"rules":[{"domain":"choice.example"}]}),
+        action: "reject".into(),
+        ..RuleSet::default()
+    };
+    let reject_id = reject.id.clone();
+    service.save_ruleset(reject).unwrap();
+    assert_eq!(response(), "A", "global overrides rule sets");
+    service.set_routing_mode("rule").unwrap();
+    assert!(
+        client
+            .get(format!("http://choice.example:{port}/probe"))
+            .send()
+            .unwrap()
+            .status()
+            .is_server_error()
+    );
+    service
+        .save_rule_source(&reject_id, r#"{"version":3,"rules":[]}"#)
+        .unwrap();
+    assert_eq!(response(), "A");
+    assert!(
+        service
+            .save_rule_source(
+                &reject_id,
+                r#"{"version":3,"rules":[{"unsupported":"field"}]}"#
+            )
+            .is_err()
+    );
+    assert_eq!(response(), "A");
+    service.apply_ruleset_enabled(&reject_id, false).unwrap();
+    assert_eq!(response(), "A");
+    service.delete_resource("subscriptions", &a_id).unwrap();
+    assert_eq!(service.snapshot().settings.active_subscription, b_id);
+    assert_eq!(response(), "A");
+    service.delete_resource("subscriptions", &b_id).unwrap();
+    assert!(!service.status().running);
+    done.store(true, Ordering::Relaxed);
+    for w in workers {
+        w.join().unwrap();
+    }
+}
+
+#[test]
+fn isolated_gnome_proxy_browser_helper() {
+    let Ok(root) = std::env::var("AEROBOX_TEST_GNOME_DIRECTORY") else {
+        return;
+    };
+    let binary = std::env::var("SINGBOX_TEST_CORE").unwrap();
+    let root = std::path::PathBuf::from(root);
+    let (_rd, _remote, remote_port) = controlled_node(&binary, "127.0.0.1");
+    let (_dir, app) = service();
+    let (_, tls_port, _tls) = local_tls_probe(&root, &binary);
+    let get = |schema: &str, key: &str| {
+        String::from_utf8(
+            Command::new("gsettings")
+                .args(["get", schema, key])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned()
+    };
+    let before = get("org.gnome.system.proxy", "mode");
+    app.update(|s| {
+        s.settings.core_path = binary;
+        s.settings.system_proxy = true;
+        s.settings.routing_mode = "global".into();
+        Ok(())
+    })
+    .unwrap();
+    app.import_subscription(Subscription {
+        nodes: vec![
+            json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":remote_port}),
+        ],
+        ..Subscription::default()
+    })
+    .unwrap();
+    app.start().unwrap();
+    let port = app.snapshot().settings.mixed_port;
+    let endpoint = format!("127.0.0.1:{port}");
+    assert!(aerobox_for_linux::platform::verify_proxy(&endpoint, "mixed").unwrap());
+    assert_eq!(get("org.gnome.system.proxy", "mode"), "'manual'");
+    for kind in ["http", "https", "socks"] {
+        assert_eq!(
+            get(&format!("org.gnome.system.proxy.{kind}"), "port"),
+            port.to_string()
+        );
+    }
     let origin = TcpListener::bind("127.0.0.1:0").unwrap();
-    let origin_address = origin.local_addr().unwrap();
+    let origin_port = origin.local_addr().unwrap().port();
     origin.set_nonblocking(true).unwrap();
     let done = Arc::new(AtomicBool::new(false));
-    let hits = Arc::new(AtomicUsize::new(0));
-    let worker_done = done.clone();
-    let worker_hits = hits.clone();
+    let finished = done.clone();
     let worker = thread::spawn(move || {
-        let until = Instant::now() + Duration::from_secs(20);
-        while !worker_done.load(Ordering::Relaxed) && Instant::now() < until {
+        let until = Instant::now() + Duration::from_secs(30);
+        while !finished.load(Ordering::Relaxed) && Instant::now() < until {
             match origin.accept() {
                 Ok((mut stream, _)) => {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut request = [0; 4096];
-                    assert!(stream.read(&mut request).unwrap() > 0);
-                    let body = r#"{"outbounds":[{"type":"socks","tag":"downloaded-node","server":"127.0.0.1","server_port":1080}]}"#;
-                    write!(
+                    let _ = stream.read(&mut [0; 4096]);
+                    let body = "<html>AEROBOX_GNOME_PROXY_CHAIN_OK</html>";
+                    let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    )
-                    .unwrap();
-                    worker_hits.fetch_add(1, Ordering::Relaxed);
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5))
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
                 }
-                Err(error) => panic!("origin server: {error}"),
+                Err(e) => panic!("{e}"),
             }
         }
     });
-    let subscription = Subscription {
-        source: format!("http://{origin_address}/subscription"),
-        ..Subscription::default()
-    };
-    let subscription_id = subscription.id.clone();
-    service.update(|state| {
-        state.settings.core_path = binary;
-        state.settings.bypass_lan = true;
-        state.settings.sniff = false;
-        state.settings.dns_hijack = false;
-        let config = &mut state.profiles[0].config;
-        config["inbounds"] = json!([{"type":"mixed","listen":"127.0.0.1","listen_port":mixed_address.port()}]);
-        config["experimental"]["clash_api"]["external_controller"] = json!(api_address.to_string());
-        config["route"]["final"] = json!("direct");
-        config["outbounds"] = json!([
-            {"type":"selector","tag":"proxy","outbounds":["unavailable"]},
-            {"type":"socks","tag":"unavailable","server":"127.0.0.1","server_port":unavailable_port},
-            {"type":"direct","tag":"direct"}
-        ]);
-        state.subscriptions.push(subscription);
-        Ok(())
-    }).unwrap();
-    service
-        .start()
-        .unwrap_or_else(|error| panic!("{error:#}\n{}", service.logs()));
-    service.set_routing_mode("direct").unwrap();
-    service.update_subscription(&subscription_id).unwrap();
-    assert_eq!(hits.load(Ordering::Relaxed), 1);
-    assert!(
-        service.traffic().unwrap().download > 0,
-        "download must traverse the running core"
-    );
-
-    service.set_routing_mode("global").unwrap();
-    assert!(
-        service.update_subscription(&subscription_id).is_err(),
-        "a failed outbound must not fall back to a direct download"
-    );
-    assert_eq!(hits.load(Ordering::Relaxed), 1);
-
-    service.set_routing_mode("rule").unwrap();
-    // Editing a profile without applying it must not change the app's live
-    // download listener; requests still use the running configuration.
-    service
-        .update(|state| {
-            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(1);
-            Ok(())
-        })
-        .unwrap();
-    service.update_subscription(&subscription_id).unwrap();
-    assert_eq!(hits.load(Ordering::Relaxed), 2);
-    service.stop().unwrap();
-    service.update_subscription(&subscription_id).unwrap();
-    assert_eq!(hits.load(Ordering::Relaxed), 3);
+    let mut browser = Command::new("chromium");
+    browser
+        .args([
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-quic",
+            "--dump-dom",
+        ])
+        .arg(format!(
+            "--user-data-dir={}",
+            root.join("browser").display()
+        ))
+        .arg(format!(
+            "http://aerobox.proxy.test:{origin_port}/through-system-proxy"
+        ));
+    let output = aerobox_for_linux::engine::run_command(browser, Duration::from_secs(25));
     done.store(true, Ordering::Relaxed);
     worker.join().unwrap();
-}
-
-// Keep a real proxied connection open so control tests can observe socket
-// teardown, rather than only trusting a successful API response.
-fn open_echo_tunnel(proxy: std::net::SocketAddr) -> (TcpStream, thread::JoinHandle<()>) {
-    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = origin.local_addr().unwrap();
-    let worker = thread::spawn(move || {
-        let (mut stream, _) = origin.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut byte = [0];
-        loop {
-            match stream.read(&mut byte) {
-                Ok(0) => break,
-                Ok(_) => stream.write_all(&byte).unwrap(),
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-                Err(error) => panic!("origin echo: {error}"),
-            }
-        }
-    });
-    let mut stream = TcpStream::connect(proxy).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+    assert!(output.unwrap().contains("AEROBOX_GNOME_PROXY_CHAIN_OK"));
+    assert!(app.traffic().unwrap().download > 0);
+    let mut browser = Command::new("chromium");
+    browser
+        .args([
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-quic",
+            "--ignore-certificate-errors",
+            "--dump-dom",
+        ])
+        .arg(format!(
+            "--user-data-dir={}",
+            root.join("browser-tls").display()
+        ))
+        .arg(format!(
+            "https://aerobox.proxy.test:{tls_port}/through-system-proxy"
+        ));
+    let output = aerobox_for_linux::engine::run_command(browser, Duration::from_secs(20)).unwrap();
+    assert!(output.contains("AEROBOX_HTTPS_CHAIN_OK"));
+    Command::new("gsettings")
+        .args(["set", "org.gnome.system.proxy.https", "port", "9"])
+        .status()
         .unwrap();
-    write!(
-        stream,
-        "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n"
-    )
-    .unwrap();
-    let mut response = Vec::new();
-    while !response.ends_with(b"\r\n\r\n") {
-        let mut byte = [0];
-        stream.read_exact(&mut byte).unwrap();
-        response.push(byte[0]);
-        assert!(response.len() < 4096);
-    }
-    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
-    echo_byte(&mut stream);
-    (stream, worker)
-}
-
-fn echo_byte(stream: &mut TcpStream) {
-    stream.write_all(b"q").unwrap();
-    let mut byte = [0];
-    stream.read_exact(&mut byte).unwrap();
-    assert_eq!(byte, *b"q");
-}
-
-fn assert_tunnel_closed(mut stream: TcpStream, worker: thread::JoinHandle<()>) {
-    match stream.read(&mut [0; 1]) {
-        Ok(0) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-        other => panic!("old connection was not closed: {other:?}"),
-    }
-    worker.join().unwrap();
+    assert!(!aerobox_for_linux::platform::verify_proxy(&endpoint, "mixed").unwrap());
+    app.set_system_proxy_enabled(true).unwrap();
+    assert!(aerobox_for_linux::platform::verify_proxy(&endpoint, "mixed").unwrap());
+    app.stop().unwrap();
+    assert_eq!(get("org.gnome.system.proxy", "mode"), before);
+    println!(
+        "Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded; HTTP/HTTPS/SOCKS readback verified; overwritten setting detected; previous mode restored"
+    );
 }
 
 #[test]
-fn real_core_modes_override_policy_and_switches_close_old_connections() {
+fn real_shadowsocks_import_carries_https_through_http_and_socks_entries() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
         return;
     };
-    let (_dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
-    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mixed_address = mixed.local_addr().unwrap();
-    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
-    let unavailable_port = unavailable.local_addr().unwrap().port();
-    drop((api, mixed, unavailable));
-    let group = "出口 / 自动";
-    service.update(|state| {
-        state.settings.core_path = binary;
-        state.settings.bypass_lan = false;
-        state.settings.block_ads = true;
-        state.settings.sniff = false;
-        state.settings.routing_mode = "global".into();
-        // A local test rule replaces the ad list; no public DNS or traffic.
-        state.rulesets.iter_mut().find(|r| r.id == model::BUILTIN_ADS_ID).unwrap().content =
-            json!({"version":3,"rules":[{"ip_cidr":"127.0.0.0/8"}]});
-        let config = &mut state.profiles[0].config;
-        config["inbounds"] = json!([{"type":"mixed","listen":"127.0.0.1","listen_port":mixed_address.port()}]);
-        config["experimental"]["clash_api"]["external_controller"] = json!(api_address.to_string());
-        config["route"]["final"] = json!(group);
-        config["outbounds"] = json!([
-            {"type":"selector","tag":group,"outbounds":["first","second"],"default":"first","interrupt_exist_connections":false},
-            {"type":"socks","tag":"proxy","server":"127.0.0.1","server_port":unavailable_port},
-            {"type":"direct","tag":"first"},
-            {"type":"direct","tag":"second"}
-        ]);
-        Ok(())
-    }).unwrap();
+    let (dir, service) = service();
+    let (_, tls_port, _tls) = local_tls_probe(dir.path(), &binary);
+    let ss_port = free_port();
+    let fixture = dir.path().join("ss-server.json");
+    fs::write(&fixture,serde_json::to_vec(&json!({"log":{"level":"error"},"inbounds":[{"type":"shadowsocks","listen":"127.0.0.1","listen_port":ss_port,"method":"aes-128-gcm","password":"fixture-secret"}],"outbounds":[{"type":"direct","tag":"direct"}]})).unwrap()).unwrap();
+    let _remote = FixtureProcess(
+        Command::new(&binary)
+            .args(["run", "-c"])
+            .arg(fixture)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     service
-        .start()
-        .unwrap_or_else(|e| panic!("{e:#}\n{}", service.logs()));
-    let pid = service.status().pid;
-    // Global uses route.final's selected member, not the unrelated dead node
-    // named "proxy", and bypasses the rejecting ad rule.
-    let (connection, worker) = open_echo_tunnel(mixed_address);
-    service.set_routing_mode("rule").unwrap();
-    assert_tunnel_closed(connection, worker);
-
-    let rejected_origin = TcpListener::bind("127.0.0.1:0").unwrap();
-    rejected_origin.set_nonblocking(true).unwrap();
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .proxy(reqwest::Proxy::http(format!("http://{mixed_address}")).unwrap())
-        .timeout(Duration::from_secs(2))
-        .build()
+        .update(|s| {
+            s.settings.core_path = binary;
+            s.settings.routing_mode = "global".into();
+            Ok(())
+        })
         .unwrap();
-    assert!(
-        client
-            .get(format!("http://{}", rejected_origin.local_addr().unwrap()))
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .is_err()
-    );
-    assert!(
-        matches!(rejected_origin.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
-    );
-
-    service.set_routing_mode("direct").unwrap();
-    let (connection, worker) = open_echo_tunnel(mixed_address);
-    service.set_routing_mode("global").unwrap();
-    assert_tunnel_closed(connection, worker);
-
-    let (mut connection, worker) = open_echo_tunnel(mixed_address);
-    assert!(service.select_outbound(group, "missing").is_err());
-    echo_byte(&mut connection);
-    service.select_outbound(group, "second").unwrap();
-    assert_tunnel_closed(connection, worker);
-    assert_eq!(service.status().pid, pid);
-    let group_path = format!(
-        "/proxies/{}",
-        percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
-    );
-    assert_eq!(
-        service.api("GET", &group_path, None).unwrap()["now"],
-        "second"
-    );
-    let (connection, worker) = open_echo_tunnel(mixed_address);
-    service.restart().unwrap();
-    assert_tunnel_closed(connection, worker);
-    assert_ne!(service.status().pid, pid);
-    assert_eq!(service.runtime_mode().unwrap(), "global");
-    assert_eq!(
-        service.api("GET", &group_path, None).unwrap()["now"],
-        "second"
-    );
+    let source = json!({"proxies":[{"name":"SS fixture","type":"ss","server":"127.0.0.1","port":ss_port,"cipher":"aes-128-gcm","password":"fixture-secret","udp":true}]});
+    service
+        .import_subscription(Subscription {
+            nodes: aerobox_for_linux::subscription::parse(&source.to_string()).unwrap(),
+            ..Subscription::default()
+        })
+        .unwrap();
+    service.start().unwrap();
+    let port = service.snapshot().settings.mixed_port;
+    let certificate =
+        reqwest::Certificate::from_pem(&fs::read(dir.path().join("test-ca.pem")).unwrap()).unwrap();
+    for scheme in ["http", "socks5h"] {
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(format!("{scheme}://127.0.0.1:{port}")).unwrap())
+            .add_root_certificate(certificate.clone())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        assert_eq!(
+            client
+                .get(format!("https://127.0.0.1:{tls_port}/tls"))
+                .send()
+                .unwrap()
+                .text()
+                .unwrap(),
+            "AEROBOX_HTTPS_CHAIN_OK"
+        );
+    }
+    assert!(service.logs().contains("shadowsocks"));
     service.stop().unwrap();
-}
-
-#[test]
-fn polling_does_not_race_startup_failure() {
-    let (dir, s) = service();
-    let bin = dir.path().join("core-test");
-    fs::write(
-        &bin,
-        "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
-    s.update(|state| {
-        state.settings.core_path = bin.to_string_lossy().into_owned();
-        Ok(())
-    })
-    .unwrap();
-    let worker_service = s.clone();
-    let worker = thread::spawn(move || {
-        let until = Instant::now() + Duration::from_millis(350);
-        while Instant::now() < until {
-            worker_service.poll();
-            thread::sleep(Duration::from_millis(2));
-        }
-    });
-    assert!(s.start().is_err());
-    worker.join().unwrap();
-    assert!(!s.status().running);
-    s.shutdown().unwrap();
-    assert!(s.start().is_err());
-}
-#[test]
-fn resource_deletion_removes_references() {
-    let mut state = model::State::default();
-    let sub = Subscription::default();
-    let id = sub.id.clone();
-    state.profiles[0].subscriptions.push(id.clone());
-    state.subscriptions.push(sub);
-    model::remove_resource(&mut state, "subscriptions", &id).unwrap();
-    assert!(state.profiles[0].subscriptions.is_empty());
-    state.validate().unwrap()
 }

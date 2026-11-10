@@ -15,4 +15,5 @@ rm -f "$install_prefix/share/icons/hicolor/scalable/apps/io.github.imengying.Aer
 "$install_prefix/bin/AeroBox" --install-desktop "$install_prefix"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$install_prefix/share/applications" || true; fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -f -t "$install_prefix/share/icons/hicolor" || true; fi
-printf 'Installed: %s/bin/AeroBox\nLaunch AeroBox from your application menu.\n' "$install_prefix"
+"$install_prefix/bin/AeroBox" --version
+printf 'Installed: %s/bin/AeroBox\nLaunch AeroBox from your application menu.\n更新后请完全退出正在运行的 AeroBox，再从应用菜单启动。\n' "$install_prefix"

@@ -398,6 +398,30 @@ pub fn enable_proxy(server: &str, protocol: &str) -> Result<ProxySnapshot> {
     enable_proxy_for(&backend, server, protocol)
 }
 
+/// Read back every field Chromium uses, without changing the desktop.
+pub fn verify_proxy(server: &str, protocol: &str) -> Result<bool> {
+    let backend = backend()?;
+    for command in enable_commands(&backend, server, protocol)? {
+        let verification = match &backend {
+            Backend::Gnome { settings } => Some((
+                DesktopCommand::new(settings, ["get", &command.args[1], &command.args[2]]),
+                command.args[3].as_str(),
+            )),
+            Backend::Kde { read, write, .. } if command.program == *write => Some((
+                DesktopCommand::new(read, &command.args[..6]),
+                command.args[6].as_str(),
+            )),
+            Backend::Kde { .. } => None,
+        };
+        if let Some((read, expected)) = verification
+            && read.run()? != expected
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn enable_proxy_for(backend: &Backend, server: &str, protocol: &str) -> Result<ProxySnapshot> {
     let commands = enable_commands(backend, server, protocol)?;
     let snapshot = capture(backend)?;

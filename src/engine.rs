@@ -83,7 +83,7 @@ struct Running {
     config: Value,
     started: Option<Instant>,
     binary: Option<PathBuf>,
-    profile_id: String,
+    subscription_id: String,
     nodes: HashMap<NodeSelection, GeneratedNode>,
     selected_node: Option<NodeSelection>,
 }
@@ -258,14 +258,12 @@ impl Service {
         }
         bail!("尚未安装 sing-box 内核。请在设置中下载或选择内核文件。")
     }
-    pub fn generate(&self, id: &str) -> Result<Value> {
+    pub fn generate_current(&self) -> Result<Value> {
         let state = self.snapshot();
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == id)
-            .context("请选择一个配置")?;
-        self.generate_profile(&state, profile)
+        self.generate_profile(&state, &state.current_profile()?)
+    }
+    fn prepare_current(&self, state: &State) -> Result<PreparedConfig> {
+        self.prepare_profile(state, &state.current_profile()?)
     }
     pub fn generate_profile(&self, state: &State, profile: &Profile) -> Result<Value> {
         Ok(self.prepare_profile(state, profile)?.config)
@@ -389,26 +387,58 @@ impl Service {
                 .iter()
                 .find(|r| &r.id == id)
                 .context("规则集不存在")?;
-            let path = self.rule_path(r);
+            let source_path = self.rule_path(r);
             let remote = r.is_remote();
             if remote {
                 let url = url::Url::parse(&r.source).context("在线规则集地址无效")?;
                 ensure!(url.host().is_some(), "在线规则集地址缺少主机名");
             }
-            if !r.binary {
-                atomic_write(&path, &serde_json::to_vec(&r.content)?, 0o600)?
-            } else if !remote {
-                ensure!(path.is_file(), "请先下载二进制规则集「{}」", r.name)
+            let bytes = if !r.binary {
+                Some(serde_json::to_vec(&r.content)?)
+            } else {
+                if !source_path.is_file()
+                    && let Some(seed) = model::builtin_seed(&r.id)
+                {
+                    atomic_write(&source_path, seed, 0o600)?;
+                }
+                if remote && !source_path.is_file() {
+                    None
+                } else {
+                    Some(
+                        fs::read(&source_path)
+                            .with_context(|| format!("请先下载二进制规则集「{}」", r.name))?,
+                    )
+                }
+            };
+            // Immutable snapshots keep edits from changing the rollback config.
+            let path = if let Some(bytes) = bytes {
+                let digest = Sha256::digest(&bytes);
+                let path = source_path
+                    .parent()
+                    .unwrap()
+                    .join("generated")
+                    .join(format!(
+                        "{}-{:x}.{}",
+                        r.id,
+                        digest,
+                        if r.binary { "srs" } else { "json" }
+                    ));
+                if !path.is_file() {
+                    atomic_write(&path, &bytes, 0o600)?;
+                }
+                Some(path)
+            } else {
+                None
             };
             if remote {
                 let mut rule = json!({"type":"remote","tag":r.name,"format":if r.binary{"binary"}else{"source"},"url":r.source,"update_interval":format!("{}h",r.update_interval_hours)});
-                if path.is_file() {
+                if let Some(path) = path {
                     rule["initial_path"] = json!(path);
                 }
                 remote_tags.push(r.name.clone());
                 rules.push(rule);
             } else {
-                rules.push(json!({"type":"local","tag":r.name,"format":if r.binary{"binary"}else{"source"},"path":path}));
+                rules.push(json!({"type":"local","tag":r.name,"format":if r.binary{"binary"}else{"source"},"path":path.unwrap()}));
             }
         }
         if !rules.is_empty() {
@@ -455,7 +485,7 @@ impl Service {
                     })
                 })
         };
-        let lan_tag = rule_tag(model::BUILTIN_LAN_ID);
+        let lan_tag = None;
         let ads_tag = rule_tag(model::BUILTIN_ADS_ID);
         crate::config::apply_profile_settings(&mut config, &state.settings, lan_tag, ads_tag)?;
         if !nodes.is_empty() {
@@ -533,8 +563,8 @@ impl Service {
     fn rule_path(&self, r: &RuleSet) -> PathBuf {
         self.store.lock().unwrap().rule_path(r)
     }
-    pub fn check_profile(&self, id: &str) -> Result<()> {
-        self.check(&self.generate(id)?)
+    pub fn check_current(&self) -> Result<()> {
+        self.check(&self.generate_current()?)
     }
     pub fn reload(&self) -> Result<()> {
         let _op = self.operation.lock().unwrap();
@@ -554,19 +584,14 @@ impl Service {
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(self.status().running, "请先启动内核");
         let state = self.snapshot();
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile)
-            .context("请选择一个配置")?;
-        let config = self.prepare_profile(&state, profile)?;
+        let config = self.prepare_current(&state)?;
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
         let (previous, previous_binary, previous_profile) = self.running_config()?;
         let proxy = self.status().proxy;
         let result = self.stop_locked().and_then(|()| {
-            self.start_config_locked(config, binary, proxy, state.settings.active_profile)
+            self.start_config_locked(config, binary, proxy, state.settings.active_subscription)
         });
         if let Err(error) = result {
             let _ = self.stop_locked();
@@ -608,12 +633,7 @@ impl Service {
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(!self.status().running, "内核已运行");
         let state = self.snapshot();
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile)
-            .context("请选择一个配置")?;
-        let config = self.prepare_profile(&state, profile)?;
+        let config = self.prepare_current(&state)?;
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
@@ -621,7 +641,7 @@ impl Service {
             config,
             binary,
             state.settings.system_proxy,
-            state.settings.active_profile,
+            state.settings.active_subscription,
         );
         if result.is_err() {
             let _ = self.stop_locked();
@@ -633,7 +653,7 @@ impl Service {
         config: PreparedConfig,
         binary: PathBuf,
         proxy: bool,
-        profile_id: String,
+        subscription_id: String,
     ) -> Result<()> {
         ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
@@ -682,7 +702,7 @@ impl Service {
             r.selected_node = config.selected_node;
             r.started = Some(Instant::now());
             r.binary = Some(binary);
-            r.profile_id = profile_id;
+            r.subscription_id = subscription_id;
         }
         thread::sleep(Duration::from_millis(200));
         {
@@ -723,10 +743,26 @@ impl Service {
                 .find(|(_, node)| node.tag == tag)
                 .map(|(key, _)| key.clone());
         }
-        self.log("内核已启动");
         if proxy {
             self.set_proxy(true)?
         };
+        let protocol = {
+            let run = self.running.lock().unwrap();
+            run.selected_node
+                .as_ref()
+                .and_then(|key| run.nodes.get(key))
+                .and_then(|n| n.source["type"].as_str())
+                .unwrap_or("代理")
+                .to_owned()
+        };
+        self.log(format!(
+            "内核已启动（{protocol}）；{}",
+            if proxy {
+                "系统代理已启用并读回确认"
+            } else {
+                "系统代理未启用"
+            }
+        ));
         Ok(())
     }
     pub fn stop(&self) -> Result<()> {
@@ -769,9 +805,6 @@ impl Service {
             return self.restore_proxy();
         }
         let mut proxy = self.proxy.lock().unwrap();
-        if proxy.is_some() {
-            return Ok(());
-        }
         let config = {
             let run = self.running.lock().unwrap();
             ensure!(run.child.is_some(), "请先启动内核");
@@ -814,10 +847,14 @@ impl Service {
         } else {
             format!("{host}:{port}")
         };
-        *proxy = Some(platform::enable_proxy(
-            &server,
-            inbound["type"].as_str().unwrap_or("mixed"),
-        )?);
+        let protocol = inbound["type"].as_str().unwrap_or("mixed");
+        if proxy.is_some() && platform::verify_proxy(&server, protocol)? {
+            return Ok(());
+        }
+        let snapshot = platform::enable_proxy(&server, protocol)?;
+        if proxy.is_none() {
+            *proxy = Some(snapshot);
+        }
         self.proxy_active.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -868,7 +905,7 @@ impl Service {
                     selected_node: running.selected_node.clone(),
                 },
                 running.binary.clone().context("运行内核路径不可用")?,
-                running.profile_id.clone(),
+                running.subscription_id.clone(),
             )
         };
         // Preserve the real mode in a rollback snapshot, including a change
@@ -1052,17 +1089,26 @@ impl Service {
             .iter()
             .find(|s| s.id == subscription_id)
             .context("订阅不存在")?;
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile);
         let run = self.running.lock().unwrap();
         let running = run.child.is_some();
-        let same_profile = profile.is_some_and(|p| p.id == run.profile_id);
+        let is_current = state.settings.active_subscription == subscription_id;
         let selected = if running {
-            same_profile.then_some(run.selected_node.as_ref()).flatten()
+            (is_current && run.subscription_id == subscription_id)
+                .then_some(run.selected_node.as_ref())
+                .flatten()
+                .cloned()
         } else {
-            profile.and_then(|p| p.selected_node.as_ref())
+            is_current
+                .then(|| {
+                    subscription
+                        .selected_node
+                        .as_ref()
+                        .map(|tag| NodeSelection {
+                            subscription_id: subscription_id.into(),
+                            node_tag: tag.clone(),
+                        })
+                })
+                .flatten()
         };
         Ok(subscription
             .nodes
@@ -1074,7 +1120,8 @@ impl Service {
                     node_tag: node["tag"].as_str().unwrap_or("").into(),
                 };
                 let available = running
-                    && same_profile
+                    && is_current
+                    && run.subscription_id == subscription_id
                     && run
                         .nodes
                         .get(&key)
@@ -1082,7 +1129,7 @@ impl Service {
                 SubscriptionNode {
                     name: key.node_tag.clone(),
                     protocol: node["type"].as_str().unwrap_or("").into(),
-                    selected: selected == Some(&key) && (!running || available),
+                    selected: selected.as_ref() == Some(&key) && (!running || available),
                     delay_ms: None,
                     available,
                     subscription_id: key.subscription_id,
@@ -1155,6 +1202,23 @@ impl Service {
         Ok(nodes)
     }
 
+    pub fn select_subscription(&self, subscription_id: &str) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let sub = before
+            .subscriptions
+            .iter()
+            .find(|s| s.id == subscription_id)
+            .context("订阅不存在")?;
+        ensure!(
+            sub.nodes.iter().any(model::is_connection_node),
+            "此订阅没有可连接节点，请先更新"
+        );
+        let mut candidate = before.clone();
+        candidate.settings.active_subscription = subscription_id.into();
+        self.commit_state(&before, candidate)
+    }
+
     pub fn select_subscription_node(&self, subscription_id: &str, node_tag: &str) -> Result<()> {
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
@@ -1162,98 +1226,67 @@ impl Service {
             subscription_id: subscription_id.into(),
             node_tag: node_tag.into(),
         };
+        let mut candidate = before.clone();
+        let sub = candidate
+            .subscriptions
+            .iter_mut()
+            .find(|s| s.id == subscription_id)
+            .context("订阅不存在")?;
         ensure!(
-            before
-                .subscriptions
+            sub.nodes
                 .iter()
-                .find(|s| s.id == subscription_id)
-                .is_some_and(|sub| sub
-                    .nodes
-                    .iter()
-                    .any(|n| n["tag"] == node_tag && model::is_connection_node(n))),
+                .any(|n| n["tag"] == node_tag && model::is_connection_node(n)),
             "节点不存在或不是可连接的节点"
         );
-        let profile_id = before.settings.active_profile.clone();
-        let old_profile = before
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .context("请选择一个配置")?;
-        let old_selection = old_profile.selected_node.clone();
-        let was_linked = old_profile
-            .subscriptions
-            .iter()
-            .any(|id| id == subscription_id);
-        let mut candidate = before.clone();
-        link_subscription(&mut candidate, subscription_id, &profile_id)?;
-        candidate
-            .profiles
-            .iter_mut()
-            .find(|p| p.id == profile_id)
-            .unwrap()
-            .selected_node = Some(selected.clone());
-        if self.status().running {
-            let (old_config, _, running_profile) = self.running_config()?;
-            ensure!(
-                running_profile == profile_id,
-                "当前配置与运行配置不同，请先重新加载配置"
-            );
-            let profile = candidate
-                .profiles
-                .iter()
-                .find(|p| p.id == profile_id)
-                .unwrap();
-            let mut next = self.prepare_profile(&candidate, profile)?;
-            next["experimental"]["clash_api"]["default_mode"] =
-                old_config["experimental"]["clash_api"]["default_mode"].clone();
-            let target = next.nodes[&selected].tag.clone();
-            let mut comparable = old_config.config.clone();
-            if let Some(group) = comparable["outbounds"]
-                .as_array_mut()
-                .and_then(|outbounds| {
-                    outbounds
-                        .iter_mut()
-                        .find(|o| o["tag"] == "proxy" && o["type"] == "selector")
-                })
-            {
-                group["default"] = json!(target);
-            }
-            if comparable == next.config && old_config.nodes == next.nodes {
-                let current =
-                    self.api_with_timeout("GET", "/proxies/proxy", None, CONTROL_TIMEOUT)?;
-                let previous = current["now"].as_str().context("内核没有返回当前节点")?;
-                self.select_outbound_locked("proxy", &target)?;
-                let expected = serde_json::to_value(&before)?;
-                if let Err(error) = self.update(|state| {
-                    ensure!(
-                        serde_json::to_value(&*state)? == expected,
-                        "配置在选择节点期间已改变，请重试"
-                    );
-                    *state = candidate;
-                    Ok(())
-                }) {
-                    return Err(match self.select_outbound_locked("proxy", previous) {
-                        Ok(()) => error,
-                        Err(restore) => error.context(format!("恢复原节点失败：{restore:#}")),
-                    });
+        sub.selected_node = Some(node_tag.into());
+        candidate.settings.active_subscription = subscription_id.into();
+        if self.status().running && before.settings.active_subscription == subscription_id {
+            let (old_config, _, running_subscription) = self.running_config()?;
+            if running_subscription == subscription_id {
+                let mut next = self.prepare_current(&candidate)?;
+                next["experimental"]["clash_api"]["default_mode"] =
+                    old_config["experimental"]["clash_api"]["default_mode"].clone();
+                let target = next.nodes[&selected].tag.clone();
+                let mut comparable = old_config.config.clone();
+                if let Some(group) = comparable["outbounds"]
+                    .as_array_mut()
+                    .and_then(|outbounds| {
+                        outbounds
+                            .iter_mut()
+                            .find(|o| o["tag"] == "proxy" && o["type"] == "selector")
+                    })
+                {
+                    group["default"] = json!(target);
                 }
-                let mut run = self.running.lock().unwrap();
-                run.config = next.config;
-                run.nodes = next.nodes;
-                run.selected_node = Some(selected);
-                self.subscription_revision.fetch_add(1, Ordering::SeqCst);
-                return Ok(());
+                if comparable == next.config && old_config.nodes == next.nodes {
+                    let current =
+                        self.api_with_timeout("GET", "/proxies/proxy", None, CONTROL_TIMEOUT)?;
+                    let previous = current["now"].as_str().context("内核没有返回当前节点")?;
+                    self.select_outbound_locked("proxy", &target)?;
+                    let expected = serde_json::to_value(&before)?;
+                    if let Err(error) = self.update(|state| {
+                        ensure!(
+                            serde_json::to_value(&*state)? == expected,
+                            "订阅在选择节点期间已改变，请重试"
+                        );
+                        *state = candidate;
+                        Ok(())
+                    }) {
+                        return Err(match self.select_outbound_locked("proxy", previous) {
+                            Ok(()) => error,
+                            Err(restore) => error.context(format!("恢复原节点失败：{restore:#}")),
+                        });
+                    }
+                    let mut run = self.running.lock().unwrap();
+                    run.config = next.config;
+                    run.nodes = next.nodes;
+                    run.selected_node = Some(selected);
+                    self.subscription_revision.fetch_add(1, Ordering::SeqCst);
+                    return Ok(());
+                }
             }
         }
-        self.commit_subscription_state(&before, candidate, Some(&profile_id), |state| {
-            if let Some(profile) = state.profiles.iter_mut().find(|p| p.id == profile_id) {
-                profile.selected_node = old_selection;
-                if !was_linked {
-                    profile.subscriptions.retain(|id| id != subscription_id);
-                }
-            }
-            Ok(())
-        })
+        self.commit_state(&before, candidate)
     }
 
     pub fn test_subscription_node(&self, subscription_id: &str, node_tag: &str) -> Result<u64> {
@@ -1321,64 +1354,10 @@ impl Service {
             "测速超时必须在 500 到 60000 毫秒之间"
         );
         let _op = self.operation.lock().unwrap();
-        let previous_settings = self.snapshot().settings;
-        if !self.status().running {
-            return self.update(|state| {
-                state.settings = settings;
-                Ok(())
-            });
-        }
-        let mut candidate = self.snapshot();
-        candidate.settings = settings.clone();
-        candidate.validate()?;
-        let profile = candidate
-            .profiles
-            .iter()
-            .find(|profile| profile.id == candidate.settings.active_profile)
-            .context("请选择一个配置")?;
-        let config = self.prepare_profile(&candidate, profile)?;
-        let binary = self.core_binary_for(&settings)?;
-        self.check_with_binary(&config, &binary)?;
-        self.ensure_tun_available(&config, &binary)?;
-        let (old_config, old_binary, old_profile) = self.running_config()?;
-        let new_profile = candidate.settings.active_profile.clone();
-        let old_proxy = self.status().proxy;
-        let proxy = if previous_settings.system_proxy == settings.system_proxy {
-            old_proxy
-        } else {
-            settings.system_proxy
-        };
-        self.update(|state| {
-            state.settings = settings;
-            Ok(())
-        })?;
-        let result = if config == old_config && binary == old_binary {
-            if proxy == old_proxy {
-                Ok(())
-            } else {
-                self.set_proxy(proxy)
-            }
-        } else {
-            self.stop_locked()
-                .and_then(|()| self.start_config_locked(config, binary, proxy, new_profile))
-        };
-        if let Err(error) = result {
-            let restore_settings = self.update(|state| {
-                state.settings = previous_settings;
-                Ok(())
-            });
-            let _ = self.stop_locked();
-            let restore_core =
-                self.start_config_locked(old_config, old_binary, old_proxy, old_profile);
-            if restore_core.is_err() {
-                let _ = self.stop_locked();
-            }
-            if let Err(restore) = restore_settings.and(restore_core) {
-                return Err(error.context(format!("应用设置失败，恢复失败：{restore:#}")));
-            }
-            return Err(error.context("应用设置失败，已恢复原连接"));
-        }
-        Ok(())
+        let before = self.snapshot();
+        let mut candidate = before.clone();
+        candidate.settings = settings;
+        self.commit_state(&before, candidate)
     }
 
     pub fn network_info(&self) -> Result<network::NetworkInfo> {
@@ -1404,6 +1383,88 @@ impl Service {
             "连接已变化，请重新检测"
         );
         Ok(info)
+    }
+
+    pub fn diagnose_connection(&self) -> Result<String> {
+        let (pid, config) = {
+            let run = self.running.lock().unwrap();
+            (
+                run.child.as_ref().map(Child::id).context("请先启动连接")?,
+                run.config.clone(),
+            )
+        };
+        let endpoint = network::proxy_url(&config)?.context("当前运行配置没有本地代理入口")?;
+        let host = endpoint.host_str().context("代理入口无效")?;
+        let port = endpoint.port().context("代理入口缺少端口")?;
+        let server = if host.contains(':') {
+            format!("[{}]:{port}", host.trim_matches(['[', ']']))
+        } else {
+            format!("{host}:{port}")
+        };
+        let address: std::net::SocketAddr = server.parse().context("代理入口不是本地 IP 地址")?;
+        let reachable =
+            std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok();
+        let mode = self.runtime_mode()?;
+        let mut lines = vec![
+            format!(
+                "本地入口：{server}（{}）",
+                if reachable {
+                    "可连接"
+                } else {
+                    "连接失败"
+                }
+            ),
+            format!("出站模式：{mode}"),
+        ];
+        match platform::verify_proxy(
+            &server,
+            if endpoint.scheme() == "http" {
+                "mixed"
+            } else {
+                "socks"
+            },
+        ) {
+            Ok(true) => lines.push("系统代理：HTTP / HTTPS / SOCKS 已指向 AeroBox".into()),
+            Ok(false) => lines.push("系统代理：未指向 AeroBox，或已被其他程序更改".into()),
+            Err(error) => lines.push(format!("系统代理：无法读回（{error:#}）")),
+        }
+        let tun = config["inbounds"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|i| i["type"] == "tun"));
+        lines.push(format!(
+            "虚拟网卡：{}",
+            if tun { "已开启" } else { "未开启" }
+        ));
+        let client = network::client(Some(&config), Duration::from_secs(10))?;
+        let configured_url = self.snapshot().settings.test_url;
+        let https_url = if url::Url::parse(&configured_url).is_ok_and(|u| u.scheme() == "https") {
+            configured_url
+        } else {
+            "https://www.gstatic.com/generate_204".into()
+        };
+        for (name, url) in [
+            ("HTTP", "http://www.gstatic.com/generate_204"),
+            ("HTTPS", https_url.as_str()),
+        ] {
+            let began = Instant::now();
+            let result = client
+                .get(url)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status);
+            lines.push(match result {
+                Ok(response) => format!(
+                    "{name} 经当前出口：成功（{}，{} ms）",
+                    response.status().as_u16(),
+                    began.elapsed().as_millis()
+                ),
+                Err(error) => format!(
+                    "{name} 经当前出口：失败（{}）",
+                    network::request_failure(&error)
+                ),
+            });
+        }
+        ensure!(self.status().pid == Some(pid), "检测期间连接已变化，请重试");
+        Ok(lines.join("\n"))
     }
 
     pub fn memory_usage(&self) -> network::MemoryUsage {
@@ -1565,15 +1626,23 @@ impl Service {
         self.finish_subscription_update(id)
     }
 
-    pub fn import_subscription(&self, sub: model::Subscription) -> Result<()> {
-        self.import_subscription_for_profile(sub, None)
+    pub fn save_subscription_nodes(
+        &self,
+        original: &model::Subscription,
+        nodes: Vec<Value>,
+    ) -> Result<()> {
+        model::validate_nodes(&nodes)?;
+        ensure!(
+            nodes.iter().any(model::is_connection_node),
+            "订阅没有可连接节点"
+        );
+        let mut next = original.clone();
+        next.nodes = nodes;
+        next.updated = now();
+        self.apply_subscription_update(&original.id, original, &next)
     }
 
-    pub fn import_subscription_for_profile(
-        &self,
-        mut sub: model::Subscription,
-        profile_id: Option<&str>,
-    ) -> Result<()> {
+    pub fn import_subscription(&self, mut sub: model::Subscription) -> Result<()> {
         if !sub.source.trim().is_empty() {
             ensure!(
                 !self
@@ -1589,6 +1658,10 @@ impl Service {
             model::validate_nodes(&sub.nodes)?;
             sub.updated = now();
         }
+        ensure!(
+            sub.nodes.iter().any(model::is_connection_node),
+            "订阅没有可连接节点"
+        );
         let name = sub.name.clone();
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
@@ -1596,108 +1669,137 @@ impl Service {
             sub.source.is_empty() || !before.subscriptions.iter().any(|s| s.source == sub.source),
             "此订阅已导入"
         );
-        let imported_id = sub.id.clone();
         let mut candidate = before.clone();
+        candidate.settings.active_subscription = sub.id.clone();
         candidate.subscriptions.push(sub);
-        if let Some(profile_id) = profile_id {
-            link_subscription(&mut candidate, &imported_id, profile_id)?;
-        }
-        self.commit_subscription_state(&before, candidate, profile_id, |state| {
-            state.subscriptions.retain(|s| s.id != imported_id);
-            for profile in &mut state.profiles {
-                profile.subscriptions.retain(|id| id != &imported_id);
-            }
-            Ok(())
-        })?;
-        self.log(format!("订阅「{name}」已导入"));
+        self.commit_state(&before, candidate)?;
+        self.log(format!("订阅「{name}」已导入并选用"));
         Ok(())
     }
 
-    pub fn associate_subscription_with_profile(
-        &self,
-        subscription_id: &str,
-        profile_id: &str,
-    ) -> Result<()> {
-        let _op = self.operation.lock().unwrap();
-        let before = self.snapshot();
-        let mut candidate = before.clone();
-        link_subscription(&mut candidate, subscription_id, profile_id)?;
-        if serde_json::to_value(&before)? == serde_json::to_value(&candidate)? {
-            return Ok(());
-        }
-        self.commit_subscription_state(&before, candidate, Some(profile_id), |state| {
-            if let Some(profile) = state.profiles.iter_mut().find(|p| p.id == profile_id) {
-                profile.subscriptions.retain(|id| id != subscription_id);
-            }
-            Ok(())
-        })
-    }
-
-    // The operation lock is held by both import and explicit association. They
-    // share preflight/reload/rollback, keeping the stored links and live core in
-    // agreement while allowing unrelated edits to survive a failed reload.
-    fn commit_subscription_state(
-        &self,
-        before: &State,
-        candidate: State,
-        profile_id: Option<&str>,
-        rollback: impl FnOnce(&mut State) -> Result<()>,
-    ) -> Result<()> {
+    /// The operation mutex is held. Check and apply first, then commit the
+    /// state atomically; a failed apply/save restores the previous core without
+    /// ever persisting a selection which did not become active.
+    fn commit_state(&self, before: &State, mut candidate: State) -> Result<()> {
+        candidate.normalize_selection();
         candidate.validate()?;
         let old_running = self
             .status()
             .running
             .then(|| self.running_config())
             .transpose()?;
-        let next_running = if let Some((old_config, binary, running_profile)) = &old_running {
-            if profile_id == Some(running_profile.as_str()) {
-                let profile = candidate
-                    .profiles
-                    .iter()
-                    .find(|p| &p.id == running_profile)
-                    .unwrap();
-                let mut config = self.prepare_profile(&candidate, profile)?;
-                config["experimental"]["clash_api"]["default_mode"] =
-                    old_config["experimental"]["clash_api"]["default_mode"].clone();
-                self.check_with_binary(&config, binary)?;
-                self.ensure_tun_available(&config, binary)?;
-                Some((config, binary.clone(), running_profile.clone()))
-            } else {
+        let mut changed_core = false;
+        let old_proxy = self.status().proxy;
+        let proxy = if before.settings.system_proxy == candidate.settings.system_proxy {
+            old_proxy
+        } else {
+            candidate.settings.system_proxy
+        };
+        let next_running = if let Some((old_config, old_binary, _)) = &old_running {
+            if candidate.settings.active_subscription.is_empty() {
                 None
+            } else {
+                let mut config = self.prepare_current(&candidate)?;
+                if candidate.settings.routing_mode == before.settings.routing_mode {
+                    config["experimental"]["clash_api"]["default_mode"] =
+                        old_config["experimental"]["clash_api"]["default_mode"].clone();
+                }
+                let binary = self.core_binary_for(&candidate.settings)?;
+                if &config != old_config || &binary != old_binary {
+                    self.check_with_binary(&config, &binary)?;
+                    self.ensure_tun_available(&config, &binary)?;
+                }
+                Some((
+                    config,
+                    binary,
+                    candidate.settings.active_subscription.clone(),
+                ))
             }
         } else {
             None
         };
-        let before_json = serde_json::to_value(before)?;
-        self.update(|state| {
-            ensure!(
-                serde_json::to_value(&*state)? == before_json,
-                "配置在关联订阅期间已改变，请重试"
-            );
-            *state = candidate;
-            Ok(())
-        })?;
-        if let Some((config, binary, running_profile)) = next_running {
-            let proxy = self.status().proxy;
-            if let Err(error) = self
-                .stop_locked()
-                .and_then(|()| self.start_config_locked(config, binary, proxy, running_profile))
-            {
-                let restore_data = self.update(rollback);
-                let _ = self.stop_locked();
-                let (config, binary, profile) = old_running.unwrap();
-                let restore_core = self.start_config_locked(config, binary, proxy, profile);
-                if restore_core.is_err() {
-                    let _ = self.stop_locked();
+        let apply = (|| -> Result<()> {
+            if let Some((old_config, old_binary, _)) = &old_running {
+                if let Some((config, binary, id)) = next_running {
+                    if &config == old_config && &binary == old_binary {
+                        if proxy != old_proxy {
+                            self.set_proxy(proxy)?;
+                        }
+                    } else {
+                        changed_core = true;
+                        self.stop_locked()?;
+                        self.start_config_locked(config, binary, proxy, id)?;
+                    }
+                } else {
+                    changed_core = true;
+                    self.stop_locked()?;
                 }
-                if let Err(restore) = restore_data.and(restore_core) {
-                    return Err(error.context(format!("关联订阅失败，恢复连接失败：{restore:#}")));
-                }
-                return Err(error.context("关联订阅失败，已恢复原连接"));
             }
+            let expected = serde_json::to_value(before)?;
+            self.update(|state| {
+                ensure!(
+                    serde_json::to_value(&*state)? == expected,
+                    "数据在操作期间已改变，请重试"
+                );
+                *state = candidate;
+                Ok(())
+            })
+        })();
+        if let Err(error) = apply {
+            if let Some((config, binary, id)) = old_running {
+                let restored = if changed_core {
+                    let _ = self.stop_locked();
+                    self.start_config_locked(config, binary, old_proxy, id)
+                } else if proxy != old_proxy {
+                    self.set_proxy(old_proxy)
+                } else {
+                    Ok(())
+                };
+                if let Err(restore) = restored {
+                    let _ = self.stop_locked();
+                    return Err(error.context(format!("应用失败，恢复原连接失败：{restore:#}")));
+                }
+            }
+            return Err(error.context("应用失败，已保留原选择"));
+        }
+        if self.snapshot().settings.active_subscription.is_empty() {
+            self.desired_running.store(false, Ordering::SeqCst);
         }
         self.subscription_revision.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    pub fn apply_ruleset_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let mut candidate = before.clone();
+        candidate
+            .rulesets
+            .iter_mut()
+            .find(|r| r.id == id)
+            .context("规则集不存在")?
+            .enabled = enabled;
+        self.commit_state(&before, candidate)
+    }
+
+    pub fn save_ruleset(&self, rule: RuleSet) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let mut candidate = before.clone();
+        if let Some(existing) = candidate.rulesets.iter_mut().find(|r| r.id == rule.id) {
+            *existing = rule;
+        } else {
+            candidate.rulesets.push(rule);
+        }
+        self.commit_state(&before, candidate)
+    }
+
+    pub fn delete_resource(&self, kind: &str, id: &str) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let mut candidate = before.clone();
+        model::remove_resource(&mut candidate, kind, id)?;
+        self.commit_state(&before, candidate)
     }
 
     pub fn subscription_revision(&self) -> u64 {
@@ -1863,91 +1965,7 @@ impl Service {
                 .unwrap(),
             sub,
         );
-        let old_running = self
-            .status()
-            .running
-            .then(|| self.running_config())
-            .transpose()?;
-        let next_running = if let Some((old_config, binary, profile_id)) = &old_running {
-            if let Some(profile) = candidate.profiles.iter().find(|profile| {
-                &profile.id == profile_id && profile.subscriptions.iter().any(|linked| linked == id)
-            }) {
-                let mut config = self.prepare_profile(&candidate, profile)?;
-                config["experimental"]["clash_api"]["default_mode"] =
-                    old_config["experimental"]["clash_api"]["default_mode"].clone();
-                if &config != old_config {
-                    self.check_with_binary(&config, binary)?;
-                    self.ensure_tun_available(&config, binary)?;
-                    Some((config, binary.clone(), profile_id.clone()))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let before_json = serde_json::to_value(&before)?;
-        self.update(|state| {
-            ensure!(
-                serde_json::to_value(&*state)? == before_json,
-                "配置在更新期间已改变，请重试"
-            );
-            let target = state
-                .subscriptions
-                .iter_mut()
-                .find(|s| s.id == id)
-                .context("订阅已被删除")?;
-            copy_subscription_data(target, sub);
-            Ok(())
-        })?;
-        if let Some((config, binary, profile_id)) = next_running {
-            let proxy = self.status().proxy;
-            let result = self
-                .stop_locked()
-                .and_then(|()| self.start_config_locked(config, binary, proxy, profile_id));
-            if let Err(error) = result {
-                let restored_data = self.update(|state| {
-                    let target = state
-                        .subscriptions
-                        .iter_mut()
-                        .find(|sub| sub.id == id)
-                        .context("订阅已被删除")?;
-                    ensure!(
-                        target.source == sub.source
-                            && target.updated == sub.updated
-                            && target.nodes == sub.nodes,
-                        "订阅已被编辑，无法恢复旧内容"
-                    );
-                    copy_subscription_data(target, original);
-                    for profile in &mut state.profiles {
-                        if profile.selected_node.is_none()
-                            && let Some(previous) = before
-                                .profiles
-                                .iter()
-                                .find(|old| old.id == profile.id)
-                                .and_then(|old| old.selected_node.as_ref())
-                            && previous.subscription_id == id
-                        {
-                            profile.selected_node = Some(previous.clone());
-                        }
-                    }
-                    Ok(())
-                });
-                let _ = self.stop_locked();
-                let (config, binary, profile_id) = old_running.unwrap();
-                let restored_core = self.start_config_locked(config, binary, proxy, profile_id);
-                if restored_core.is_err() {
-                    let _ = self.stop_locked();
-                }
-                if let Err(restore) = restored_data.and(restored_core) {
-                    return Err(error.context(format!("订阅更新失败，恢复失败：{restore:#}")));
-                }
-                return Err(error.context("订阅更新失败，已恢复原节点与连接"));
-            }
-        }
-        self.subscription_revision.fetch_add(1, Ordering::SeqCst);
+        self.commit_state(&before, candidate)?;
         self.log(format!("订阅「{}」更新完成", sub.name));
         Ok(())
     }
@@ -2050,27 +2068,40 @@ impl Service {
         } else {
             None
         };
-        self.update(|s| {
-            let target = s
-                .rulesets
-                .iter_mut()
-                .find(|r| r.id == id)
-                .context("规则集已被删除")?;
-            ensure!(
-                target.binary == r.binary
-                    && target.source == r.source
-                    && target.content == r.content
-                    && target.updated == r.updated,
-                "规则集在保存期间已被修改，请重新打开编辑器"
-            );
-            if let Some(bytes) = compiled {
-                atomic_write(&path, &bytes, 0o600)?;
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let mut candidate = before.clone();
+        let target = candidate
+            .rulesets
+            .iter_mut()
+            .find(|rule| rule.id == id)
+            .context("规则集已被删除")?;
+        ensure!(
+            target.binary == r.binary
+                && target.source == r.source
+                && target.content == r.content
+                && target.updated == r.updated,
+            "规则集在保存期间已被修改，请重新打开编辑器"
+        );
+        target.content = value;
+        target.updated = now();
+        let original_file = fs::read(&path).ok();
+        if let Some(bytes) = compiled.as_ref() {
+            atomic_write(&path, bytes, 0o600)?;
+        }
+        if let Err(error) = self.commit_state(&before, candidate) {
+            if compiled.is_some() {
+                if let Some(bytes) = original_file {
+                    atomic_write(&path, &bytes, 0o600).context("恢复规则文件失败")?;
+                } else {
+                    let _ = fs::remove_file(&path);
+                }
             }
-            target.content = value;
-            target.updated = now();
-            Ok(())
-        })
+            return Err(error);
+        }
+        Ok(())
     }
+
     pub fn install_core(&self) -> Result<()> {
         let release: Value = self
             .client()?
@@ -2134,30 +2165,6 @@ impl Service {
         }
         bail!("归档内未找到 sing-box")
     }
-}
-
-fn link_subscription(state: &mut State, subscription_id: &str, profile_id: &str) -> Result<()> {
-    ensure!(
-        state.subscriptions.iter().any(|s| s.id == subscription_id),
-        "订阅不存在"
-    );
-    let profile = state
-        .profiles
-        .iter_mut()
-        .find(|p| p.id == profile_id)
-        .context("要关联的配置已被删除")?;
-    ensure!(
-        profile.config["outbounds"]
-            .as_array()
-            .is_some_and(|outbounds| outbounds
-                .iter()
-                .any(|o| o["tag"] == "proxy" && o["type"] == "selector")),
-        "此配置缺少 proxy 代理组，请先添加 selector 代理组或关闭关联选项"
-    );
-    if !profile.subscriptions.iter().any(|id| id == subscription_id) {
-        profile.subscriptions.push(subscription_id.to_owned());
-    }
-    Ok(())
 }
 
 fn copy_subscription_data(target: &mut model::Subscription, source: &model::Subscription) {

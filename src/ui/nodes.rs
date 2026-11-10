@@ -3,7 +3,6 @@ use aerobox_for_linux::engine::SubscriptionNode;
 
 pub(super) struct NodesPanel {
     subscription_id: String,
-    picker: gtk::DropDown,
     list: gtk::ListBox,
     empty: gtk::Widget,
     test: gtk::Button,
@@ -24,73 +23,28 @@ struct NodeRow {
 impl Ui {
     pub(super) fn nodes(self: &Rc<Self>, heading: &gtk::Box) {
         let state = self.service.snapshot();
-        if state.subscriptions.is_empty() {
+        let Some(subscription) = state
+            .subscriptions
+            .iter()
+            .find(|s| s.id == state.settings.active_subscription)
+        else {
             self.body
                 .append(&empty("network-wireless-symbolic", "暂无节点", ""));
+            let choose = gtk::Button::with_label("选择订阅");
+            choose.set_halign(gtk::Align::Center);
+            let weak = Rc::downgrade(self);
+            choose.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.navigate(Page::Subscriptions);
+                }
+            });
+            self.body.append(&choose);
             return;
-        }
-        let active = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.settings.active_profile);
-        let preferred = self.node_subscription.borrow().clone();
-        let selected = state
-            .subscriptions
-            .iter()
-            .position(|s| s.id == preferred)
-            .or_else(|| {
-                active
-                    .and_then(|p| p.selected_node.as_ref())
-                    .and_then(|node| {
-                        state
-                            .subscriptions
-                            .iter()
-                            .position(|s| s.id == node.subscription_id)
-                    })
-            })
-            .or_else(|| {
-                active.and_then(|p| {
-                    state
-                        .subscriptions
-                        .iter()
-                        .position(|s| p.subscriptions.contains(&s.id))
-                })
-            })
-            .unwrap_or(0);
-        let subscription_id = state.subscriptions[selected].id.clone();
-        self.node_subscription.replace(subscription_id.clone());
-        let names: Vec<_> = state
-            .subscriptions
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
-        let picker = gtk::DropDown::from_strings(&names);
-        picker.set_widget_name("node-subscription");
-        picker.add_css_class("node-subscription");
-        picker.set_selected(selected as u32);
-        picker.set_hexpand(true);
-        picker.update_property(&[gtk::accessible::Property::Label("选择订阅")]);
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let text = label("", "");
-            text.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            text.set_width_chars(12);
-            text.set_max_width_chars(36);
-            item.set_child(Some(&text));
-        });
-        factory.connect_bind(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let text = item.child().unwrap().downcast::<gtk::Label>().unwrap();
-            let value = item
-                .item()
-                .unwrap()
-                .downcast::<gtk::StringObject>()
-                .unwrap();
-            text.set_text(&value.string());
-        });
-        picker.set_factory(Some(&factory));
-        self.body.append(&picker);
+        };
+        let subscription_id = subscription.id.clone();
+        let name = label(&subscription.name, "muted");
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        self.body.append(&name);
         let test = gtk::Button::with_label("测速");
         test.add_css_class("compact-action");
         test.set_valign(gtk::Align::Center);
@@ -110,7 +64,6 @@ impl Ui {
         self.body.append(&empty);
         let panel = Rc::new(NodesPanel {
             subscription_id,
-            picker: picker.clone(),
             list: list.clone(),
             empty: empty.upcast(),
             test: test.clone(),
@@ -119,14 +72,6 @@ impl Ui {
             selecting: Cell::new(false),
             testing: Cell::new(false),
             revision: Cell::new(0),
-        });
-        let ids: Vec<_> = state.subscriptions.into_iter().map(|s| s.id).collect();
-        let weak = Rc::downgrade(self);
-        picker.connect_selected_notify(move |picker| {
-            if let (Some(ui), Some(id)) = (weak.upgrade(), ids.get(picker.selected() as usize)) {
-                ui.node_subscription.replace(id.clone());
-                ui.refresh(Page::Nodes);
-            }
         });
         let weak = Rc::downgrade(self);
         let weak_panel = Rc::downgrade(&panel);
@@ -232,7 +177,6 @@ impl NodesPanel {
 
     fn controls(&self) {
         self.list.set_sensitive(!self.selecting.get());
-        self.picker.set_sensitive(!self.selecting.get());
         self.test.set_sensitive(
             !self.selecting.get()
                 && !self.testing.get()
@@ -394,140 +338,85 @@ fn delay_text(delay: Option<u64>) -> String {
     }
 }
 
-pub(super) fn smoke_nodes(ui: &Rc<Ui>, step: u32) -> Result<()> {
+pub(super) fn smoke_nodes(
+    ui: &Rc<Ui>,
+    subscription: &str,
+    count: usize,
+    selected: Option<&str>,
+    click: Option<usize>,
+) -> Result<()> {
     use anyhow::ensure;
-    let panel = ui.node_panel.borrow().clone().context("节点列表未打开")?;
+    ensure!(ui.jobs.get() == 0, "节点任务未完成");
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
     let state = ui.service.snapshot();
     let active = state
-        .profiles
+        .subscriptions
         .iter()
-        .find(|p| p.id == state.settings.active_profile)
-        .unwrap();
-    let chosen_rows = || {
-        panel
-            .rows
-            .borrow()
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.row.has_css_class("node-selected"))
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>()
-    };
-    let activate = |index: usize| {
+        .find(|s| s.id == state.settings.active_subscription)
+        .context("缺少所选订阅")?;
+    ensure!(
+        active.name == subscription && panel.subscription_id == active.id,
+        "节点页未跟随所选订阅"
+    );
+    ensure!(
+        panel.data.borrow().len() == count,
+        "列表混入其他订阅或代理组"
+    );
+    let highlighted: Vec<_> = panel
+        .data
+        .borrow()
+        .iter()
+        .zip(panel.rows.borrow().iter())
+        .filter(|(_, row)| row.row.has_css_class("node-selected"))
+        .map(|(n, _)| n.node_tag.clone())
+        .collect();
+    if let Some(selected) = selected {
+        ensure!(highlighted == vec![selected], "所选节点没有高亮");
+    }
+    fn inspect(widget: &gtk::Widget) -> Result<()> {
+        ensure!(
+            !widget.is::<gtk::DropDown>()
+                && !widget.is::<gtk::SearchEntry>()
+                && !widget.is::<gtk::ToggleButton>(),
+            "节点页还有分组、搜索或模式选择"
+        );
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            ensure!(
+                ![
+                    "代理组",
+                    "路由模式",
+                    "全局",
+                    "规则",
+                    "直连",
+                    "默认",
+                    "代理",
+                    "自动选择",
+                    "使用"
+                ]
+                .contains(&label.text().as_str()),
+                "节点页显示了内部控制"
+            );
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            inspect(&widget)?;
+        }
+        Ok(())
+    }
+    inspect(ui.body.upcast_ref())?;
+    if let Some(index) = click {
         let row = panel.rows.borrow()[index].row.clone();
         panel.list.emit_by_name::<()>("row-activated", &[&row]);
-    };
-    ensure!(ui.jobs.get() == 0, "节点选择任务没有结束");
-    if step > 0 {
-        ensure!(
-            state.settings.routing_mode == "global",
-            "选择节点意外切换了路由模式"
-        );
-    }
-    match step {
-        0 => {
-            ensure!(
-                panel.data.borrow().len() == 6,
-                "节点列表混入了分组或其他订阅"
-            );
-            ensure!(chosen_rows() == vec![1], "已保存节点没有高亮");
-            ensure!(!panel.test.is_sensitive(), "未启动时错误启用了测速");
-            fn check_controls(widget: &gtk::Widget) -> Result<()> {
-                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
-                    ensure!(
-                        ![
-                            "代理组",
-                            "路由模式",
-                            "规则",
-                            "全局",
-                            "直连",
-                            "自动选择",
-                            "默认",
-                            "代理"
-                        ]
-                        .contains(&label.text().as_str()),
-                        "节点页混入模式或内部组"
-                    );
-                }
-                ensure!(!widget.is::<gtk::FlowBox>(), "节点页仍在显示卡片分组");
-                let mut child = widget.first_child();
-                while let Some(widget) = child {
-                    child = widget.next_sibling();
-                    check_controls(&widget)?;
-                }
-                Ok(())
-            }
-            check_controls(ui.body.upcast_ref())?;
-            ui.service.set_routing_mode("global")?;
-            activate(0);
-            ensure!(chosen_rows() == vec![1], "操作成功前提前高亮了节点");
-        }
-        1 => {
-            ensure!(
-                chosen_rows() == vec![0]
-                    && active
-                        .selected_node
-                        .as_ref()
-                        .is_some_and(|n| n.node_tag == "香港 · 01"),
-                "选择后高亮或保存失败"
-            );
-            ui.navigate(Page::Home);
-            ui.navigate(Page::Nodes);
-            let reopened = ui.node_panel.borrow().clone().unwrap();
-            ensure!(
-                reopened.rows.borrow()[0].row.has_css_class("node-selected"),
-                "返回节点页丢失了选择"
-            );
-            reopened.picker.set_selected(1);
-        }
-        2 => {
-            ensure!(panel.data.borrow().len() == 2, "切换订阅没有替换节点列表");
-            ensure!(chosen_rows().is_empty(), "跨订阅同名节点被错误高亮");
-            ensure!(
-                active
-                    .selected_node
-                    .as_ref()
-                    .is_some_and(|n| n.subscription_id == state.subscriptions[0].id),
-                "浏览订阅意外切换了出口"
-            );
-            activate(0);
-            ensure!(chosen_rows().is_empty(), "选择完成前出现了错误高亮");
-        }
-        3 => {
-            ensure!(chosen_rows() == vec![0], "新订阅节点没有高亮");
-            ensure!(
-                active
-                    .selected_node
-                    .as_ref()
-                    .is_some_and(|n| n.subscription_id == state.subscriptions[1].id
-                        && n.node_tag == "香港 · 01"),
-                "同名节点选错订阅"
-            );
-            ensure!(
-                active.subscriptions.contains(&state.subscriptions[1].id),
-                "选择节点没有关联订阅"
-            );
-            panel.picker.set_selected(0);
-        }
-        4 => {
-            ensure!(chosen_rows().is_empty(), "返回另一订阅时仍高亮同名节点");
-            panel.picker.set_selected(1);
-            ui.window.set_default_size(700, 600);
-        }
-        5 => {
-            ensure!(chosen_rows() == vec![0], "切换订阅后丢失已选节点");
-            for row in panel.rows.borrow().iter() {
-                let bounds = row
-                    .row
-                    .compute_bounds(&ui.scroll)
-                    .context("节点行没有分配位置")?;
-                ensure!(
-                    bounds.x() >= 0.0 && bounds.x() + bounds.width() <= ui.scroll.width() as f32,
-                    "窄窗口节点行横向溢出"
-                );
-            }
-        }
-        _ => unreachable!(),
+        let highlighted_after: Vec<_> = panel
+            .data
+            .borrow()
+            .iter()
+            .zip(panel.rows.borrow().iter())
+            .filter(|(_, row)| row.row.has_css_class("node-selected"))
+            .map(|(n, _)| n.node_tag.clone())
+            .collect();
+        ensure!(highlighted_after == highlighted, "选用成功前提前高亮了节点");
     }
     Ok(())
 }

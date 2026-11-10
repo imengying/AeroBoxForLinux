@@ -5,15 +5,6 @@ use serde_json::{Value, json};
 const DIRECT_DNS: &str = "aerobox-dns-direct";
 const PROXY_DNS: &str = "aerobox-dns-proxy";
 const TUN_TAG: &str = "aerobox-tun";
-const ADS: &[&str] = &[
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "adservice.google.com",
-    "ad.qq.com",
-    "pos.baidu.com",
-    "cpro.baidu.com",
-];
 
 fn object<'a>(value: &'a mut Value, key: &str) -> Result<&'a mut Value> {
     ensure!(value.is_object(), "配置必须是对象");
@@ -52,7 +43,7 @@ pub fn apply_profile_settings(
     config: &mut Value,
     settings: &Settings,
     lan_tag: Option<&str>,
-    ads_tag: Option<&str>,
+    _ads_tag: Option<&str>,
 ) -> Result<()> {
     settings.validate()?;
     ensure!(config.is_object(), "配置必须是对象");
@@ -218,12 +209,6 @@ pub fn apply_profile_settings(
     }
     dns_rules.push(json!({"clash_mode":"direct","server":direct_dns,"action":"route"}));
     dns_rules.push(json!({"clash_mode":"global","server":proxy_dns,"action":"route"}));
-    if settings.block_ads {
-        dns_rules.push(match ads_tag {
-            Some(tag) => json!({"rule_set":tag,"action":"reject"}),
-            None => json!({"domain_suffix":ADS,"action":"reject"}),
-        });
-    }
     let previous = std::mem::take(array(dns, "rules")?);
     dns_rules.extend(
         previous
@@ -270,12 +255,6 @@ pub fn apply_profile_settings(
             rules.push(json!({"rule_set":tag,"action":"route","outbound":direct}));
         }
     }
-    if settings.block_ads {
-        rules.push(match ads_tag {
-            Some(tag) => json!({"rule_set":tag,"action":"reject"}),
-            None => json!({"domain_suffix":ADS,"action":"reject"}),
-        });
-    }
     rules.extend(previous.into_iter().filter(|r| {
         !matches!(r["action"].as_str(), Some("sniff" | "hijack-dns"))
             && r.get("clash_mode").is_none()
@@ -303,7 +282,7 @@ pub fn apply_profile_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Profile, State};
+    use crate::model::Profile;
     #[test]
     fn authenticated_imports_get_a_private_download_listener_without_port_collisions() {
         let mut config = Profile::new("import").config;
@@ -383,7 +362,7 @@ mod tests {
     fn malformed_imports_return_errors() {
         let mut config = json!({"dns":{"servers":42}});
         assert!(apply_settings(&mut config, &Settings::default()).is_err());
-        let mut config = State::default().profiles.remove(0).config;
+        let mut config = Profile::new("test").config;
         let settings = Settings {
             tun_enabled: true,
             tun_mtu: 900,

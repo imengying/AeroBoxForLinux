@@ -97,6 +97,41 @@ pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client
     Ok(builder.build()?)
 }
 
+/// Expose the failure stage without copying URLs, endpoints or credentials
+/// from an underlying resolver, TLS or proxy error into a shareable report.
+pub(crate) fn request_failure(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "连接超时".into();
+    }
+    if let Some(status) = error.status() {
+        return format!("HTTP {}", status.as_u16());
+    }
+    let mut causes = String::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        causes.push_str(&error.to_string().to_lowercase());
+        source = error.source();
+    }
+    if causes.contains("certificate") {
+        "TLS 证书验证失败"
+    } else if causes.contains("dns") || causes.contains("resolve") || causes.contains("lookup") {
+        "DNS 解析失败"
+    } else if causes.contains("tunnel") || causes.contains("proxy") {
+        "代理隧道建立失败"
+    } else if causes.contains("tls") || causes.contains("handshake") {
+        "TLS 握手失败"
+    } else if causes.contains("refused") {
+        "连接被拒绝"
+    } else if causes.contains("reset") {
+        "连接被重置"
+    } else if error.is_connect() {
+        "连接建立失败"
+    } else {
+        "请求失败"
+    }
+    .into()
+}
+
 pub(crate) fn detect(client: Client, ipv6: bool, via_proxy: bool) -> Result<NetworkInfo> {
     let (v4, v6) = std::thread::scope(|scope| {
         let client_v4 = client.clone();

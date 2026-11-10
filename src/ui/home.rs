@@ -54,10 +54,10 @@ impl Ui {
         toggle.set_sensitive(
             status.running
                 || (self.jobs.get() == 0
-                    && state
-                        .profiles
-                        .iter()
-                        .any(|p| p.id == state.settings.active_profile)),
+                    && state.subscriptions.iter().any(|sub| {
+                        sub.id == state.settings.active_subscription
+                            && sub.nodes.iter().any(model::is_connection_node)
+                    })),
         );
         let weak = Rc::downgrade(self);
         toggle.connect_clicked(move |button| {
@@ -296,10 +296,10 @@ impl Dashboard {
                 let state = ui.service.snapshot();
                 button.set_sensitive(
                     status.running
-                        || state
-                            .profiles
-                            .iter()
-                            .any(|p| p.id == state.settings.active_profile),
+                        || state.subscriptions.iter().any(|sub| {
+                            sub.id == state.settings.active_subscription
+                                && sub.nodes.iter().any(model::is_connection_node)
+                        }),
                 );
             } else if !status.running {
                 button.set_sensitive(false);
