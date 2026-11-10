@@ -395,15 +395,42 @@ fn enable_commands(backend: &Backend, server: &str, protocol: &str) -> Result<Ve
 
 pub fn enable_proxy(server: &str, protocol: &str) -> Result<ProxySnapshot> {
     let backend = backend()?;
-    let commands = enable_commands(&backend, server, protocol)?;
-    let snapshot = capture(&backend)?;
-    for command in commands {
-        if let Err(error) = command.run() {
-            return match snapshot.restore() {
-                Ok(()) => Err(error),
-                Err(restore) => Err(error.context(restore.to_string())),
-            };
+    enable_proxy_for(&backend, server, protocol)
+}
+
+fn enable_proxy_for(backend: &Backend, server: &str, protocol: &str) -> Result<ProxySnapshot> {
+    let commands = enable_commands(backend, server, protocol)?;
+    let snapshot = capture(backend)?;
+    let applied = (|| -> Result<()> {
+        for command in &commands {
+            command.run()?;
         }
+        for command in &commands {
+            let verification = match backend {
+                Backend::Gnome { settings } => Some((
+                    DesktopCommand::new(settings, ["get", &command.args[1], &command.args[2]]),
+                    command.args[3].as_str(),
+                )),
+                Backend::Kde { read, write, .. } if command.program == *write => Some((
+                    DesktopCommand::new(read, &command.args[..6]),
+                    command.args[6].as_str(),
+                )),
+                Backend::Kde { .. } => None,
+            };
+            if let Some((read, expected)) = verification {
+                ensure!(
+                    read.run()? == expected,
+                    "系统代理设置未生效，请检查桌面设置权限"
+                );
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = applied {
+        return match snapshot.restore() {
+            Ok(()) => Err(error),
+            Err(restore) => Err(error.context(restore.to_string())),
+        };
     }
     Ok(snapshot)
 }
@@ -594,6 +621,40 @@ mod tests {
         assert!(enable_commands(&backend, "127.0.0.1:0", "http").is_err());
         assert!(enable_commands(&backend, "http://user:pass@localhost:2080", "http").is_err());
         assert!(enable_commands(&backend, "localhost:2080", "unknown").is_err());
+    }
+
+    #[test]
+    fn system_proxy_checks_readback_and_restores_when_writes_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("gsettings-test");
+        let state_path = program.with_extension("json");
+        let initial: serde_json::Value = gsettings_keys()
+            .iter()
+            .map(|(schema, key)| (format!("{schema}/{key}"), serde_json::json!("old-value")))
+            .collect();
+        fs::write(&state_path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        fs::write(&program, "#!/usr/bin/python3\nimport sys,json\nfrom pathlib import Path\np=Path(__file__).with_suffix('.json')\ns=json.loads(p.read_text())\nkey=sys.argv[2]+'/'+sys.argv[3]\nif sys.argv[1]=='get': print(s[key])\nelif not (Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mode' and sys.argv[4]==\"'manual'\"):\n s[key]=sys.argv[4];p.write_text(json.dumps(s))\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = Backend::Gnome {
+            settings: program.clone(),
+        };
+        let snapshot = enable_proxy_for(&backend, "127.0.0.1:2080", "mixed").unwrap();
+        snapshot.restore().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&state_path).unwrap()).unwrap(),
+            initial
+        );
+        fs::write(program.with_extension("blocked"), "").unwrap();
+        assert!(
+            enable_proxy_for(&backend, "127.0.0.1:2080", "mixed")
+                .unwrap_err()
+                .to_string()
+                .contains("未生效")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&state_path).unwrap()).unwrap(),
+            initial
+        );
     }
 
     #[test]

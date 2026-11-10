@@ -2,7 +2,7 @@
 
 面向 Linux / Wayland 的 sing-box 图形管理器，使用 **Rust、GTK4、libadwaita 和 GtkSourceView 5**。原生侧栏、卡片、表单和代码编辑器，支持浅色、深色及跟随系统主题。
 
-首页集中显示出口 IP、上传下载速度、出站模式、系统代理与 TUN 开关，以及连接数、运行时间和整体内存。左下角悬浮按钮负责启动和停止内核，滚动页面时保持可见；IPv6 开关位于设置中。配置选择、编辑和重载集中在配置页。
+首页集中显示出口 IP、上传下载速度、出站模式、系统代理与 TUN 开关，以及连接数、运行时间和整体内存。右下角悬浮按钮负责启动和停止内核，滚动页面时保持可见；IPv6 开关位于设置中。配置选择、编辑和重载集中在配置页。
 
 ## Arch Linux 安装成品
 
@@ -24,9 +24,9 @@ cd AeroBoxForLinux-linux-amd64
 ## 使用
 
 1. 在设置中下载 sing-box 1.14 或更新的内核，或指定已有内核路径。内置安装器从 sing-box 官方 GitHub Release 下载并校验 SHA256。
-2. 添加订阅并更新，查看和编辑节点。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS / HTTP 节点链接。
-3. 选择内置的「智能分流」「代理优先」或「直连网络」，编辑配置并勾选要关联的订阅。也可导入原始 sing-box JSON，或通过脚本转换生成结果。
-4. 预览并检查配置后启动内核。通过代理页切换节点和测试延迟，通过连接页查看、筛选和断开连接，通过日志页排查错误。
+2. 通过链接、剪贴板或本地文件导入订阅；导入时自动解析，成功后入库。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS / HTTP 节点链接。
+3. 选择内置的「智能分流」「代理优先」或「直连网络」，编辑配置并勾选要关联的订阅。也可导入原始 sing-box JSON。
+4. 预览并检查配置后启动内核。通过节点页切换节点和测试延迟，通过连接页查看、筛选和断开连接，通过日志页排查错误。
 
 系统代理支持 GNOME 和 KDE Plasma，停止代理时恢复本次修改前的设置。Sway / Hyprland 等窗口管理器可使用 TUN，或在各应用中填写本地 HTTP / SOCKS 代理。关闭主窗口会停止本程序启动的内核并恢复代理。
 
@@ -48,21 +48,17 @@ sudo setcap cap_net_admin,cap_net_bind_service=+ep /实际路径/sing-box
 
 内核更新会替换文件，需要重新授予权限。
 
-## 数据与脚本
+## 配置与订阅
 
-数据保存在 `${XDG_DATA_HOME:-~/.local/share}/singbox/state.json`，内核、规则集和生成配置位于同一数据目录。可使用 `AeroBox --data-dir /目录` 指定独立数据目录。
+配置默认保存在 `${XDG_CONFIG_HOME:-~/.config}/AeroBoxForLinux/state.json`，内核、规则集和生成配置位于同一目录。可使用 `AeroBox --data-dir /目录` 指定独立目录。首次升级会从旧的 `${XDG_DATA_HOME:-~/.local/share}/singbox` 迁移；已有新配置优先，旧目录保留为备份。迁移内核后，TUN 所需的文件权限可能需要重新授权。
 
-数据采用 JSON 格式，配置保存失败时保留编辑内容；写入数据使用原子替换。支持导入 sing-box JSON 配置和订阅地址。
+写入使用原子替换，配置目录仅当前用户可访问。迁移前会验证数据，失败不会覆盖旧文件。处理脚本和节点正则筛选功能已移除，旧字段会在迁移或下次保存时清理。
 
-配置脚本提供 `onGenerate(config)`，订阅脚本提供 `onSubscribe(nodes)`；返回转换后的 JSON 对象或节点数组，支持 `async` 函数。脚本通过内嵌 QuickJS 执行，最多运行 5 秒，使用独立的 32 MiB 内存限额。例如：
+订阅支持普通 HTTP / HTTPS 地址、Hiddify / sing-box / Clash 导入链接，以及本地 JSON、YAML、Base64 或节点链接内容。文件导入后保存解析结果，无需保留原文件；远程订阅默认每 24 小时自动更新，可在订阅设置中关闭或调整为 1–168 小时。列表显示节点数量、更新时间、流量额度和有效期；流量与有效期以服务端提供的信息为准。
 
-```js
-function onSubscribe(nodes) {
-  return nodes.filter(node => !node.tag.includes("剩余流量"));
-}
-```
+自动更新仅在应用运行时执行，失败后保留原节点并延后重试；更新正在使用的订阅时，会先校验生成配置，再重载，失败则恢复原连接。导入不会自动切换配置，可在配置页关联订阅。设置按常规、网络、虚拟网卡和内核分组，修改后使用右上角「保存」。
 
-脚本仅处理传入的数据，没有文件、网络、进程、浏览器或插件 API。
+订阅导入流程、更新信息和设置分组参考 [Hiddify](https://github.com/hiddify/hiddify-app)。规则集支持直接填写域名、IP 网段、进程名或端口生成匹配条件，复杂规则仍可用 JSON 编辑。
 
 ## 从源码构建
 
@@ -105,7 +101,7 @@ README.md           使用与开发说明
 LICENSE             项目许可证
 ```
 
-`src/model.rs` 管理数据、内置资源与原子存储，`engine.rs` 管理内核与 Clash API，`config.rs` 应用网络设置，`network.rs` 处理下载路径、IP 检测与内存统计，`platform.rs` 对接桌面代理及启动器；`subscription.rs`、`script.rs`、`traffic.rs` 分别处理订阅、脚本和实时速率。
+`src/model.rs` 管理数据、内置资源与原子存储，`engine.rs` 管理内核与 Clash API，`config.rs` 应用网络设置，`network.rs` 处理下载路径、IP 检测与内存统计，`platform.rs` 对接桌面代理及启动器；`subscription.rs` 与 `traffic.rs` 分别处理订阅解析和实时速率。
 
 生成文件统一存放在 Git 忽略的 `target/` 中：`release/` 为程序，`packages/` 为安装包，`wayland/` 为界面检查结果。源码目录不保存构建缓存、安装包或演示截图。
 

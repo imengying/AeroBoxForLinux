@@ -18,6 +18,10 @@ fn run() -> Result<gtk::glib::ExitCode> {
     let mut smoke = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--watch-core" => {
+                engine::watch_core_process()?;
+                return Ok(gtk::glib::ExitCode::SUCCESS);
+            }
             "--version" => {
                 println!(
                     "AeroBox {} · Rust / GTK4 / Wayland",

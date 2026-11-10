@@ -1,21 +1,23 @@
 use crate::{
     model::{self, Profile, RuleSet, Settings, State, Store, atomic_write, now, pretty},
-    network, platform, script, subscription,
+    network, platform, subscription,
 };
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Method, blocking::Client};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -34,6 +36,7 @@ struct Running {
     config: Value,
     started: Option<Instant>,
     binary: Option<PathBuf>,
+    profile_id: String,
 }
 pub struct Service {
     pub store: Mutex<Store>,
@@ -44,6 +47,14 @@ pub struct Service {
     proxy_active: AtomicBool,
     closing: AtomicBool,
     desired_running: AtomicBool,
+    subscriptions: Mutex<HashMap<String, SubscriptionAttempt>>,
+    subscription_revision: AtomicU64,
+}
+
+#[derive(Default)]
+struct SubscriptionAttempt {
+    pending: bool,
+    failed_at: Option<Instant>,
 }
 impl Service {
     pub fn new(store: Store) -> Arc<Self> {
@@ -56,6 +67,8 @@ impl Service {
             proxy_active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             desired_running: AtomicBool::new(false),
+            subscriptions: Mutex::new(HashMap::new()),
+            subscription_revision: AtomicU64::new(0),
         })
     }
     pub fn shutdown(&self) -> Result<()> {
@@ -190,14 +203,47 @@ impl Service {
                 "订阅「{}」没有节点，请先更新",
                 sub.name
             );
+            let mut renamed = HashMap::new();
             for node in &sub.nodes {
                 let tag = node["tag"].as_str().context("订阅节点缺少名称")?;
-                ensure!(
-                    tags.insert(tag.into()),
-                    "节点名称重复: {tag}，请设置订阅名称前缀"
-                );
-                outbounds.push(node.clone());
-                added.push(Value::String(tag.into()));
+                let mut generated_tag = tag.to_owned();
+                if tags.contains(tag) {
+                    let suffix = &sub.id[..sub.id.len().min(8)];
+                    generated_tag = format!("{tag} · {suffix}");
+                    let mut collision = 2;
+                    while tags.contains(&generated_tag) {
+                        generated_tag = format!("{tag} · {suffix}-{collision}");
+                        collision += 1;
+                    }
+                }
+                tags.insert(generated_tag.clone());
+                renamed.insert(tag.to_owned(), generated_tag);
+            }
+            for node in &sub.nodes {
+                let tag = node["tag"].as_str().context("订阅节点缺少名称")?;
+                let generated_tag = &renamed[tag];
+                let mut generated = node.clone();
+                generated["tag"] = json!(generated_tag);
+                // A full sing-box subscription may contain groups and detours.
+                // Rewrite references within this subscription using its complete
+                // map so a collision cannot route into another subscription.
+                for field in ["detour", "default"] {
+                    if let Some(target) =
+                        generated[field].as_str().and_then(|name| renamed.get(name))
+                    {
+                        generated[field] = json!(target);
+                    }
+                }
+                if let Some(members) = generated.get_mut("outbounds").and_then(Value::as_array_mut)
+                {
+                    for member in members {
+                        if let Some(target) = member.as_str().and_then(|name| renamed.get(name)) {
+                            *member = json!(target);
+                        }
+                    }
+                }
+                outbounds.push(generated);
+                added.push(Value::String(generated_tag.clone()));
             }
         }
         if !added.is_empty() {
@@ -241,8 +287,6 @@ impl Service {
                 existing.push(rule)
             }
         }
-        let mut config = script::transform(&profile.script, "onGenerate", &config)?;
-        ensure!(config.is_object(), "配置脚本必须返回对象");
         if config["experimental"]["clash_api"].is_object()
             && config["experimental"]["clash_api"].get("secret").is_none()
         {
@@ -287,14 +331,15 @@ impl Service {
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
-        let (previous, previous_binary) = self.running_config()?;
+        let (previous, previous_binary, previous_profile) = self.running_config()?;
         let proxy = self.status().proxy;
-        let result = self
-            .stop_locked()
-            .and_then(|()| self.start_config_locked(config, binary, proxy));
+        let result = self.stop_locked().and_then(|()| {
+            self.start_config_locked(config, binary, proxy, state.settings.active_profile)
+        });
         if let Err(error) = result {
             let _ = self.stop_locked();
-            let restore = self.start_config_locked(previous, previous_binary, proxy);
+            let restore =
+                self.start_config_locked(previous, previous_binary, proxy, previous_profile);
             return match restore {
                 Ok(()) => Err(error.context("重新加载失败，已恢复原连接")),
                 Err(restore) => {
@@ -332,13 +377,24 @@ impl Service {
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
-        let result = self.start_config_locked(config, binary, state.settings.system_proxy);
+        let result = self.start_config_locked(
+            config,
+            binary,
+            state.settings.system_proxy,
+            state.settings.active_profile,
+        );
         if result.is_err() {
             let _ = self.stop_locked();
         }
         result
     }
-    fn start_config_locked(&self, config: Value, binary: PathBuf, proxy: bool) -> Result<()> {
+    fn start_config_locked(
+        &self,
+        config: Value,
+        binary: PathBuf,
+        proxy: bool,
+        profile_id: String,
+    ) -> Result<()> {
         ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         let dir = self.dir().join("core");
@@ -354,15 +410,19 @@ impl Service {
             .stderr(Stdio::piped())
             .process_group(0);
         // Only async-signal-safe libc calls run between fork and exec.
+        let parent_pid = std::process::id() as libc::pid_t;
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) < 0 {
                     return Err(std::io::Error::last_os_error());
                 };
+                if libc::getppid() != parent_pid {
+                    libc::_exit(1);
+                }
                 Ok(())
             });
         }
-        let mut child = cmd.spawn().context("无法启动内核")?;
+        let mut child = spawn_core(cmd).context("无法启动内核")?;
         if let Some(stdout) = child.stdout.take() {
             read_logs(stdout, self.logs.clone())
         };
@@ -375,6 +435,7 @@ impl Service {
             r.config = config;
             r.started = Some(Instant::now());
             r.binary = Some(binary);
+            r.profile_id = profile_id;
         }
         thread::sleep(Duration::from_millis(200));
         {
@@ -507,6 +568,32 @@ impl Service {
         self.proxy_active.store(true, Ordering::SeqCst);
         Ok(())
     }
+
+    pub fn set_system_proxy_enabled(&self, enabled: bool) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let previous = self.status().proxy;
+        let running = self.status().running;
+        if running || !enabled {
+            self.set_proxy(enabled)?;
+        }
+        if let Err(error) = self.update(|state| {
+            state.settings.system_proxy = enabled;
+            Ok(())
+        }) {
+            if running && let Err(restore) = self.set_proxy(previous) {
+                return Err(error.context(format!("恢复系统代理失败：{restore:#}")));
+            }
+            return Err(error);
+        }
+        self.log(if enabled && !running {
+            "系统代理将在启动内核后开启"
+        } else if enabled {
+            "系统代理已开启"
+        } else {
+            "系统代理已关闭"
+        });
+        Ok(())
+    }
     fn restore_proxy(&self) -> Result<()> {
         let mut proxy = self.proxy.lock().unwrap();
         if let Some(s) = &*proxy {
@@ -517,12 +604,13 @@ impl Service {
         Ok(())
     }
 
-    fn running_config(&self) -> Result<(Value, PathBuf)> {
+    fn running_config(&self) -> Result<(Value, PathBuf, String)> {
         let running = self.running.lock().unwrap();
         ensure!(running.child.is_some(), "请先启动内核");
         Ok((
             running.config.clone(),
             running.binary.clone().context("运行内核路径不可用")?,
+            running.profile_id.clone(),
         ))
     }
 
@@ -596,7 +684,8 @@ impl Service {
         let binary = self.core_binary_for(&settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
-        let (old_config, old_binary) = self.running_config()?;
+        let (old_config, old_binary, old_profile) = self.running_config()?;
+        let new_profile = candidate.settings.active_profile.clone();
         let old_proxy = self.status().proxy;
         let proxy = if previous_settings.system_proxy == settings.system_proxy {
             old_proxy
@@ -615,7 +704,7 @@ impl Service {
             }
         } else {
             self.stop_locked()
-                .and_then(|()| self.start_config_locked(config, binary, proxy))
+                .and_then(|()| self.start_config_locked(config, binary, proxy, new_profile))
         };
         if let Err(error) = result {
             let restore_settings = self.update(|state| {
@@ -623,7 +712,8 @@ impl Service {
                 Ok(())
             });
             let _ = self.stop_locked();
-            let restore_core = self.start_config_locked(old_config, old_binary, old_proxy);
+            let restore_core =
+                self.start_config_locked(old_config, old_binary, old_proxy, old_profile);
             if restore_core.is_err() {
                 let _ = self.stop_locked();
             }
@@ -801,7 +891,13 @@ impl Service {
             ["http", "https"].contains(&parsed.scheme()),
             "仅支持 HTTP / HTTPS 地址"
         );
-        let r = self.client()?.get(url).send()?.error_for_status()?;
+        let r = self
+            .client()?
+            .get(url)
+            .send()
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         let headers = r.headers().clone();
         let mut bytes = vec![];
         r.take(128 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -809,14 +905,151 @@ impl Service {
         Ok((bytes, headers))
     }
     pub fn update_subscription(&self, id: &str) -> Result<()> {
-        let mut sub = self
+        ensure!(self.begin_subscription_update(id, false)?, "订阅正在更新");
+        self.finish_subscription_update(id)
+    }
+
+    pub fn import_subscription(&self, mut sub: model::Subscription) -> Result<()> {
+        if !sub.source.trim().is_empty() {
+            ensure!(
+                !self
+                    .snapshot()
+                    .subscriptions
+                    .iter()
+                    .any(|existing| existing.source == sub.source),
+                "此订阅已导入"
+            );
+            self.fetch_subscription(&mut sub, true)?;
+        } else {
+            ensure!(!sub.nodes.is_empty(), "订阅没有节点");
+            model::validate_nodes(&sub.nodes)?;
+            sub.updated = now();
+        }
+        let name = sub.name.clone();
+        self.update(|state| {
+            ensure!(
+                sub.source.is_empty()
+                    || !state
+                        .subscriptions
+                        .iter()
+                        .any(|existing| existing.source == sub.source),
+                "此订阅已导入"
+            );
+            state.subscriptions.push(sub);
+            Ok(())
+        })?;
+        self.subscription_revision.fetch_add(1, Ordering::SeqCst);
+        self.log(format!("订阅「{name}」已导入"));
+        Ok(())
+    }
+
+    pub fn subscription_revision(&self) -> u64 {
+        self.subscription_revision.load(Ordering::SeqCst)
+    }
+
+    pub fn update_due_subscriptions(&self) -> Result<usize> {
+        let mut updated = 0;
+        for subscription in self.snapshot().subscriptions {
+            if self.begin_subscription_update(&subscription.id, true)?
+                && self.finish_subscription_update(&subscription.id).is_ok()
+            {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    fn begin_subscription_update(&self, id: &str, only_due: bool) -> Result<bool> {
+        let mut attempts = self.subscriptions.lock().unwrap();
+        let subscription = self
+            .snapshot()
+            .subscriptions
+            .into_iter()
+            .find(|sub| sub.id == id)
+            .context("订阅不存在")?;
+        let attempt = attempts.entry(id.into()).or_default();
+        if attempt.pending {
+            return Ok(false);
+        }
+        if only_due
+            && (!subscription.auto_update
+                || subscription.source.trim().is_empty()
+                || now().saturating_sub(subscription.updated)
+                    < u64::from(subscription.update_interval_hours) * 3600
+                || attempt
+                    .failed_at
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(300)))
+        {
+            return Ok(false);
+        }
+        attempt.pending = true;
+        Ok(true)
+    }
+
+    fn finish_subscription_update(&self, id: &str) -> Result<()> {
+        let result = self.update_subscription_inner(id);
+        let mut attempts = self.subscriptions.lock().unwrap();
+        let attempt = attempts.entry(id.into()).or_default();
+        attempt.pending = false;
+        attempt.failed_at = result.as_ref().err().map(|_| Instant::now());
+        drop(attempts);
+        if let Err(error) = &result {
+            let name = self
+                .snapshot()
+                .subscriptions
+                .into_iter()
+                .find(|sub| sub.id == id)
+                .map(|sub| sub.name)
+                .unwrap_or_else(|| id.to_owned());
+            self.log(format!("订阅「{name}」更新失败：{error:#}"));
+        }
+        result
+    }
+
+    fn update_subscription_inner(&self, id: &str) -> Result<()> {
+        let original = self
             .snapshot()
             .subscriptions
             .into_iter()
             .find(|s| s.id == id)
             .context("订阅不存在")?;
+        let mut sub = original.clone();
+        self.fetch_subscription(&mut sub, false)?;
+        self.apply_subscription_update(id, &original, &sub)
+    }
+
+    fn fetch_subscription(&self, sub: &mut model::Subscription, importing: bool) -> Result<()> {
+        ensure!(!sub.source.trim().is_empty(), "请填写订阅来源");
         let bytes = if sub.source.starts_with("https://") || sub.source.starts_with("http://") {
             let (bytes, headers) = self.download(&sub.source)?;
+            if importing {
+                if sub.name == "新订阅"
+                    && let Some(title) = headers
+                        .get("profile-title")
+                        .and_then(|value| value.to_str().ok())
+                {
+                    let decoded = title.strip_prefix("base64:").and_then(|encoded| {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .ok()
+                            .and_then(|bytes| String::from_utf8(bytes).ok())
+                    });
+                    let title = decoded.as_deref().unwrap_or(title).trim();
+                    if !title.is_empty() && !title.starts_with("base64:") {
+                        sub.name = title.to_owned();
+                    }
+                }
+                if sub.update_interval_hours == 24
+                    && let Some(hours) = headers
+                        .get("profile-update-interval")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .filter(|hours| (1..=168).contains(hours))
+                {
+                    sub.update_interval_hours = hours;
+                }
+            }
             if let Some(info) = headers
                 .get("subscription-userinfo")
                 .and_then(|h| h.to_str().ok())
@@ -838,60 +1071,112 @@ impl Service {
         } else {
             fs::read(&sub.source).context("无法读取订阅文件")?
         };
-        let nodes = subscription::parse(std::str::from_utf8(&bytes)?)?;
-        let include = if sub.include.is_empty() {
-            None
-        } else {
-            Some(regex::Regex::new(&sub.include).context("包含条件无效")?)
-        };
-        let exclude = if sub.exclude.is_empty() {
-            None
-        } else {
-            Some(regex::Regex::new(&sub.exclude).context("排除条件无效")?)
-        };
-        let nodes: Vec<_> = nodes
-            .into_iter()
-            .filter_map(|mut n| {
-                let tag = n["tag"].as_str().unwrap_or("");
-                if include.as_ref().is_some_and(|r| !r.is_match(tag))
-                    || exclude.as_ref().is_some_and(|r| r.is_match(tag))
-                {
-                    return None;
-                };
-                n["tag"] = json!(format!("{}{tag}", sub.prefix));
-                Some(n)
-            })
-            .collect();
-        sub.nodes = serde_json::from_value(script::transform(
-            &sub.script,
-            "onSubscribe",
-            &json!(nodes),
-        )?)
-        .context("订阅脚本应返回节点数组")?;
+        sub.nodes = subscription::parse(std::str::from_utf8(&bytes)?)?;
+        ensure!(!sub.nodes.is_empty(), "订阅没有节点");
         model::validate_nodes(&sub.nodes)?;
         sub.updated = now();
+        Ok(())
+    }
+
+    fn apply_subscription_update(
+        &self,
+        id: &str,
+        original: &model::Subscription,
+        sub: &model::Subscription,
+    ) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let current = before
+            .subscriptions
+            .iter()
+            .find(|sub| sub.id == id)
+            .context("订阅已被删除")?;
+        ensure!(
+            current.source == original.source
+                && current.updated == original.updated
+                && current.nodes == original.nodes,
+            "订阅在更新期间已被编辑，请重试"
+        );
+        let mut candidate = before.clone();
+        copy_subscription_data(
+            candidate
+                .subscriptions
+                .iter_mut()
+                .find(|sub| sub.id == id)
+                .unwrap(),
+            sub,
+        );
+        let old_running = self
+            .status()
+            .running
+            .then(|| self.running_config())
+            .transpose()?;
+        let next_running = if let Some((old_config, binary, profile_id)) = &old_running {
+            if let Some(profile) = candidate.profiles.iter().find(|profile| {
+                &profile.id == profile_id && profile.subscriptions.iter().any(|linked| linked == id)
+            }) {
+                let config = self.generate_profile(&candidate, profile)?;
+                if &config != old_config {
+                    self.check_with_binary(&config, binary)?;
+                    self.ensure_tun_available(&config, binary)?;
+                    Some((config, binary.clone(), profile_id.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let before_json = serde_json::to_value(&before)?;
         self.update(|state| {
+            ensure!(
+                serde_json::to_value(&*state)? == before_json,
+                "配置在更新期间已改变，请重试"
+            );
             let target = state
                 .subscriptions
                 .iter_mut()
                 .find(|s| s.id == id)
                 .context("订阅已被删除")?;
-            ensure!(
-                target.source == sub.source
-                    && target.script == sub.script
-                    && target.include == sub.include
-                    && target.exclude == sub.exclude
-                    && target.prefix == sub.prefix,
-                "订阅在更新期间已被编辑，请重试"
-            );
-            target.nodes = sub.nodes;
-            target.updated = sub.updated;
-            target.upload = sub.upload;
-            target.download = sub.download;
-            target.total = sub.total;
-            target.expires = sub.expires;
+            copy_subscription_data(target, sub);
             Ok(())
         })?;
+        if let Some((config, binary, profile_id)) = next_running {
+            let proxy = self.status().proxy;
+            let result = self
+                .stop_locked()
+                .and_then(|()| self.start_config_locked(config, binary, proxy, profile_id));
+            if let Err(error) = result {
+                let restored_data = self.update(|state| {
+                    let target = state
+                        .subscriptions
+                        .iter_mut()
+                        .find(|sub| sub.id == id)
+                        .context("订阅已被删除")?;
+                    ensure!(
+                        target.source == sub.source
+                            && target.updated == sub.updated
+                            && target.nodes == sub.nodes,
+                        "订阅已被编辑，无法恢复旧内容"
+                    );
+                    copy_subscription_data(target, original);
+                    Ok(())
+                });
+                let _ = self.stop_locked();
+                let (config, binary, profile_id) = old_running.unwrap();
+                let restored_core = self.start_config_locked(config, binary, proxy, profile_id);
+                if restored_core.is_err() {
+                    let _ = self.stop_locked();
+                }
+                if let Err(restore) = restored_data.and(restored_core) {
+                    return Err(error.context(format!("订阅更新失败，恢复失败：{restore:#}")));
+                }
+                return Err(error.context("订阅更新失败，已恢复原节点与连接"));
+            }
+        }
+        self.subscription_revision.fetch_add(1, Ordering::SeqCst);
         self.log(format!("订阅「{}」更新完成", sub.name));
         Ok(())
     }
@@ -899,6 +1184,9 @@ impl Service {
         let mut updated = 0;
         let mut errors = Vec::new();
         for subscription in self.snapshot().subscriptions {
+            if subscription.source.trim().is_empty() {
+                continue;
+            }
             match self.update_subscription(&subscription.id) {
                 Ok(()) => updated += 1,
                 Err(error) => errors.push(format!("{}：{error:#}", subscription.name)),
@@ -1077,6 +1365,15 @@ impl Service {
     }
 }
 
+fn copy_subscription_data(target: &mut model::Subscription, source: &model::Subscription) {
+    target.nodes.clone_from(&source.nodes);
+    target.updated = source.updated;
+    target.upload = source.upload;
+    target.download = source.download;
+    target.total = source.total;
+    target.expires = source.expires;
+}
+
 fn tun_available(binary: &Path) -> Result<bool> {
     if fs::OpenOptions::new()
         .read(true)
@@ -1145,6 +1442,199 @@ fn signal_group(pid: u32, signal: i32) {
     unsafe {
         libc::kill(-(pid as i32), signal);
     }
+}
+
+struct SpawnCore {
+    command: Command,
+    result: mpsc::Sender<std::io::Result<Child>>,
+}
+
+fn spawn_core(command: Command) -> Result<Child> {
+    // Linux PDEATHSIG follows the spawning thread, not the process. Keep this
+    // owner alive across short-lived UI workers, reloads and automatic updates.
+    static OWNER: OnceLock<Option<mpsc::Sender<SpawnCore>>> = OnceLock::new();
+    let owner = OWNER
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<SpawnCore>();
+            thread::Builder::new()
+                .name("aerobox-core-owner".into())
+                .spawn(move || {
+                    for mut request in rx {
+                        let privileged =
+                            has_execution_privileges(Path::new(request.command.get_program()));
+                        let started = request.command.spawn().and_then(|mut child| {
+                            if privileged && let Err(error) = start_core_watcher(child.id()) {
+                                signal_group(child.id(), libc::SIGKILL);
+                                let _ = child.wait();
+                                return Err(std::io::Error::other(format!(
+                                    "无法建立内核退出守护：{error:#}"
+                                )));
+                            }
+                            Ok(child)
+                        });
+                        if let Err(mpsc::SendError(Ok(mut child))) = request.result.send(started) {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        })
+        .as_ref()
+        .context("无法创建内核管理线程")?;
+    let (tx, rx) = mpsc::channel();
+    owner
+        .send(SpawnCore {
+            command,
+            result: tx,
+        })
+        .map_err(|_| anyhow::anyhow!("内核管理线程已退出"))?;
+    Ok(rx.recv().context("内核管理线程未返回启动结果")??)
+}
+
+fn has_execution_privileges(binary: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if fs::metadata(binary).is_ok_and(|metadata| metadata.permissions().mode() & 0o6000 != 0) {
+        return true;
+    }
+    let Ok(path) = std::ffi::CString::new(binary.as_os_str().as_bytes()) else {
+        return false;
+    };
+    unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"security.capability".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        ) > 0
+    }
+}
+
+fn process_fd(pid: u32) -> Result<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32 };
+    ensure!(fd >= 0, "pidfd 不可用：{}", std::io::Error::last_os_error());
+    let original = unsafe { OwnedFd::from_raw_fd(fd) };
+    let duplicated = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+    ensure!(
+        duplicated >= 0,
+        "无法复制进程句柄：{}",
+        std::io::Error::last_os_error()
+    );
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+}
+
+fn start_core_watcher(core_pid: u32) -> Result<()> {
+    let parent = process_fd(std::process::id())?;
+    let core = process_fd(core_pid)?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--watch-core")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let parent_fd = parent.as_raw_fd();
+    let core_fd = core.as_raw_fd();
+    command
+        .env("AEROBOX_WATCH_PARENT_FD", parent_fd.to_string())
+        .env("AEROBOX_WATCH_CORE_FD", core_fd.to_string());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(parent_fd, libc::F_SETFD, 0) < 0
+                || libc::fcntl(core_fd, libc::F_SETFD, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut watcher = command.spawn()?;
+    let mut ready = watcher.stdout.take().context("内核守护未就绪")?;
+    let mut descriptor = libc::pollfd {
+        fd: ready.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let notified = unsafe { libc::poll(&mut descriptor, 1, 3000) } > 0;
+    let mut byte = [0_u8; 1];
+    if !notified || ready.read_exact(&mut byte).is_err() || byte[0] != b'R' {
+        let _ = watcher.kill();
+        let _ = watcher.wait();
+        bail!("内核守护启动失败");
+    }
+    thread::spawn(move || {
+        let _ = watcher.wait();
+    });
+    Ok(())
+}
+
+/// Internal executable entry point: file-capability exec clears PDEATHSIG, so
+/// privileged cores also get a process-level guardian. Only inherited pidfds
+/// are accepted; no PID lookup, shell command or elevated guardian is used.
+pub fn watch_core_process() -> Result<()> {
+    let parent_fd = std::env::var("AEROBOX_WATCH_PARENT_FD")?.parse::<i32>()?;
+    let core_fd = std::env::var("AEROBOX_WATCH_CORE_FD")?.parse::<i32>()?;
+    for fd in [parent_fd, core_fd] {
+        ensure!(fd >= 10, "内核守护句柄无效");
+        ensure!(
+            fs::read_link(format!("/proc/self/fd/{fd}"))?.as_os_str() == "anon_inode:[pidfd]",
+            "缺少内核守护句柄"
+        );
+    }
+    std::io::stdout().write_all(b"R")?;
+    std::io::stdout().flush()?;
+    let mut watched = [
+        libc::pollfd {
+            fd: parent_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: core_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        let result = unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as _, -1) };
+        if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        ensure!(result >= 0, "无法监控内核进程");
+        if watched[1].revents != 0 {
+            return Ok(());
+        }
+        if watched[0].revents != 0 {
+            break;
+        }
+    }
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            core_fd,
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        );
+    }
+    let mut core = libc::pollfd {
+        fd: core_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut core, 1, 4000) } <= 0 {
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                core_fd,
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
+        }
+    }
+    Ok(())
 }
 pub fn run_command(mut cmd: Command, timeout: Duration) -> Result<String> {
     cmd.stdout(Stdio::piped())

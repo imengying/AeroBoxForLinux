@@ -1,6 +1,7 @@
 mod editors;
 mod home;
 mod settings;
+mod subscriptions;
 
 use adw::prelude::*;
 use aerobox_for_linux::{
@@ -102,6 +103,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
         if let Some(path) = smoke.clone() {
             smoke_sequence(ui.clone(), path, activate_failed.clone());
         } else {
+            ui.start_subscription_updates();
             let settings = ui.service.snapshot().settings;
             if settings.auto_start || settings.update_subscriptions_on_start {
                 ui.task(
@@ -139,9 +141,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
                                 Ok(0)
                             };
                             start?;
-                            if update? > 0 && settings.auto_start {
-                                s.reload()?;
-                            }
+                            update?;
                             Ok(())
                         })();
                         Ok(result)
@@ -186,9 +186,10 @@ struct Ui {
     nav: gtk::ListBox,
     page: Cell<Page>,
     split: adw::OverlaySplitView,
-    spinner: gtk::Spinner,
     jobs: Cell<usize>,
     last_pid: Cell<Option<u32>>,
+    subscription_revision: Cell<u64>,
+    subscription_update_pending: Cell<bool>,
     dashboard: RefCell<Option<Rc<home::Dashboard>>>,
     log_buffer: RefCell<Option<gtk::TextBuffer>>,
     node_group: RefCell<String>,
@@ -283,9 +284,6 @@ impl Ui {
                 button.set_visible(split.is_collapsed())
             }
         });
-        let spinner = gtk::Spinner::new();
-        spinner.set_visible(false);
-        header.pack_start(&spinner);
         content.append(&header);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 24);
         body.add_css_class("page-content");
@@ -324,9 +322,10 @@ impl Ui {
             nav,
             page: Cell::new(Page::Home),
             split,
-            spinner,
             jobs: Cell::new(0),
             last_pid: Cell::new(None),
+            subscription_revision: Cell::new(0),
+            subscription_update_pending: Cell::new(false),
             dashboard: RefCell::new(None),
             log_buffer: RefCell::new(None),
             node_group: RefCell::new(String::new()),
@@ -353,6 +352,16 @@ impl Ui {
                 } else if ui.page.get() == Page::Profiles {
                     ui.refresh(Page::Profiles)
                 }
+            }
+            let revision = ui.service.subscription_revision();
+            if ui.jobs.get() == 0
+                && ui.subscription_revision.replace(revision) != revision
+                && matches!(
+                    ui.page.get(),
+                    Page::Subscriptions | Page::Nodes | Page::Profiles
+                )
+            {
+                ui.refresh(ui.page.get());
             }
             if let Some(dashboard) = ui.dashboard.borrow().as_ref() {
                 dashboard.tick(&ui);
@@ -393,49 +402,67 @@ impl Ui {
         work: impl FnOnce(&Service) -> Result<T> + Send + 'static,
         done: impl FnOnce(&Rc<Self>, T) + 'static,
     ) {
+        let title = title.to_owned();
+        self.task_result(work, move |ui, result| match result {
+            Ok(value) => done(ui, value),
+            Err(e) => ui.error(&format!("{title}失败"), format!("{e:#}")),
+        });
+    }
+    fn task_result<T: Send + 'static>(
+        self: &Rc<Self>,
+        work: impl FnOnce(&Service) -> Result<T> + Send + 'static,
+        done: impl FnOnce(&Rc<Self>, Result<T>) + 'static,
+    ) {
         self.jobs.set(self.jobs.get() + 1);
-        self.spinner.set_visible(true);
-        self.spinner.start();
         let (tx, rx) = mpsc::channel();
         let service = self.service.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(work(&service));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&service)))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("后台任务意外结束")));
+            let _ = tx.send(result);
         });
         let weak = Rc::downgrade(self);
         let mut done = Some(done);
-        let title = title.to_string();
         glib::timeout_add_local(Duration::from_millis(40), move || {
             let Some(ui) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            match rx.try_recv() {
-                Ok(result) => {
-                    ui.jobs.set(ui.jobs.get().saturating_sub(1));
-                    if ui.jobs.get() == 0 {
-                        ui.spinner.stop();
-                        ui.spinner.set_visible(false)
-                    }
-                    match result {
-                        Ok(value) => {
-                            if let Some(done) = done.take() {
-                                done(&ui, value)
-                            }
-                        }
-                        Err(e) => ui.error(&format!("{title}失败"), format!("{e:#}")),
-                    }
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    ui.jobs.set(ui.jobs.get().saturating_sub(1));
-                    if ui.jobs.get() == 0 {
-                        ui.spinner.stop();
-                        ui.spinner.set_visible(false)
-                    }
-                    ui.error(&title, "后台任务意外结束");
-                    glib::ControlFlow::Break
-                }
+            let result = match rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("后台任务意外结束")),
+            };
+            ui.jobs.set(ui.jobs.get().saturating_sub(1));
+            if let Some(done) = done.take() {
+                done(&ui, result);
             }
+            glib::ControlFlow::Break
+        });
+    }
+    fn button_task<T: Send + 'static>(
+        self: &Rc<Self>,
+        button: &gtk::Button,
+        busy: &str,
+        work: impl FnOnce(&Service) -> Result<T> + Send + 'static,
+        done: impl FnOnce(&Rc<Self>, Result<T>) + 'static,
+    ) {
+        let original = button.child();
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let spinner = gtk::Spinner::new();
+        spinner.set_size_request(18, 18);
+        spinner.start();
+        content.append(&spinner);
+        content.append(&label(busy, ""));
+        button.set_child(Some(&content));
+        button.set_sensitive(false);
+        let weak_button = button.downgrade();
+        self.task_result(work, move |ui, result| {
+            spinner.stop();
+            if let Some(button) = weak_button.upgrade() {
+                button.set_child(original.as_ref());
+                button.set_sensitive(true);
+            }
+            done(ui, result);
         });
     }
     fn saved(self: &Rc<Self>) -> Rc<dyn Fn()> {
@@ -544,14 +571,9 @@ impl Ui {
         let list = card(gtk::Orientation::Vertical, 0);
         for p in state.profiles {
             let subtitle = format!(
-                "{} 个订阅 · {} 个规则集{}",
+                "{} 个订阅 · {} 个规则集",
                 p.subscriptions.len(),
-                p.rulesets.len(),
-                if p.script.trim().is_empty() {
-                    ""
-                } else {
-                    " · 含处理脚本"
-                }
+                p.rulesets.len()
             );
             let row = resource_row("document-properties-symbolic", &p.name, &subtitle);
             if p.id == state.settings.active_profile {
@@ -670,120 +692,6 @@ impl Ui {
             });
             row.append(&copy);
             row.append(&self.delete_button("profiles", &p.id, &p.name));
-            list.append(&row);
-        }
-        self.body.append(&list);
-    }
-
-    fn subscriptions(self: &Rc<Self>, heading: &gtk::Box) {
-        let add = primary("添加订阅", "list-add-symbolic");
-        heading.append(&add);
-        let weak = Rc::downgrade(self);
-        add.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                editors::subscription(
-                    &ui.window,
-                    ui.service.clone(),
-                    Subscription::default(),
-                    ui.saved(),
-                )
-            }
-        });
-        let state = self.service.snapshot();
-        if state.subscriptions.is_empty() {
-            self.body.append(&empty(
-                "folder-download-symbolic",
-                "把节点带到这里",
-                "添加订阅链接，或在订阅编辑器中手动导入节点。",
-            ));
-            return;
-        }
-        let update = icon_button("view-refresh-symbolic", "更新全部订阅");
-        heading.append(&update);
-        let ids: Vec<_> = state
-            .subscriptions
-            .iter()
-            .filter(|s| !s.source.is_empty())
-            .map(|s| s.id.clone())
-            .collect();
-        let weak = Rc::downgrade(self);
-        update.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                let ids = ids.clone();
-                ui.task(
-                    "更新全部订阅",
-                    move |s| {
-                        let mut errors = Vec::new();
-                        for id in ids {
-                            if let Err(e) = s.update_subscription(&id) {
-                                errors.push(format!("{e:#}"))
-                            }
-                        }
-                        if errors.is_empty() {
-                            Ok(())
-                        } else {
-                            anyhow::bail!(errors.join("\n"))
-                        }
-                    },
-                    |ui, ()| {
-                        ui.notify("订阅已更新");
-                        ui.refresh(Page::Subscriptions)
-                    },
-                )
-            }
-        });
-        let list = card(gtk::Orientation::Vertical, 0);
-        for item in state.subscriptions {
-            let meta = if item.total > 0 {
-                format!(
-                    "{} 个节点 · 已用 {} / {}",
-                    item.nodes.len(),
-                    bytes(item.download + item.upload),
-                    bytes(item.total)
-                )
-            } else {
-                format!("{} 个节点 · {}", item.nodes.len(), updated(item.updated))
-            };
-            let row = resource_row("folder-download-symbolic", &item.name, &meta);
-            let nodes = gtk::Button::with_label("查看节点");
-            nodes.add_css_class("flat");
-            let weak = Rc::downgrade(self);
-            let sub = item.clone();
-            nodes.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    editors::nodes(&ui.window, ui.service.clone(), sub.clone(), ui.saved())
-                }
-            });
-            row.append(&nodes);
-            let edit = gtk::Button::with_label("编辑");
-            edit.add_css_class("compact-action");
-            let weak = Rc::downgrade(self);
-            let sub = item.clone();
-            edit.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    editors::subscription(&ui.window, ui.service.clone(), sub.clone(), ui.saved())
-                }
-            });
-            row.append(&edit);
-            let refresh = icon_button("view-refresh-symbolic", "更新订阅");
-            refresh.set_sensitive(!item.source.is_empty());
-            let weak = Rc::downgrade(self);
-            let id = item.id.clone();
-            refresh.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    let id = id.clone();
-                    ui.task(
-                        "更新订阅",
-                        move |s| s.update_subscription(&id),
-                        |ui, ()| {
-                            ui.notify("订阅已更新");
-                            ui.refresh(Page::Subscriptions)
-                        },
-                    )
-                }
-            });
-            row.append(&refresh);
-            row.append(&self.delete_button("subscriptions", &item.id, &item.name));
             list.append(&row);
         }
         self.body.append(&list);
@@ -950,9 +858,6 @@ impl Ui {
                 ));
                 return;
             }
-            area.append(&info(
-                "内核尚未运行。这里展示已保存的节点；启动后可以切换节点与测速。",
-            ));
             let search = gtk::SearchEntry::new();
             search.set_placeholder_text(Some("搜索节点名称或协议"));
             search.add_css_class("search");
@@ -1674,15 +1579,6 @@ fn empty(icon: &str, title: &str, description: &str) -> gtk::Box {
     root.append(&description);
     root
 }
-fn info(text: &str) -> gtk::Box {
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    root.add_css_class("info-strip");
-    root.append(&gtk::Image::from_icon_name("dialog-information-symbolic"));
-    let label = label(text, "");
-    label.set_wrap(true);
-    root.append(&label);
-    root
-}
 fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
     adw::SwitchRow::builder()
         .title(title)
@@ -1874,7 +1770,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 .context("配置编辑器没有打开")
                 .and_then(|w| screenshot(&w, &parent.join("profile-editor.png"))),
             10 => screenshot(&ui.window, &parent.join("settings.png")),
-            11 => screenshot(&ui.window, &parent.join("settings-network.png")),
+            11 => screenshot(&ui.window, &parent.join("settings-tun.png")),
+            12 => app
+                .active_window()
+                .context("订阅导入未打开")
+                .and_then(|w| screenshot(&w, &parent.join("subscription-import.png"))),
             _ => Ok(()),
         }
         .and_then(|()| {
@@ -1887,11 +1787,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     .context("启动按钮尚未分配位置")?;
                 let height = ui.floating.height() as f32;
                 anyhow::ensure!(
-                    bounds.x() >= 0.0
-                        && bounds.x() < 56.0
+                    bounds.x() > ui.floating.width() as f32 - bounds.width() - 56.0
+                        && bounds.x() + bounds.width() <= ui.floating.width() as f32
                         && bounds.y() > height - 110.0
                         && bounds.y() + bounds.height() <= height,
-                    "启动按钮没有固定在内容区左下角"
+                    "启动按钮没有固定在内容区右下角"
                 );
                 if let Some(previous) = floating_y.get() {
                     anyhow::ensure!(
@@ -1967,11 +1867,29 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     app.quit();
                     return glib::ControlFlow::Break;
                 }
+                ui.navigate(Page::Subscriptions);
+                ui.import_subscription();
+            }
+            12 | 13 => {
+                if let Err(e) = subscriptions::smoke_import(&ui, current - 11) {
+                    eprintln!("Wayland smoke import: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+            }
+            14 => {
+                if let Err(e) = subscriptions::smoke_import(&ui, 3) {
+                    eprintln!("Wayland smoke import: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
                 let clipboard = ui.window.clipboard();
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();
                 let app = app.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings and clipboard passed")}app.quit();});
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings, subscription import and clipboard passed")}app.quit();});
                 return glib::ControlFlow::Break;
             }
             _ => {

@@ -425,8 +425,6 @@ pub fn profile(
     config_tools.append(&format);
     config.root.prepend(&config_tools);
     stack.add_titled(&config.root, Some("config"), "配置 JSON");
-    let script = SourceEditor::new(&item.script, "js", true, "onGenerate(config) → config");
-    stack.add_titled(&script.root, Some("script"), "生成脚本");
 
     let read_draft: Rc<dyn Fn() -> Result<Profile>> = Rc::new(move || {
         ensure!(!name.text().trim().is_empty(), "请填写配置名称");
@@ -452,7 +450,6 @@ pub fn profile(
             .filter(|(_, r)| r.is_active())
             .map(|(id, _)| id.clone())
             .collect();
-        next.script = script.text();
         Ok(next)
     });
     let preview = gtk::Button::with_label("预览生成结果");
@@ -571,7 +568,6 @@ pub fn subscription(
     on_saved: Saved,
 ) {
     let editor = EditorWindow::new(parent, "编辑订阅", "");
-    let stack = tabs(&editor.body);
     let (scroll, form) = form_page();
     let source_group = group("订阅来源", "");
     let name = entry("名称", &item.name);
@@ -598,29 +594,23 @@ pub fn subscription(
     source_group.add(&name);
     source_group.add(&source);
     form.append(&source_group);
-    let filters = group("筛选节点", "");
-    let include = entry("包含名称（正则）", &item.include);
-    let exclude = entry("排除名称（正则）", &item.exclude);
-    let prefix = entry("名称前缀", &item.prefix);
-    filters.add(&include);
-    filters.add(&exclude);
-    filters.add(&prefix);
-    form.append(&filters);
-    stack.add_titled(&scroll, Some("source"), "订阅设置");
-    let script = SourceEditor::new(&item.script, "js", true, "onSubscribe(nodes) → nodes");
-    stack.add_titled(&script.root, Some("script"), "处理脚本");
+    let updates = group("更新", "");
+    let auto_update = switch("自动更新", "", item.auto_update);
+    let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
+    interval.set_title("更新间隔（小时）");
+    interval.set_value(item.update_interval_hours as f64);
+    interval.set_sensitive(item.auto_update);
+    let interval_toggle = interval.clone();
+    auto_update.connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
+    updates.add(&auto_update);
+    updates.add(&interval);
+    form.append(&updates);
+    editor.body.append(&scroll);
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
     editor.save.connect_clicked(move |_| {
         let result = (|| -> Result<()> {
             ensure!(!name.text().trim().is_empty(), "请填写订阅名称");
-            for (label, value) in [("包含名称", include.text()), ("排除名称", exclude.text())]
-            {
-                if !value.is_empty() {
-                    regex::Regex::new(&value)
-                        .with_context(|| format!("{label}的正则表达式无效"))?;
-                }
-            }
             service.update(|state| {
                 // Keep freshly downloaded nodes and quota information if a
                 // background update completed while the form was open.
@@ -631,11 +621,21 @@ pub fn subscription(
                     .cloned()
                     .unwrap_or_else(|| item.clone());
                 next.name = name.text().trim().into();
-                next.source = source.text().trim().into();
-                next.include = include.text().into();
-                next.exclude = exclude.text().into();
-                next.prefix = prefix.text().into();
-                next.script = script.text();
+                let input = source.text();
+                let input = input.trim();
+                let updated_source = if input.contains("://") {
+                    let parsed = aerobox_for_linux::subscription::import_input(input)?;
+                    ensure!(!parsed.source.is_empty(), "这里需要订阅地址");
+                    parsed.source
+                } else {
+                    input.to_owned()
+                };
+                if next.source != updated_source {
+                    next.updated = 0;
+                }
+                next.source = updated_source;
+                next.auto_update = auto_update.is_active() && !next.source.is_empty();
+                next.update_interval_hours = interval.value() as u32;
                 if let Some(old) = state.subscriptions.iter_mut().find(|s| s.id == next.id) {
                     *old = next;
                 } else {
@@ -655,6 +655,42 @@ pub fn subscription(
         }
     });
     editor.window.present();
+}
+
+fn common_rule(kind: &str, text: &str) -> Result<Value> {
+    let value = text.trim();
+    ensure!(!value.is_empty(), "请填写匹配值");
+    let field = match kind {
+        "port" => {
+            let port: u16 = value.parse().context("端口须为 1 到 65535")?;
+            ensure!(port > 0, "端口须为 1 到 65535");
+            json!([port])
+        }
+        "ip_cidr" => {
+            let (address, prefix) = value
+                .split_once('/')
+                .context("请填写 IP/前缀长度，如 192.168.1.0/24")?;
+            let address: std::net::IpAddr = address.parse().context("IP 地址无效")?;
+            let prefix: u8 = prefix.parse().context("前缀长度无效")?;
+            ensure!(
+                prefix <= if address.is_ipv4() { 32 } else { 128 },
+                "前缀长度超出范围"
+            );
+            json!([value])
+        }
+        "domain" | "domain_suffix" => {
+            ensure!(
+                !value.contains("://")
+                    && !value.contains('/')
+                    && !value.chars().any(char::is_whitespace),
+                "请填写域名，不含协议或路径"
+            );
+            json!([value.trim_start_matches('.')])
+        }
+        "domain_keyword" | "process_name" => json!([value]),
+        _ => anyhow::bail!("不支持的匹配类型"),
+    };
+    Ok(json!({kind: field}))
 }
 
 pub fn ruleset(
@@ -686,11 +722,61 @@ pub fn ruleset(
         true,
         "远程更新会替换规则内容",
     );
-    stack.add_titled(&content.root, Some("content"), "规则内容");
-    let content_for_format = content.root.clone();
+    let rules = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let quick = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    quick.set_margin_start(24);
+    quick.set_margin_end(24);
+    let kinds = [
+        "domain",
+        "domain_suffix",
+        "domain_keyword",
+        "ip_cidr",
+        "process_name",
+        "port",
+    ];
+    let kind = gtk::DropDown::from_strings(&[
+        "域名",
+        "域名后缀",
+        "域名关键字",
+        "IP 网段",
+        "进程名",
+        "端口",
+    ]);
+    let value = gtk::Entry::builder()
+        .placeholder_text("匹配值")
+        .hexpand(true)
+        .build();
+    let add_rule = gtk::Button::with_label("添加规则");
+    quick.append(&kind);
+    quick.append(&value);
+    quick.append(&add_rule);
+    rules.append(&quick);
+    rules.append(&content.root);
+    stack.add_titled(&rules, Some("content"), "规则内容");
+    let content_for_format = rules.clone();
     content_for_format.set_sensitive(!item.binary);
     format
         .connect_selected_notify(move |row| content_for_format.set_sensitive(row.selected() == 0));
+    let buffer = content.buffer.clone();
+    let quick_error = editor.error.clone();
+    add_rule.connect_clicked(move |_| {
+        let result = (|| -> Result<()> {
+            let mut current = parse_json_buffer(&buffer)?;
+            validate_rules(&current)?;
+            let rule = common_rule(kinds[kind.selected() as usize], value.text().as_str())?;
+            current["rules"]
+                .as_array_mut()
+                .context("规则列表无效")?
+                .push(rule);
+            buffer.set_text(&model::pretty(&current));
+            value.set_text("");
+            Ok(())
+        })();
+        match result {
+            Ok(()) => quick_error.set_visible(false),
+            Err(e) => show_error(&quick_error, e),
+        }
+    });
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
     editor.save.connect_clicked(move |_| {
@@ -763,6 +849,10 @@ pub fn nodes(
                     .iter_mut()
                     .find(|s| s.id == item.id)
                     .context("订阅已被删除")?;
+                ensure!(
+                    current.nodes == item.nodes && current.updated == item.updated,
+                    "订阅已在后台更新，请重新打开节点后编辑"
+                );
                 current.nodes = nodes;
                 Ok(())
             })?;
@@ -812,7 +902,7 @@ pub fn code(
             glib::MainContext::default().spawn_local(async move {
                 let chooser = gtk::FileDialog::builder()
                     .title("导出文件")
-                    .initial_name(format!("AeroBox.{}", if ext == "js" { "js" } else { &ext }))
+                    .initial_name(format!("AeroBox.{ext}"))
                     .build();
                 if let Ok(file) = chooser.save_future(Some(&parent)).await
                     && let Some(path) = file.path()
@@ -1179,6 +1269,28 @@ pub(super) fn smoke_profile(parent: &adw::ApplicationWindow, service: Arc<Servic
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn common_rules_validate_addresses_and_generate_core_fields() {
+        assert_eq!(
+            common_rule("domain_suffix", ".example.com").unwrap(),
+            json!({"domain_suffix":["example.com"]})
+        );
+        assert_eq!(common_rule("port", "443").unwrap(), json!({"port":[443]}));
+        assert_eq!(
+            common_rule("ip_cidr", "fe80::/10").unwrap(),
+            json!({"ip_cidr":["fe80::/10"]})
+        );
+        for (kind, invalid) in [
+            ("domain", "https://example.com/path"),
+            ("port", "65536"),
+            ("port", "0"),
+            ("ip_cidr", "10.0.0.1/33"),
+            ("ip_cidr", "fe80::/129"),
+            ("domain", ""),
+        ] {
+            assert!(common_rule(kind, invalid).is_err());
+        }
+    }
     #[test]
     fn unchanged_form_preserves_manual_json() {
         let original = Profile::new("test").config;

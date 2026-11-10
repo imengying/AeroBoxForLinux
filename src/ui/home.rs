@@ -41,9 +41,9 @@ impl Ui {
         );
         toggle.add_css_class("home-start");
         toggle.set_widget_name("home-start");
-        toggle.set_halign(gtk::Align::Start);
+        toggle.set_halign(gtk::Align::End);
         toggle.set_valign(gtk::Align::End);
-        toggle.set_margin_start(30);
+        toggle.set_margin_end(30);
         toggle.set_margin_bottom(24);
         if status.running {
             toggle.remove_css_class("suggested-action");
@@ -161,7 +161,16 @@ impl Ui {
         let switches = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         switches.set_homogeneous(true);
         for (title, system, active, icon) in [
-            ("系统代理", true, status.proxy, "network-workgroup-symbolic"),
+            (
+                "系统代理",
+                true,
+                if status.running {
+                    status.proxy
+                } else {
+                    state.settings.system_proxy
+                },
+                "network-workgroup-symbolic",
+            ),
             (
                 "虚拟网卡",
                 false,
@@ -181,9 +190,6 @@ impl Ui {
             switch.set_valign(gtk::Align::Center);
             switch.set_active(active);
             switch.update_property(&[gtk::accessible::Property::Label(title)]);
-            if system {
-                switch.set_sensitive(status.running || status.proxy);
-            }
             let weak = Rc::downgrade(self);
             let group = controls.downgrade();
             switch.connect_state_set(move |_, enabled| {
@@ -195,7 +201,7 @@ impl Ui {
                         title,
                         move |s| {
                             Ok(if system {
-                                s.set_proxy(enabled)
+                                s.set_system_proxy_enabled(enabled)
                             } else {
                                 let mut settings = s.snapshot().settings;
                                 settings.tun_enabled = enabled;

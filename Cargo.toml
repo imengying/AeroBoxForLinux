@@ -23,8 +23,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 url = "2"
 percent-encoding = "2"
-regex = "1"
-rquickjs = "0.14"
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"

@@ -5,7 +5,28 @@ impl Ui {
         self.body.add_css_class("settings-page");
         let settings = self.service.snapshot().settings;
         let save = primary("保存", "object-select-symbolic");
+        save.set_widget_name("settings-save");
         heading.append(&save);
+        let stack = gtk::Stack::builder()
+            .hhomogeneous(false)
+            .vhomogeneous(false)
+            .build();
+        stack.set_widget_name("settings-sections");
+        let tabs = gtk::StackSwitcher::builder()
+            .stack(&stack)
+            .halign(gtk::Align::Start)
+            .build();
+        tabs.add_css_class("editor-tabs");
+        self.body.append(&tabs);
+        self.body.append(&stack);
+        let general_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        let network_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        let tun_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        let core_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        stack.add_titled(&general_page, Some("general"), "常规");
+        stack.add_titled(&network_page, Some("network"), "网络");
+        stack.add_titled(&tun_page, Some("tun"), "虚拟网卡");
+        stack.add_titled(&core_page, Some("core"), "内核");
         let appearance = group("外观与启动");
         let theme = combo(
             "外观",
@@ -37,9 +58,9 @@ impl Ui {
         let acceleration = switch_row("硬件加速", "重启应用后生效", settings.hardware_acceleration);
         acceleration.set_tooltip_text(Some("开启后使用系统图形加速，可能增加内存占用"));
         appearance.add(&acceleration);
-        self.body.append(&appearance);
+        general_page.append(&appearance);
 
-        let network = group("网络");
+        let network = group("代理");
         let proxy = switch_row("连接时启用系统代理", "", settings.system_proxy);
         network.add(&proxy);
         let ipv6 = switch_row("IPv6", "", settings.ipv6);
@@ -47,18 +68,22 @@ impl Ui {
         let lan = switch_row("允许局域网访问", "", settings.allow_lan);
         lan.set_tooltip_text(Some("允许同一网络的设备使用本地代理端口"));
         network.add(&lan);
+        network_page.append(&network);
+        let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
-        network.add(&bypass);
+        routing.add(&bypass);
         let sniff = switch_row("流量嗅探", "", settings.sniff);
-        network.add(&sniff);
+        routing.add(&sniff);
+        let dns = group("DNS");
         let hijack = switch_row("DNS 劫持", "", settings.dns_hijack);
-        network.add(&hijack);
+        dns.add(&hijack);
         let cache = switch_row("DNS 缓存", "", settings.dns_cache);
-        network.add(&cache);
+        dns.add(&cache);
         let ads = switch_row("广告拦截", "", settings.block_ads);
         ads.set_tooltip_text(Some("拦截内置基础广告列表中的域名"));
-        network.add(&ads);
-        self.body.append(&network);
+        routing.add(&ads);
+        network_page.append(&routing);
+        network_page.append(&dns);
 
         let tun_group = group("虚拟网卡");
         let tun = switch_row("启用 TUN", "", settings.tun_enabled);
@@ -113,7 +138,7 @@ impl Ui {
             }
         });
         tun_group.add(&permissions);
-        self.body.append(&tun_group);
+        tun_page.append(&tun_group);
 
         let core = group("内核");
         let core_path = adw::EntryRow::builder()
@@ -192,7 +217,7 @@ impl Ui {
                 .unwrap_or(4) as u32,
         );
         core.add(&log);
-        self.body.append(&core);
+        core_page.append(&core);
 
         let testing = group("测速");
         let test_url = adw::EntryRow::builder()
@@ -204,13 +229,13 @@ impl Ui {
         timeout.set_title("超时（毫秒）");
         timeout.set_value(settings.test_timeout as f64);
         testing.add(&timeout);
-        self.body.append(&testing);
+        network_page.append(&testing);
         let data = group("应用");
         let dir = adw::ActionRow::builder()
-            .title("数据目录")
+            .title("配置目录")
             .subtitle(self.service.dir().to_string_lossy().as_ref())
             .build();
-        let open = icon_button("folder-open-symbolic", "打开数据目录");
+        let open = icon_button("folder-open-symbolic", "打开配置目录");
         dir.add_suffix(&open);
         let weak = Rc::downgrade(self);
         open.connect_clicked(move |_| {
@@ -235,25 +260,12 @@ impl Ui {
                 .subtitle(option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
                 .build(),
         );
-        self.body.append(&data);
-        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        footer.set_halign(gtk::Align::End);
-        let save_bottom = primary("保存", "object-select-symbolic");
-        let save_top = save.clone();
-        save_bottom.connect_clicked(move |_| save_top.emit_clicked());
-        save.bind_property("sensitive", &save_bottom, "sensitive")
-            .sync_create()
-            .build();
-        footer.append(&save_bottom);
-        self.body.append(&footer);
+        general_page.append(&data);
         let weak = Rc::downgrade(self);
         save.connect_clicked(move |button| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            if ui.jobs.get() > 0 {
-                return;
-            }
             let mut next = ui.service.snapshot().settings;
             next.theme = match theme.selected() {
                 1 => "light",
@@ -297,23 +309,31 @@ impl Ui {
                 ui.error("设置无效", "测速地址须为 HTTP 或 HTTPS 地址");
                 return;
             }
-            button.set_sensitive(false);
             let save_button = button.downgrade();
             let login = autostart.is_active();
-            ui.task(
-                "保存设置",
+            ui.button_task(
+                button,
+                "保存中…",
                 move |s| {
-                    Ok(s.apply_settings(next)
-                        .and_then(|_| platform::set_autostart(login)))
+                    s.apply_settings(next)
+                        .and_then(|_| platform::set_autostart(login))
                 },
-                move |ui, result| {
-                    if let Some(button) = save_button.upgrade() {
-                        button.set_sensitive(true);
+                move |ui, result| match result {
+                    Ok(()) => {
+                        if let Some(button) = save_button.upgrade() {
+                            button.set_label("已保存");
+                            let weak = button.downgrade();
+                            glib::timeout_add_local_once(Duration::from_secs(2), move || {
+                                if let Some(button) = weak.upgrade()
+                                    && button.is_sensitive()
+                                {
+                                    button.set_label("保存");
+                                }
+                            });
+                        }
+                        ui.notify("设置已保存");
                     }
-                    match result {
-                        Ok(()) => ui.notify("已保存"),
-                        Err(e) => ui.error("保存失败", format!("{e:#}")),
-                    }
+                    Err(e) => ui.error("保存失败", format!("{e:#}")),
                 },
             );
         });
@@ -334,6 +354,14 @@ fn combo(title: &str, choices: &[&str], selected: u32) -> adw::ComboRow {
 
 pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     use anyhow::ensure;
+    let widgets = descendants(&ui.body);
+    let saves: Vec<_> = widgets
+        .iter()
+        .filter_map(|w| w.clone().downcast::<gtk::Button>().ok())
+        .filter(|b| b.widget_name() == "settings-save")
+        .collect();
+    ensure!(saves.len() == 1, "设置必须只有一个保存按钮");
+    let save = &saves[0];
     if verify {
         let settings = ui.service.snapshot().settings;
         ensure!(ui.jobs.get() == 0, "设置保存尚未完成");
@@ -349,6 +377,14 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
             "设置控件没有持久化"
         );
         ensure!(!ui.service.status().running, "设置测试意外启动了内核");
+        ensure!(
+            save.is_sensitive() && save.label().as_deref() == Some("已保存"),
+            "保存完成没有显示成功状态"
+        );
+        ensure!(
+            !descendants(save).iter().any(|w| w.is::<gtk::Spinner>()),
+            "保存完成后仍有进度指示器"
+        );
         return Ok(());
     }
     fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
@@ -361,7 +397,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         }
         widgets
     }
-    let widgets = descendants(&ui.body);
     for (title, value) in [
         ("IPv6", false),
         ("允许局域网访问", true),
@@ -390,12 +425,21 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .find(|row| row.title() == "MTU")
         .context("缺少 MTU 控件")?
         .set_value(1400.0);
+    save.emit_clicked();
+    ensure!(!save.is_sensitive(), "保存期间没有禁用按钮");
+    ensure!(
+        descendants(save)
+            .iter()
+            .filter_map(|w| w.clone().downcast::<gtk::Spinner>().ok())
+            .any(|spinner| spinner.is_spinning()),
+        "进度指示器不在保存按钮中"
+    );
     widgets
         .iter()
-        .filter_map(|w| w.clone().downcast::<gtk::Button>().ok())
-        .find(|b| b.has_css_class("primary-action"))
-        .context("缺少保存按钮")?
-        .emit_clicked();
+        .filter_map(|w| w.clone().downcast::<gtk::Stack>().ok())
+        .find(|stack| stack.widget_name() == "settings-sections")
+        .context("缺少设置分组")?
+        .set_visible_child_name("tun");
     let scroll = ui
         .body
         .ancestor(gtk::ScrolledWindow::static_type())

@@ -52,8 +52,6 @@
 .settings-group { margin-bottom: 4px; }
 .page-content > preferencesgroup { margin-top: 4px; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
-.info-strip { padding: 14px 18px; border-radius: 12px; background: alpha(#087f83,.065); color: #588184; }
-.dark .info-strip { color: #8db8bb; }
 separator { background: alpha(#728292,.13); min-height: 1px; }
 
 .padded-card { padding: 18px 20px; }

@@ -28,6 +28,7 @@ fn number(v: &Value) -> u64 {
 }
 
 pub fn parse(body: &str) -> Result<Vec<Value>> {
+    let body = body.trim_start_matches('\u{feff}').trim();
     if let Ok(value) = serde_yaml_ng::from_str::<Value>(body)
         && let Some(items) = value
             .as_array()
@@ -44,6 +45,7 @@ pub fn parse(body: &str) -> Result<Vec<Value>> {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
+        ensure!(!nodes.is_empty(), "订阅没有节点");
         validate_nodes(&nodes)?;
         return Ok(nodes);
     }
@@ -63,6 +65,70 @@ pub fn parse(body: &str) -> Result<Vec<Value>> {
     validate_nodes(&nodes)?;
     Ok(nodes)
 }
+/// User-triggered URL, app share link or node content; never a clipboard path.
+pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
+    let input = input.trim_start_matches('\u{feff}').trim();
+    ensure!(!input.is_empty(), "请粘贴订阅链接或节点内容");
+    let mut source = input.to_owned();
+    let mut name = None;
+    if let Some(wrapped) = input.strip_prefix("hiddify://import/") {
+        source = if wrapped.starts_with("http://") || wrapped.starts_with("https://") {
+            wrapped.to_owned()
+        } else {
+            unescape(wrapped)
+        };
+    } else if input.starts_with("sing-box://import-remote-profile")
+        || input.starts_with("clash://install-config")
+    {
+        let wrapped = Url::parse(input).context("导入链接无效")?;
+        source = wrapped
+            .query_pairs()
+            .find(|(k, _)| k == "url")
+            .map(|(_, v)| v.into_owned())
+            .context("导入链接缺少订阅地址")?;
+        name = wrapped
+            .query_pairs()
+            .find(|(k, _)| k == "name")
+            .map(|(_, v)| v.into_owned());
+        if name.is_none() {
+            name = wrapped.fragment().map(unescape);
+        }
+    }
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let mut url = Url::parse(&source).context("订阅地址无效")?;
+        ensure!(
+            url.host().is_some() && !source.contains(['\n', '\r']),
+            "订阅地址无效"
+        );
+        if name.is_none() {
+            name = url.fragment().map(unescape);
+        }
+        url.set_fragment(None);
+        Ok(crate::model::Subscription {
+            name: name
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| "新订阅".into()),
+            source: url.to_string(),
+            ..Default::default()
+        })
+    } else {
+        ensure!(source == input, "导入链接须指向 HTTP 或 HTTPS 订阅");
+        let nodes = parse(input)?;
+        let name = if nodes.len() == 1 {
+            nodes[0]["tag"].as_str().unwrap_or("本地订阅").to_owned()
+        } else {
+            "本地订阅".into()
+        };
+        Ok(crate::model::Subscription {
+            name,
+            nodes,
+            auto_update: false,
+            updated: crate::model::now(),
+            ..Default::default()
+        })
+    }
+}
+
 pub fn uri(input: &str) -> Result<Value> {
     if let Some(v) = input.strip_prefix("vmess://") {
         let v: Value = serde_json::from_str(&decode(v)?)?;
@@ -314,6 +380,33 @@ fn clash(v: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_links_and_local_content_keep_their_meaning() {
+        for input in [
+            "https://example.com/sub?token=x%2Fy#%E8%AE%A2%E9%98%85",
+            "hiddify://import/https://example.com/sub?token=x%2Fy#%E8%AE%A2%E9%98%85",
+            "hiddify://import/https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Dx%252Fy%23%E8%AE%A2%E9%98%85",
+            "sing-box://import-remote-profile?url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Dx%252Fy&name=%E8%AE%A2%E9%98%85",
+        ] {
+            let sub = import_input(input).unwrap();
+            assert_eq!(sub.name, "订阅");
+            assert_eq!(sub.source, "https://example.com/sub?token=x%2Fy");
+            assert!(sub.auto_update);
+        }
+        let local = import_input("\u{feff}{\"outbounds\":[{\"type\":\"socks\",\"tag\":\"本地\",\"server\":\"127.0.0.1\",\"server_port\":1080}]}").unwrap();
+        assert!(local.source.is_empty() && !local.auto_update);
+        assert_eq!(local.nodes.len(), 1);
+        for invalid in [
+            "",
+            "[]",
+            "/etc/passwd",
+            "hiddify://import/file:///etc/passwd",
+            "sing-box://import-remote-profile?url=file%3A%2F%2F%2Fetc%2Fpasswd",
+            "https://example.com/a\nhttps://example.com/b",
+        ] {
+            assert!(import_input(invalid).is_err(), "accepted {invalid}");
+        }
+    }
     #[test]
     fn formats() {
         for text in [

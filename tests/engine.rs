@@ -7,7 +7,11 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    os::unix::fs::PermissionsExt,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{fs::PermissionsExt, process::CommandExt},
+    },
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -32,7 +36,6 @@ fn native_generation_resolves_resources_without_mutating_source() {
     let mut p = Profile::new("test");
     p.subscriptions.push(sub.id.clone());
     p.rulesets.push(rule.id.clone());
-    p.script = "async function onGenerate(config){config.log.level='debug';return config}".into();
     let id = p.id.clone();
     s.update(|state| {
         state.subscriptions.push(sub);
@@ -56,7 +59,7 @@ fn native_generation_resolves_resources_without_mutating_source() {
     );
 }
 #[test]
-fn duplicate_node_names_fail_before_start() {
+fn duplicate_node_names_are_disambiguated_without_changing_subscriptions() {
     let (_d, s) = service();
     s.update(|state| {
         let sub = Subscription {
@@ -68,10 +71,115 @@ fn duplicate_node_names_fail_before_start() {
         Ok(())
     })
     .unwrap();
-    assert!(s.generate(&s.snapshot().settings.active_profile).is_err());
+    let before = s.snapshot();
+    let generated = s.generate(&before.settings.active_profile).unwrap();
+    let tags: Vec<_> = generated["outbounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["tag"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tags.len(),
+        tags.iter().collect::<std::collections::HashSet<_>>().len()
+    );
+    assert_eq!(s.snapshot().subscriptions[0].nodes[0]["tag"], "direct");
+    assert_eq!(
+        s.generate(&before.settings.active_profile).unwrap(),
+        generated
+    );
+}
+
+#[test]
+fn duplicate_subscription_groups_rewrite_their_own_member_default_and_detour_tags() {
+    let (_dir, service) = service();
+    let original = vec![
+        json!({"type":"selector","tag":"proxy","outbounds":["direct","node"],"default":"direct"}),
+        json!({"type":"direct","tag":"direct"}),
+        json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080,"detour":"direct"}),
+        json!({"type":"urltest","tag":"auto","outbounds":["node"]}),
+    ];
+    let first = Subscription {
+        nodes: original.clone(),
+        ..Subscription::default()
+    };
+    let second = Subscription {
+        nodes: original.clone(),
+        ..Subscription::default()
+    };
+    service
+        .update(|state| {
+            state.profiles[0].subscriptions = vec![first.id.clone(), second.id.clone()];
+            state.subscriptions = vec![first, second];
+            Ok(())
+        })
+        .unwrap();
+    let state = service.snapshot();
+    let generated = service.generate(&state.settings.active_profile).unwrap();
+    let outbounds = generated["outbounds"].as_array().unwrap();
+    for (index, sub) in state.subscriptions.iter().enumerate() {
+        let suffix = &sub.id[..8];
+        let proxy = format!("proxy · {suffix}");
+        let direct = format!("direct · {suffix}");
+        let node = if index == 0 {
+            "node".into()
+        } else {
+            format!("node · {suffix}")
+        };
+        let auto = if index == 0 {
+            "auto".into()
+        } else {
+            format!("auto · {suffix}")
+        };
+        let group = outbounds.iter().find(|item| item["tag"] == proxy).unwrap();
+        assert_eq!(group["outbounds"], json!([direct, node]));
+        assert_eq!(group["default"], direct);
+        assert_eq!(
+            outbounds.iter().find(|item| item["tag"] == node).unwrap()["detour"],
+            direct
+        );
+        assert_eq!(
+            outbounds.iter().find(|item| item["tag"] == auto).unwrap()["outbounds"],
+            json!([node])
+        );
+        assert_eq!(service.snapshot().subscriptions[index].nodes, original);
+    }
+    if let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") {
+        service
+            .update(|state| {
+                state.settings.core_path = binary;
+                Ok(())
+            })
+            .unwrap();
+        service.check(&generated).unwrap();
+    }
+}
+
+#[test]
+fn failed_subscription_downloads_do_not_expose_url_credentials_in_errors_or_logs() {
+    let (_dir, service) = service();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let sub = Subscription {
+        source: format!("http://user:private-password@{address}/subscription?token=private-token"),
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    service
+        .update(|state| {
+            state.subscriptions.push(sub);
+            Ok(())
+        })
+        .unwrap();
+    let error = format!("{:#}", service.update_subscription(&id).unwrap_err());
+    for output in [error, service.logs()] {
+        assert!(!output.contains("private-token"));
+        assert!(!output.contains("private-password"));
+    }
 }
 #[test]
-fn subscription_updates_are_atomic_and_run_transform() {
+fn subscription_updates_preserve_all_original_node_names() {
     let (_d, s) = service();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -84,9 +192,6 @@ fn subscription_updates_are_atomic_and_run_transform() {
     });
     let sub = Subscription {
         source: format!("http://{address}"),
-        include: "keep".into(),
-        prefix: "new-".into(),
-        script: "async function onSubscribe(nodes){nodes[0].tag+='-script';return nodes}".into(),
         ..Subscription::default()
     };
     let id = sub.id.clone();
@@ -98,9 +203,106 @@ fn subscription_updates_are_atomic_and_run_transform() {
     s.update_subscription(&id).unwrap();
     worker.join().unwrap();
     let sub = s.snapshot().subscriptions[0].clone();
-    assert_eq!(sub.nodes.len(), 1);
-    assert_eq!(sub.nodes[0]["tag"], "new-keep-script");
+    assert_eq!(sub.nodes.len(), 2);
+    assert_eq!(sub.nodes[0]["tag"], "keep");
+    assert_eq!(sub.nodes[1]["tag"], "drop");
     assert_eq!(sub.total, 100);
+}
+
+#[test]
+fn update_all_subscriptions_skips_local_content_and_updates_remote_sources() {
+    let (_dir, service) = service();
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let remote = Subscription {
+        source: format!("http://{}", server.local_addr().unwrap()),
+        ..Subscription::default()
+    };
+    let local = Subscription {
+        source: "  ".into(),
+        nodes: vec![json!({"type":"direct","tag":"local"})],
+        ..Subscription::default()
+    };
+    let local_id = local.id.clone();
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        let body = r#"{"outbounds":[{"type":"socks","tag":"downloaded","server":"127.0.0.1","server_port":1080}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    service
+        .update(|state| {
+            state.subscriptions = vec![local, remote];
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(service.update_all_subscriptions().unwrap(), 1);
+    worker.join().unwrap();
+    let state = service.snapshot();
+    assert_eq!(state.subscriptions[0].nodes[0]["tag"], "local");
+    assert_eq!(state.subscriptions[0].updated, 0);
+    assert_eq!(state.subscriptions[1].nodes[0]["tag"], "downloaded");
+    assert!(service.update_subscription(&local_id).is_err());
+}
+
+#[test]
+fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_defaults() {
+    let (_dir, service) = service();
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source = format!("http://{}", server.local_addr().unwrap());
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        let body = r#"{"outbounds":[{"type":"socks","tag":"one","server":"127.0.0.1","server_port":1080}]}"#;
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nProfile-Title: base64:RXhhbXBsZQ==\r\nProfile-Update-Interval: 12\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+    });
+    service
+        .import_subscription(Subscription {
+            source: source.clone(),
+            ..Subscription::default()
+        })
+        .unwrap();
+    worker.join().unwrap();
+    let state = service.snapshot();
+    assert_eq!(state.subscriptions.len(), 1);
+    assert_eq!(state.subscriptions[0].name, "Example");
+    assert_eq!(state.subscriptions[0].update_interval_hours, 12);
+    assert!(
+        state
+            .profiles
+            .iter()
+            .all(|profile| profile.subscriptions.is_empty())
+    );
+    assert!(
+        service
+            .import_subscription(Subscription {
+                source,
+                ..Subscription::default()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("已导入")
+    );
+    assert!(
+        service
+            .import_subscription(Subscription {
+                source: "/not/a/subscription".into(),
+                ..Subscription::default()
+            })
+            .is_err()
+    );
+    assert!(
+        service
+            .import_subscription(Subscription::default())
+            .is_err()
+    );
+    assert_eq!(service.snapshot().subscriptions.len(), 1);
 }
 #[test]
 fn process_stops_and_is_reaped() {
@@ -325,6 +527,257 @@ fn real_core_roundtrip() {
 }
 
 #[test]
+fn real_core_survives_the_starting_worker_thread() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (_dir, service) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    drop((api, proxy));
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.settings.auto_restart = false;
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
+            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+                json!(api_address.to_string());
+            Ok(())
+        })
+        .unwrap();
+    let worker_service = service.clone();
+    thread::spawn(move || worker_service.start())
+        .join()
+        .unwrap()
+        .unwrap();
+    let until = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < until {
+        thread::sleep(Duration::from_millis(20));
+        service.poll();
+    }
+    let active = service.status().running && service.api("GET", "/version", None).is_ok();
+    service.stop().unwrap();
+    assert!(
+        active,
+        "core died when its starting worker exited:\n{}",
+        service.logs()
+    );
+}
+
+#[test]
+fn core_crash_test_helper() {
+    let Ok(directory) = std::env::var("AEROBOX_TEST_CRASH_DIRECTORY") else {
+        return;
+    };
+    let service = Service::new(Store::open(Some(directory.clone().into())).unwrap());
+    let worker = service.clone();
+    thread::spawn(move || worker.start())
+        .join()
+        .unwrap()
+        .unwrap();
+    fs::write(
+        std::path::Path::new(&directory).join("core.pid"),
+        service.status().pid.unwrap().to_string(),
+    )
+    .unwrap();
+    thread::sleep(Duration::from_secs(15));
+    service.stop().unwrap();
+}
+
+#[test]
+fn real_core_terminates_when_the_application_is_killed() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (dir, service) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    drop((api, proxy));
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
+            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+                json!(api_address.to_string());
+            Ok(())
+        })
+        .unwrap();
+    let mut application = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "core_crash_test_helper", "--nocapture"])
+        .env("AEROBOX_TEST_CRASH_DIRECTORY", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let path = dir.path().join("core.pid");
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !path.exists() {
+        let _ = application.kill();
+        let _ = application.wait();
+        panic!("crash test core did not start");
+    }
+    let pid: u32 = fs::read_to_string(path).unwrap().parse().unwrap();
+    application.kill().unwrap();
+    application.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let alive = || {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.split(") ").nth(1).unwrap_or("").starts_with('Z'))
+    };
+    while alive() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let survived = alive();
+    if survived {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    assert!(!survived, "core survived SIGKILL of its application");
+}
+
+#[test]
+fn pidfd_guardian_stops_a_core_without_parent_death_signals() {
+    fn pidfd(pid: u32) -> OwnedFd {
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32 };
+        assert!(raw >= 0);
+        let original = unsafe { OwnedFd::from_raw_fd(raw) };
+        let duplicate = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        assert!(duplicate >= 0);
+        unsafe { OwnedFd::from_raw_fd(duplicate) }
+    }
+    let mut parent = Command::new("/bin/sleep").arg("20").spawn().unwrap();
+    let mut core = Command::new("/bin/sleep").arg("20").spawn().unwrap();
+    let parent_fd = pidfd(parent.id());
+    let core_fd = pidfd(core.id());
+    let p = parent_fd.as_raw_fd();
+    let c = core_fd.as_raw_fd();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_AeroBox"));
+    command
+        .arg("--watch-core")
+        .env("AEROBOX_WATCH_PARENT_FD", p.to_string())
+        .env("AEROBOX_WATCH_CORE_FD", c.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(p, libc::F_SETFD, 0) < 0 || libc::fcntl(c, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut guardian = command.spawn().unwrap();
+    let mut output = guardian.stdout.take().unwrap();
+    let mut descriptor = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut descriptor, 1, 3000) } <= 0 {
+        let _ = parent.kill();
+        let _ = parent.wait();
+        let _ = core.kill();
+        let _ = core.wait();
+        let _ = guardian.kill();
+        let _ = guardian.wait();
+        panic!("guardian failed to acknowledge readiness");
+    }
+    let mut ready = [0_u8; 1];
+    output.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, b"R"[0..1]);
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut exited = false;
+    while Instant::now() < deadline {
+        if core.try_wait().unwrap().is_some() {
+            exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !exited {
+        let _ = core.kill();
+        let _ = guardian.kill();
+    }
+    core.wait().unwrap();
+    assert!(guardian.wait().unwrap().success());
+    assert!(
+        exited,
+        "guardian did not terminate a core after parent exit"
+    );
+}
+
+#[test]
+fn real_core_applies_new_subscription_nodes_and_preserves_them_on_invalid_update() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (dir, service) = service();
+    let source = dir.path().join("nodes.json");
+    let sub = Subscription {
+        source: source.to_string_lossy().into_owned(),
+        nodes: vec![json!({"type":"direct","tag":"old-node"})],
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    drop((api, proxy));
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.profiles[0].subscriptions.push(id.clone());
+            state.subscriptions.push(sub);
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
+            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+                json!(api_address.to_string());
+            Ok(())
+        })
+        .unwrap();
+    service.start().unwrap();
+    fs::write(
+        &source,
+        r#"{"outbounds":[{"type":"direct","tag":"new-node"}]}"#,
+    )
+    .unwrap();
+    let updater = service.clone();
+    thread::spawn(move || updater.update_due_subscriptions())
+        .join()
+        .unwrap()
+        .unwrap();
+    assert!(
+        service.api("GET", "/proxies", None).unwrap()["proxies"]
+            .get("new-node")
+            .is_some()
+    );
+    let pid = service.status().pid;
+    fs::write(
+        &source,
+        r#"{"outbounds":[{"type":"invalid-core-protocol","tag":"broken"}]}"#,
+    )
+    .unwrap();
+    assert!(service.update_subscription(&id).is_err());
+    assert_eq!(service.status().pid, pid);
+    assert_eq!(
+        service.snapshot().subscriptions[0].nodes[0]["tag"],
+        "new-node"
+    );
+    assert!(service.api("GET", "/version", None).is_ok());
+    service.stop().unwrap();
+}
+
+#[test]
 fn offline_settings_save_without_an_installed_core() {
     let (_dir, s) = service();
     let settings = Settings {
@@ -340,6 +793,150 @@ fn offline_settings_save_without_an_installed_core() {
     let mut invalid = s.snapshot().settings;
     invalid.test_url = "file:///tmp/not-a-network-test".into();
     assert!(s.apply_settings(invalid).is_err());
+}
+
+#[test]
+fn stopped_system_proxy_preference_is_saved_without_changing_the_desktop() {
+    let (_dir, service) = service();
+    service.set_system_proxy_enabled(true).unwrap();
+    assert!(service.snapshot().settings.system_proxy);
+    assert!(!service.status().proxy);
+    service.set_system_proxy_enabled(false).unwrap();
+    assert!(!service.snapshot().settings.system_proxy);
+    assert!(!service.status().proxy);
+}
+
+#[test]
+fn automatic_updates_obey_intervals_preserve_failed_nodes_and_back_off() {
+    let (dir, service) = service();
+    let source = dir.path().join("subscription.json");
+    fs::write(
+        &source,
+        r#"{"outbounds":[{"type":"socks","tag":"new","server":"127.0.0.1","server_port":1080}]}"#,
+    )
+    .unwrap();
+    let old_nodes =
+        vec![json!({"type":"socks","tag":"old","server":"127.0.0.1","server_port":1080})];
+    let due = Subscription {
+        source: source.to_string_lossy().into_owned(),
+        nodes: old_nodes.clone(),
+        updated: model::now() - 3601,
+        update_interval_hours: 1,
+        ..Subscription::default()
+    };
+    let id = due.id.clone();
+    let disabled = Subscription {
+        auto_update: false,
+        ..due.clone()
+    };
+    let fresh = Subscription {
+        updated: model::now(),
+        ..due.clone()
+    };
+    service
+        .update(|state| {
+            state.subscriptions = vec![
+                due,
+                Subscription {
+                    id: model::id(),
+                    ..disabled
+                },
+                Subscription {
+                    id: model::id(),
+                    ..fresh
+                },
+            ];
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(service.update_due_subscriptions().unwrap(), 1);
+    assert_eq!(service.subscription_revision(), 1);
+    assert_eq!(service.snapshot().subscriptions[0].nodes[0]["tag"], "new");
+    assert_eq!(service.snapshot().subscriptions[1].nodes, old_nodes);
+    assert_eq!(service.snapshot().subscriptions[2].nodes, old_nodes);
+    service
+        .update(|state| {
+            state.subscriptions[0].updated = 0;
+            Ok(())
+        })
+        .unwrap();
+    fs::write(&source, "invalid content").unwrap();
+    assert_eq!(service.update_due_subscriptions().unwrap(), 0);
+    assert_eq!(service.subscription_revision(), 1);
+    assert_eq!(service.snapshot().subscriptions[0].nodes[0]["tag"], "new");
+    let failed_logs = service.logs();
+    assert!(failed_logs.contains("更新失败"));
+    fs::write(
+        &source,
+        r#"{"outbounds":[{"type":"socks","tag":"retry","server":"127.0.0.1","server_port":1080}]}"#,
+    )
+    .unwrap();
+    assert_eq!(service.update_due_subscriptions().unwrap(), 0);
+    assert_eq!(
+        service.logs(),
+        failed_logs,
+        "backoff should not produce another request or log"
+    );
+    service.update_subscription(&id).unwrap();
+    assert_eq!(service.snapshot().subscriptions[0].nodes[0]["tag"], "retry");
+    assert_eq!(service.subscription_revision(), 2);
+}
+
+#[test]
+fn concurrent_manual_and_automatic_updates_do_not_override_an_edit() {
+    let (_dir, service) = service();
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = server.local_addr().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server_worker = thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body = r#"{"outbounds":[{"type":"socks","tag":"stale","server":"127.0.0.1","server_port":1080}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let sub = Subscription {
+        source: format!("http://{address}"),
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    service
+        .update(|state| {
+            state.subscriptions.push(sub);
+            Ok(())
+        })
+        .unwrap();
+    let worker_service = service.clone();
+    let worker_id = id.clone();
+    let update = thread::spawn(move || worker_service.update_subscription(&worker_id));
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(service.update_due_subscriptions().unwrap(), 0);
+    assert!(
+        service
+            .update_subscription(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("正在更新")
+    );
+    service
+        .update(|state| {
+            state.subscriptions[0].source = "edited.json".into();
+            Ok(())
+        })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    assert!(update.join().unwrap().is_err());
+    server_worker.join().unwrap();
+    assert!(service.snapshot().subscriptions[0].nodes.is_empty());
+    assert_eq!(service.snapshot().subscriptions[0].source, "edited.json");
 }
 
 #[test]

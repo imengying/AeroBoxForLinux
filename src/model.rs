@@ -124,8 +124,6 @@ pub struct Profile {
     pub subscriptions: Vec<String>,
     #[serde(default)]
     pub rulesets: Vec<String>,
-    #[serde(default)]
-    pub script: String,
 }
 impl Profile {
     pub fn new(name: &str) -> Self {
@@ -134,7 +132,6 @@ impl Profile {
             name: name.into(),
             subscriptions: vec![],
             rulesets: vec![],
-            script: String::new(),
             config: json!({
                 "log":{"level":"error","timestamp":true},
                 "dns":{"servers":[{"type":"udp","tag":"dns-local","server":"223.5.5.5"}],"final":"dns-local"},
@@ -153,10 +150,8 @@ pub struct Subscription {
     pub id: String,
     pub name: String,
     pub source: String,
-    pub include: String,
-    pub exclude: String,
-    pub prefix: String,
-    pub script: String,
+    pub auto_update: bool,
+    pub update_interval_hours: u32,
     pub nodes: Vec<Value>,
     pub updated: u64,
     pub upload: u64,
@@ -170,10 +165,8 @@ impl Default for Subscription {
             id: id(),
             name: "新订阅".into(),
             source: String::new(),
-            include: String::new(),
-            exclude: String::new(),
-            prefix: String::new(),
-            script: String::new(),
+            auto_update: true,
+            update_interval_hours: 24,
             nodes: vec![],
             updated: 0,
             upload: 0,
@@ -399,6 +392,10 @@ impl State {
             }
         }
         for s in &self.subscriptions {
+            ensure!(
+                (1..=168).contains(&s.update_interval_hours),
+                "订阅更新间隔必须在 1 到 168 小时之间"
+            );
             validate_nodes(&s.nodes)?;
         }
         Ok(())
@@ -426,7 +423,11 @@ impl Store {
     pub fn open(dir: Option<PathBuf>) -> Result<Self> {
         let dir = match dir {
             Some(p) => p,
-            None => data_home()?.join("singbox"),
+            None => {
+                let destination = config_home()?.join("AeroBoxForLinux");
+                migrate_legacy_data(&data_home()?.join("singbox"), &destination)?;
+                destination
+            }
         };
         fs::create_dir_all(&dir)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
@@ -465,14 +466,95 @@ impl Store {
         ))
     }
 }
+// Stage and validate the complete legacy tree before activating the new root.
+// Existing configuration wins; a failed migration leaves the legacy untouched.
+fn migrate_legacy_data(legacy: &Path, destination: &Path) -> Result<()> {
+    if destination.join("state.json").exists() || !legacy.join("state.json").is_file() {
+        return Ok(());
+    }
+    let mut value: Value = serde_json::from_slice(&fs::read(legacy.join("state.json"))?)
+        .context("旧配置无法读取，尚未迁移")?;
+    relocate_paths(&mut value, legacy, destination);
+    let state: State = serde_json::from_value(value).context("旧配置格式无效")?;
+    state.validate()?;
+    if destination.exists() {
+        ensure!(
+            fs::read_dir(destination)?.next().is_none(),
+            "新配置目录已有文件，未覆盖；请检查 {}",
+            destination.display()
+        );
+    }
+    let parent = destination.parent().context("配置目录无父路径")?;
+    fs::create_dir_all(parent)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".aerobox-migrate-")
+        .tempdir_in(parent)?;
+    copy_private_tree(legacy, stage.path())?;
+    // Removed script/filter fields are intentionally dropped on upgrade.
+    atomic_write(
+        &stage.path().join("state.json"),
+        &serde_json::to_vec_pretty(&state)?,
+        0o600,
+    )?;
+    fs::rename(stage.path(), destination).context("无法启用迁移后的配置目录")?;
+    Ok(())
+}
+fn relocate_paths(value: &mut Value, legacy: &Path, destination: &Path) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if (key == "source" || key == "path" || key.ends_with("_path"))
+                    && let Some(path) = value.as_str()
+                    && let Ok(relative) = Path::new(path).strip_prefix(legacy)
+                {
+                    *value = json!(destination.join(relative).to_string_lossy());
+                } else {
+                    relocate_paths(value, legacy, destination);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                relocate_paths(item, legacy, destination);
+            }
+        }
+        _ => {}
+    }
+}
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if kind.is_dir() {
+            copy_private_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target)?;
+            let mode = if entry.metadata()?.permissions().mode() & 0o111 != 0 {
+                0o700
+            } else {
+                0o600
+            };
+            fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+        } else {
+            bail!(
+                "旧目录包含无法迁移的链接或特殊文件：{}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
 pub fn data_home() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|p| Path::new(p).is_absolute()) {
         return Ok(path.into());
     };
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME 未设置")?).join(".local/share"))
 }
 pub fn config_home() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| Path::new(p).is_absolute()) {
         return Ok(path.into());
     };
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME 未设置")?).join(".config"))
@@ -520,6 +602,80 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_migration_preserves_resources_and_relocates_internal_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("data/singbox");
+        let new = root.path().join("config/AeroBoxForLinux");
+        let store = Store::open(Some(old.clone())).unwrap();
+        fs::create_dir(old.join("core")).unwrap();
+        fs::write(old.join("core/sing-box"), b"core").unwrap();
+        fs::set_permissions(old.join("core/sing-box"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(old.join("rules")).unwrap();
+        fs::write(old.join("rules/custom.srs"), b"rules").unwrap();
+        let mut value = serde_json::to_value(&store.state).unwrap();
+        value["settings"]["core_path"] = json!(old.join("core/sing-box"));
+        value["profiles"][0]["script"] = json!("obsolete");
+        value["subscriptions"] = json!([{"id": id(), "name":"existing", "source":old.join("nodes.txt"), "script":"obsolete", "include":".*", "exclude":"test", "prefix":"old"}]);
+        fs::write(old.join("state.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        fs::write(old.join("nodes.txt"), "data").unwrap();
+        let original = fs::read(old.join("state.json")).unwrap();
+        migrate_legacy_data(&old, &new).unwrap();
+        let migrated = Store::open(Some(new.clone())).unwrap();
+        assert_eq!(
+            migrated.state.settings.core_path,
+            new.join("core/sing-box").to_str().unwrap()
+        );
+        assert_eq!(
+            migrated.state.subscriptions[0].source,
+            new.join("nodes.txt").to_str().unwrap()
+        );
+        assert!(migrated.state.subscriptions[0].auto_update);
+        assert_eq!(migrated.state.subscriptions[0].update_interval_hours, 24);
+        assert_eq!(fs::read(new.join("rules/custom.srs")).unwrap(), b"rules");
+        assert_eq!(
+            fs::metadata(new.join("core/sing-box"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(new.join("state.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(old.join("state.json")).unwrap(), original);
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(new.join("state.json")).unwrap()).unwrap();
+        assert!(persisted["profiles"][0].get("script").is_none());
+        assert!(persisted["subscriptions"][0].get("include").is_none());
+        // A subsequent startup always prefers the existing new configuration.
+        fs::write(old.join("state.json"), b"broken old data").unwrap();
+        migrate_legacy_data(&old, &new).unwrap();
+    }
+
+    #[test]
+    fn failed_migration_does_not_activate_partial_data() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        Store::open(Some(old.clone())).unwrap();
+        std::os::unix::fs::symlink("/missing", old.join("link")).unwrap();
+        assert!(migrate_legacy_data(&old, &new).is_err());
+        assert!(!new.exists());
+        assert!(old.join("state.json").is_file());
+        fs::remove_file(old.join("link")).unwrap();
+        fs::create_dir(&new).unwrap();
+        fs::write(new.join("existing.txt"), b"keep").unwrap();
+        assert!(migrate_legacy_data(&old, &new).is_err());
+        assert_eq!(fs::read(new.join("existing.txt")).unwrap(), b"keep");
+        assert!(!new.join("state.json").exists());
+    }
     #[test]
     fn existing_settings_migrate_without_restoring_the_download_proxy() {
         let settings: Settings = serde_json::from_value(json!({

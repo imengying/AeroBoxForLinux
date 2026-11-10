@@ -79,10 +79,12 @@ jobs:
           body: |
             AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
 
-            重排首页布局，启动按钮悬浮在内容区左下角；IPv6 开关移至设置。
-            首页显示出口 IP、上传下载速度、三种出站模式、连接数、运行时间和整体内存。
-            日志默认 error；默认软件绘制降低启动内存，可在设置中开启硬件加速。
-            统一字号、字重与文字对比度，保留内置配置、规则集及自动下载代理。
+            修复内核启动后立即退出、系统代理切换与设置保存反馈。
+            启动按钮移到右下角，设置仅保留右上角保存按钮，进度显示在按钮中。
+            订阅参考 Hiddify，支持链接、剪贴板和文件导入，以及按间隔自动更新。
+            移除处理脚本与节点筛选，按常规、网络、虚拟网卡和内核整理设置。
+            配置默认保存到用户配置目录下的 AeroBoxForLinux，并迁移旧数据。
+            日志默认 error，保留首页整体内存、网络检测和低内存绘制设置。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。
