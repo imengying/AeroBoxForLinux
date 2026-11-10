@@ -1,10 +1,14 @@
 #!/bin/sh
 set -eu
 target_dir=${CARGO_TARGET_DIR:-target}
+test_scale=${AEROBOX_TEST_SCALE:-1}
+case "$test_scale" in 1|2) ;; *) printf '%s\n' 'AEROBOX_TEST_SCALE must be 1 or 2' >&2; exit 1 ;; esac
 binary=${1:-"$target_dir/release/AeroBox"}
 binary=$(realpath "$binary")
-mkdir -p "$target_dir/wayland"
-output_dir=$(realpath "$target_dir/wayland")
+output_path="$target_dir/wayland"
+if [ "$test_scale" != 1 ]; then output_path="$output_path/scale-$test_scale"; fi
+mkdir -p "$output_path"
+output_dir=$(realpath "$output_path")
 test_dir=$(mktemp -d)
 cleanup() {
   if [ -n "${weston_pid:-}" ]; then
@@ -33,7 +37,7 @@ if [ "${AEROBOX_TEST_NO_SVG:-0}" = 1 ]; then
   export GDK_PIXBUF_MODULE_FILE="$test_dir/pixbuf-loaders.cache"
 fi
 unset DISPLAY
-weston --backend=headless-backend.so --use-pixman --width=1400 --height=1000 --socket="$WAYLAND_DISPLAY" --idle-time=0 --no-config --log="$test_dir/weston.log" &
+weston --backend=headless-backend.so --use-pixman --width="$((1400 * test_scale))" --height="$((1000 * test_scale))" --scale="$test_scale" --socket="$WAYLAND_DISPLAY" --idle-time=0 --no-config --log="$test_dir/weston.log" &
 weston_pid=$!
 attempt=0
 while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do

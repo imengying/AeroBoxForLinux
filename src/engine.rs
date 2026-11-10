@@ -30,6 +30,15 @@ pub struct CoreStatus {
     pub uptime: u64,
     pub proxy: bool,
 }
+#[derive(Clone, Debug)]
+pub struct CoreInfo {
+    pub binary: PathBuf,
+    pub version: String,
+    pub status: CoreStatus,
+    pub routing_mode: String,
+}
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Default)]
 struct Running {
     child: Option<Child>,
@@ -149,6 +158,47 @@ impl Service {
     pub fn core_binary(&self) -> Result<PathBuf> {
         let settings = self.snapshot().settings;
         self.core_binary_for(&settings)
+    }
+    /// Fetch the running binary's version, or inspect the selected binary while
+    /// stopped. Call off the GTK thread, just like other core operations.
+    pub fn core_info(&self) -> Result<CoreInfo> {
+        let status = self.status();
+        let (binary, version) = if status.running {
+            let binary = self
+                .running
+                .lock()
+                .unwrap()
+                .binary
+                .clone()
+                .context("运行内核路径不可用")?;
+            let info = self.api_with_timeout("GET", "/version", None, CONTROL_TIMEOUT)?;
+            let version = info["version"].as_str().context("内核没有返回版本")?;
+            (
+                binary,
+                version
+                    .strip_prefix("sing-box ")
+                    .unwrap_or(version)
+                    .to_owned(),
+            )
+        } else {
+            let binary = self.core_binary()?;
+            let mut command = Command::new(&binary);
+            command.arg("version");
+            let output = run_command(command, Duration::from_secs(5))?;
+            let version = output
+                .lines()
+                .find_map(|line| line.strip_prefix("sing-box version "))
+                .context("所选文件不是 sing-box 内核")?;
+            (binary, version.trim().to_owned())
+        };
+        let routing_mode = self.runtime_mode()?;
+        ensure!(self.status().pid == status.pid, "内核状态已变化，请刷新");
+        Ok(CoreInfo {
+            binary,
+            version,
+            status,
+            routing_mode,
+        })
     }
     fn core_binary_for(&self, settings: &Settings) -> Result<PathBuf> {
         if !settings.core_path.is_empty() {
@@ -325,6 +375,20 @@ impl Service {
     }
     pub fn reload(&self) -> Result<()> {
         let _op = self.operation.lock().unwrap();
+        self.reload_locked()
+    }
+    pub fn restart(&self) -> Result<()> {
+        self.desired_running.store(true, Ordering::SeqCst);
+        let _op = self.operation.lock().unwrap();
+        if self.status().running {
+            self.reload_locked()
+        } else {
+            self.start_inner_locked()
+        }
+    }
+    fn reload_locked(&self) -> Result<()> {
+        ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
+        ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(self.status().running, "请先启动内核");
         let state = self.snapshot();
         let config = self.generate(&state.settings.active_profile)?;
@@ -369,6 +433,9 @@ impl Service {
     }
     fn start_inner(&self) -> Result<()> {
         let _op = self.operation.lock().unwrap();
+        self.start_inner_locked()
+    }
+    fn start_inner_locked(&self) -> Result<()> {
         ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(!self.status().running, "内核已运行");
@@ -456,13 +523,8 @@ impl Service {
             let mode = api["default_mode"].as_str().unwrap_or("rule");
             let until = Instant::now() + Duration::from_secs(3);
             loop {
-                match self.api_with_timeout(
-                    "PATCH",
-                    "/configs",
-                    Some(&json!({"mode":mode})),
-                    Duration::from_millis(500),
-                ) {
-                    Ok(_) => break,
+                match self.set_runtime_mode_with_timeout(mode, Duration::from_millis(500)) {
+                    Ok(()) => break,
                     Err(error) if Instant::now() >= until => {
                         return Err(error.context("内核模式同步失败"));
                     }
@@ -605,13 +667,22 @@ impl Service {
     }
 
     fn running_config(&self) -> Result<(Value, PathBuf, String)> {
-        let running = self.running.lock().unwrap();
-        ensure!(running.child.is_some(), "请先启动内核");
-        Ok((
-            running.config.clone(),
-            running.binary.clone().context("运行内核路径不可用")?,
-            running.profile_id.clone(),
-        ))
+        let mut snapshot = {
+            let running = self.running.lock().unwrap();
+            ensure!(running.child.is_some(), "请先启动内核");
+            (
+                running.config.clone(),
+                running.binary.clone().context("运行内核路径不可用")?,
+                running.profile_id.clone(),
+            )
+        };
+        // Preserve the real mode in a rollback snapshot, including a change
+        // made by another controller. An unresponsive API must not prevent
+        // restarting a stuck core; its last known configuration remains usable.
+        if let Ok(mode) = self.runtime_mode() {
+            snapshot.0["experimental"]["clash_api"]["default_mode"] = json!(mode);
+        }
+        Ok(snapshot)
     }
 
     pub fn set_routing_mode(&self, mode: &str) -> Result<()> {
@@ -620,9 +691,19 @@ impl Service {
             "无效的出站模式"
         );
         let _op = self.operation.lock().unwrap();
-        let previous = self.snapshot().settings.routing_mode;
         let running = self.status().running;
-        if running && let Err(error) = self.set_runtime_mode(mode) {
+        // An external controller can change the core without updating our
+        // preference. Roll back its actual mode, not a stale saved value.
+        let previous = self.runtime_mode()?;
+        if running
+            && let Err(error) = self.set_runtime_mode(mode).and_then(|()| {
+                if previous == mode {
+                    Ok(())
+                } else {
+                    self.close_connections()
+                }
+            })
+        {
             return Err(match self.set_runtime_mode(&previous) {
                 Ok(()) => error,
                 Err(restore) => error.context(format!("恢复出站模式失败：{restore:#}")),
@@ -644,10 +725,78 @@ impl Service {
         Ok(())
     }
 
+    pub fn runtime_mode(&self) -> Result<String> {
+        let before = self.status().pid;
+        let mode = if before.is_some() {
+            let actual = self.api_with_timeout("GET", "/configs", None, CONTROL_TIMEOUT)?;
+            actual["mode"]
+                .as_str()
+                .context("内核没有返回出站模式")?
+                .to_owned()
+        } else {
+            self.snapshot().settings.routing_mode
+        };
+        ensure!(self.status().pid == before, "内核状态已变化，请刷新");
+        ensure!(
+            matches!(mode.as_str(), "rule" | "global" | "direct"),
+            "内核返回了未知出站模式：{mode}"
+        );
+        Ok(mode)
+    }
+
     fn set_runtime_mode(&self, mode: &str) -> Result<()> {
-        self.api("PATCH", "/configs", Some(&json!({"mode":mode})))?;
-        let actual = self.api("GET", "/configs", None)?;
+        self.set_runtime_mode_with_timeout(mode, CONTROL_TIMEOUT)
+    }
+
+    fn set_runtime_mode_with_timeout(&self, mode: &str, timeout: Duration) -> Result<()> {
+        self.api_with_timeout("PATCH", "/configs", Some(&json!({"mode":mode})), timeout)?;
+        let actual = self.api_with_timeout("GET", "/configs", None, timeout)?;
         ensure!(actual["mode"].as_str() == Some(mode), "内核未应用出站模式");
+        Ok(())
+    }
+
+    fn close_connections(&self) -> Result<()> {
+        self.api_with_timeout("DELETE", "/connections", None, CONTROL_TIMEOUT)
+            .context("内核未能关闭原有连接")?;
+        Ok(())
+    }
+
+    pub fn select_outbound(&self, group: &str, name: &str) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let tag = percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/proxies/{tag}");
+        let current = self.api_with_timeout("GET", &path, None, CONTROL_TIMEOUT)?;
+        ensure!(current["type"] == "Selector", "此分组不支持手动选择节点");
+        ensure!(
+            current["all"]
+                .as_array()
+                .is_some_and(|members| members.iter().any(|member| member.as_str() == Some(name))),
+            "节点不属于此分组"
+        );
+        let previous = current["now"].as_str().context("内核没有返回当前节点")?;
+        if previous == name {
+            return Ok(());
+        }
+        let select = |selected: &str| -> Result<()> {
+            self.api_with_timeout(
+                "PUT",
+                &path,
+                Some(&json!({"name":selected})),
+                CONTROL_TIMEOUT,
+            )?;
+            let actual = self.api_with_timeout("GET", &path, None, CONTROL_TIMEOUT)?;
+            ensure!(
+                actual["now"].as_str() == Some(selected),
+                "内核未应用节点选择"
+            );
+            Ok(())
+        };
+        if let Err(error) = select(name).and_then(|()| self.close_connections()) {
+            return Err(match select(previous) {
+                Ok(()) => error,
+                Err(restore) => error.context(format!("恢复原节点失败：{restore:#}")),
+            });
+        }
         Ok(())
     }
 

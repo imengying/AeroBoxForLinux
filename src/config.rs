@@ -59,6 +59,11 @@ pub fn apply_profile_settings(
     object(config, "log")?["level"] = json!(settings.log_level);
     let final_outbound = config["route"]["final"].as_str().map(str::to_owned);
     let outbounds = array(config, "outbounds")?;
+    for outbound in outbounds.iter_mut() {
+        if matches!(outbound["type"].as_str(), Some("selector" | "urltest")) {
+            outbound["interrupt_exist_connections"] = json!(true);
+        }
+    }
     let direct = if let Some(tag) = outbounds
         .iter()
         .find(|v| v["type"] == "direct" && v["tag"].is_string())
@@ -70,19 +75,28 @@ pub fn apply_profile_settings(
         outbounds.push(json!({"type":"direct", "tag":tag}));
         tag
     };
+    let eligible_proxy = |v: &&Value| {
+        !matches!(v["type"].as_str(), Some("direct" | "block" | "dns"))
+            && v["tag"].as_str().is_some_and(|tag| !tag.is_empty())
+    };
+    // A valid final selector is the profile's intended default group. A node
+    // merely named "proxy" must not override it or turn global mode into direct.
     let proxy = outbounds
         .iter()
-        .find(|v| v["tag"] == "proxy")
+        .filter(eligible_proxy)
+        .find(|v| v["tag"].as_str() == final_outbound.as_deref())
         .or_else(|| {
             outbounds
                 .iter()
-                .find(|v| v["tag"].as_str() == final_outbound.as_deref() && v["type"] != "direct")
+                .filter(eligible_proxy)
+                .find(|v| v["tag"] == "proxy")
         })
         .or_else(|| {
             outbounds
                 .iter()
-                .find(|v| !matches!(v["type"].as_str(), Some("direct" | "block" | "dns")))
+                .find(|v| v["type"] == "selector" && v["tag"].is_string())
         })
+        .or_else(|| outbounds.iter().find(eligible_proxy))
         .and_then(|v| v["tag"].as_str())
         .unwrap_or(&direct)
         .to_string();
@@ -202,14 +216,14 @@ pub fn apply_profile_settings(
     if !settings.ipv6 {
         dns_rules.push(json!({"query_type":"AAAA","action":"predefined","rcode":"NOERROR"}));
     }
+    dns_rules.push(json!({"clash_mode":"direct","server":direct_dns,"action":"route"}));
+    dns_rules.push(json!({"clash_mode":"global","server":proxy_dns,"action":"route"}));
     if settings.block_ads {
         dns_rules.push(match ads_tag {
             Some(tag) => json!({"rule_set":tag,"action":"reject"}),
             None => json!({"domain_suffix":ADS,"action":"reject"}),
         });
     }
-    dns_rules.push(json!({"clash_mode":"direct","server":direct_dns,"action":"route"}));
-    dns_rules.push(json!({"clash_mode":"global","server":proxy_dns,"action":"route"}));
     let previous = std::mem::take(array(dns, "rules")?);
     dns_rules.extend(
         previous
@@ -237,15 +251,19 @@ pub fn apply_profile_settings(
     };
     let previous = std::mem::take(array(route, "rules")?);
     let mut rules = vec![];
-    if settings.sniff {
-        rules.push(json!({"action":"sniff"}));
-    }
     if !settings.ipv6 {
         rules.push(json!({"ip_version":6,"action":"reject"}));
+    }
+    if settings.sniff {
+        rules.push(json!({"action":"sniff"}));
     }
     if settings.dns_hijack {
         rules.push(json!({"type":"logical","mode":"or","rules":[{"protocol":"dns"},{"port":53}],"action":"hijack-dns"}));
     }
+    // Mode overrides traffic policy, including LAN bypass and ad blocking.
+    // DNS interception and the explicit IPv6 switch remain transport controls.
+    rules.push(json!({"clash_mode":"direct","action":"route","outbound":direct}));
+    rules.push(json!({"clash_mode":"global","action":"route","outbound":proxy}));
     if settings.bypass_lan {
         rules.push(json!({"ip_is_private":true,"action":"route","outbound":direct}));
         if let Some(tag) = lan_tag {
@@ -258,8 +276,6 @@ pub fn apply_profile_settings(
             None => json!({"domain_suffix":ADS,"action":"reject"}),
         });
     }
-    rules.push(json!({"clash_mode":"direct","action":"route","outbound":direct}));
-    rules.push(json!({"clash_mode":"global","action":"route","outbound":proxy}));
     rules.extend(previous.into_iter().filter(|r| {
         !matches!(r["action"].as_str(), Some("sniff" | "hijack-dns"))
             && r.get("clash_mode").is_none()

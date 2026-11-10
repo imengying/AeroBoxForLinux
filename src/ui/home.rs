@@ -4,6 +4,7 @@ use std::time::Instant;
 
 pub(super) struct Dashboard {
     controls: gtk::Box,
+    modes: Vec<(&'static str, gtk::ToggleButton)>,
     download: gtk::Label,
     upload: gtk::Label,
     download_unit: gtk::Label,
@@ -27,7 +28,8 @@ impl Ui {
     pub(super) fn home(self: &Rc<Self>) {
         self.body.add_css_class("home-page");
         self.body.set_spacing(20);
-        self.body.set_margin_bottom(112);
+        self.body.set_margin_bottom(32);
+        self.scroll.set_margin_bottom(100);
         let state = self.service.snapshot();
         let status = self.service.status();
 
@@ -51,10 +53,11 @@ impl Ui {
         }
         toggle.set_sensitive(
             status.running
-                || state
-                    .profiles
-                    .iter()
-                    .any(|p| p.id == state.settings.active_profile),
+                || (self.jobs.get() == 0
+                    && state
+                        .profiles
+                        .iter()
+                        .any(|p| p.id == state.settings.active_profile)),
         );
         let weak = Rc::downgrade(self);
         toggle.connect_clicked(move |button| {
@@ -65,10 +68,14 @@ impl Ui {
             if ui.jobs.get() > 0 && !running {
                 return;
             }
-            button.set_sensitive(false);
-            ui.task(
-                if running { "停止" } else { "启动" },
-                move |s| Ok(if running { s.stop() } else { s.start() }),
+            ui.button_task(
+                button,
+                if running {
+                    "停止中…"
+                } else {
+                    "启动中…"
+                },
+                move |s| if running { s.stop() } else { s.start() },
                 |ui, result| {
                     ui.refresh(Page::Home);
                     if let Err(e) = result {
@@ -123,6 +130,7 @@ impl Ui {
         let modes = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         modes.add_css_class("mode-selector");
         let mut first: Option<gtk::ToggleButton> = None;
+        let mut mode_buttons = Vec::new();
         for (title, value) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
             let button = gtk::ToggleButton::with_label(title);
             if let Some(first) = &first {
@@ -133,7 +141,7 @@ impl Ui {
             button.set_active(state.settings.routing_mode == value);
             let weak = Rc::downgrade(self);
             let group = controls.downgrade();
-            button.connect_toggled(move |button| {
+            button.connect_clicked(move |button| {
                 if !button.is_active() {
                     return;
                 }
@@ -141,9 +149,10 @@ impl Ui {
                     if let Some(group) = group.upgrade() {
                         group.set_sensitive(false);
                     }
-                    ui.task(
-                        "切换出站模式",
-                        move |s| Ok(s.set_routing_mode(value)),
+                    ui.button_task(
+                        button.upcast_ref::<gtk::Button>(),
+                        "切换中…",
+                        move |s| s.set_routing_mode(value),
                         |ui, result| {
                             ui.refresh(Page::Home);
                             if let Err(e) = result {
@@ -154,6 +163,7 @@ impl Ui {
                 }
             });
             modes.append(&button);
+            mode_buttons.push((value, button));
         }
         mode_row.append(&modes);
         controls.append(&mode_row);
@@ -236,6 +246,7 @@ impl Ui {
         self.body.append(&stats);
 
         let dashboard = Rc::new(Dashboard {
+            modes: mode_buttons,
             controls,
             download,
             upload,
@@ -274,6 +285,20 @@ impl Dashboard {
     pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
         self.controls.set_sensitive(ui.jobs.get() == 0);
         let status = ui.service.status();
+        if let Some(button) = ui.home_action.borrow().as_ref() {
+            if ui.jobs.get() == 0 {
+                let state = ui.service.snapshot();
+                button.set_sensitive(
+                    status.running
+                        || state
+                            .profiles
+                            .iter()
+                            .any(|p| p.id == state.settings.active_profile),
+                );
+            } else if !status.running {
+                button.set_sensitive(false);
+            }
+        }
         self.uptime.set_text(&duration(status.uptime));
         let memory_due = self
             .memory_at
@@ -291,7 +316,8 @@ impl Dashboard {
         std::thread::spawn(move || {
             let memory = memory_due.then(|| service.memory_usage());
             let traffic = running.then(|| service.traffic());
-            let _ = tx.send((Instant::now(), memory, traffic));
+            let mode = service.runtime_mode();
+            let _ = tx.send((Instant::now(), memory, traffic, mode));
         });
         let weak = Rc::downgrade(self);
         let weak_ui = Rc::downgrade(ui);
@@ -300,9 +326,18 @@ impl Dashboard {
                 return glib::ControlFlow::Break;
             };
             match rx.try_recv() {
-                Ok((at, memory, traffic)) => {
+                Ok((at, memory, traffic, mode)) => {
                     dashboard.pending.set(false);
                     if ui.service.status().pid == status.pid {
+                        if ui.jobs.get() == 0
+                            && let Ok(mode) = mode
+                        {
+                            for (value, button) in &dashboard.modes {
+                                if *value == mode {
+                                    button.set_active(true);
+                                }
+                            }
+                        }
                         if let Some(memory) = memory {
                             dashboard.memory.set_text(
                                 &memory.total_bytes.map(bytes).unwrap_or_else(|| "—".into()),

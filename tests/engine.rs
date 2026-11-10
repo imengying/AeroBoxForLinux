@@ -6,7 +6,7 @@ use serde_json::json;
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, process::CommandExt},
@@ -310,16 +310,29 @@ fn process_stops_and_is_reaped() {
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let api_address = api.local_addr().unwrap();
     let api_worker = thread::spawn(move || {
-        let (mut stream, _) = api.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+        for method in ["PATCH", "GET"] {
+            let (mut stream, _) = api.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let size = stream.read(&mut request).unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..size])
+                    .starts_with(&format!("{method} /configs "))
+            );
+            let body = if method == "GET" {
+                r#"{"mode":"rule"}"#
+            } else {
+                ""
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
             .unwrap();
-        let mut request = [0; 4096];
-        let size = stream.read(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request[..size]).starts_with("PATCH /configs "));
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-            .unwrap();
+        }
     });
     let bin = dir.path().join("core-test");
     fs::write(&bin,"#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\necho ready\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
@@ -364,8 +377,16 @@ fn real_core_roundtrip() {
     .unwrap();
     s.check_profile(&s.snapshot().settings.active_profile)
         .unwrap();
-    s.start()
+    let stopped_info = s.core_info().unwrap();
+    assert!(!stopped_info.status.running);
+    assert!(!stopped_info.version.is_empty());
+    assert_eq!(stopped_info.routing_mode, "rule");
+    s.restart()
         .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
+    let running_info = s.core_info().unwrap();
+    assert_eq!(running_info.binary, stopped_info.binary);
+    assert_eq!(running_info.version, stopped_info.version);
+    assert!(running_info.status.running);
     assert!(s.memory_usage().total_bytes.is_some_and(|bytes| bytes > 0));
     let until = Instant::now() + Duration::from_secs(5);
     while s.api("GET", "/version", None).is_err() {
@@ -382,8 +403,9 @@ fn real_core_roundtrip() {
         assert_eq!(s.status().pid, pid, "mode change must not restart the core");
     }
     assert!(s.set_routing_mode("unsupported").is_err());
-    s.api("PUT", "/proxies/proxy", Some(&json!({"name":"direct"})))
-        .unwrap();
+    s.select_outbound("proxy", "direct").unwrap();
+    assert!(s.select_outbound("proxy", "missing").is_err());
+    assert!(s.select_outbound("direct", "direct").is_err());
     let traffic = s.traffic().unwrap();
     assert_eq!(
         (traffic.download, traffic.upload, traffic.connections),
@@ -438,8 +460,9 @@ fn real_core_roundtrip() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    s.reload().unwrap();
+    s.restart().unwrap();
     assert!(s.status().running);
+    assert_ne!(s.status().pid, pid);
     // The core cache contains "direct", but the next startup must obey the
     // app's mode selection made while it is stopped.
     s.set_routing_mode("direct").unwrap();
@@ -452,6 +475,13 @@ fn real_core_roundtrip() {
     assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "rule");
     s.set_routing_mode("global").unwrap();
 
+    // The current API state can differ from the saved preference. A failed
+    // change must restore that actual state, not the preference.
+    s.api("PATCH", "/configs", Some(&json!({"mode":"rule"})))
+        .unwrap();
+    assert_eq!(s.runtime_mode().unwrap(), "rule");
+    assert_eq!(s.snapshot().settings.routing_mode, "global");
+
     // If persistence fails after the API accepted the new mode, restore the
     // previous live mode and preserve the last successfully saved settings.
     let state_path = s.dir().join("state.json");
@@ -463,7 +493,8 @@ fn real_core_roundtrip() {
     fs::rename(&backup_path, &state_path).unwrap();
     assert!(save_result.is_err());
     assert_eq!(s.snapshot().settings.routing_mode, "global");
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "rule");
+    s.set_routing_mode("global").unwrap();
 
     let pid = s.status().pid;
     let mut settings = s.snapshot().settings;
@@ -495,10 +526,12 @@ fn real_core_roundtrip() {
     let mut settings = s.snapshot().settings;
     let old_binary = settings.core_path.clone();
     settings.core_path = failing_core.to_string_lossy().into_owned();
+    s.api("PATCH", "/configs", Some(&json!({"mode":"direct"})))
+        .unwrap();
     assert!(s.apply_settings(settings).is_err());
     assert!(s.status().running);
     assert_eq!(s.snapshot().settings.core_path, old_binary);
-    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "direct");
     s.stop().unwrap();
 
     assert!(s.traffic().is_err());
@@ -995,7 +1028,7 @@ fn real_core_downloads_follow_runtime_mode_and_stopped_downloads_are_direct() {
     let subscription_id = subscription.id.clone();
     service.update(|state| {
         state.settings.core_path = binary;
-        state.settings.bypass_lan = false;
+        state.settings.bypass_lan = true;
         state.settings.sniff = false;
         state.settings.dns_hijack = false;
         let config = &mut state.profiles[0].config;
@@ -1045,6 +1078,159 @@ fn real_core_downloads_follow_runtime_mode_and_stopped_downloads_are_direct() {
     done.store(true, Ordering::Relaxed);
     worker.join().unwrap();
 }
+
+// Keep a real proxied connection open so control tests can observe socket
+// teardown, rather than only trusting a successful API response.
+fn open_echo_tunnel(proxy: std::net::SocketAddr) -> (TcpStream, thread::JoinHandle<()>) {
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = origin.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = origin.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0];
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => stream.write_all(&byte).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("origin echo: {error}"),
+            }
+        }
+    });
+    let mut stream = TcpStream::connect(proxy).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        stream,
+        "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+        response.push(byte[0]);
+        assert!(response.len() < 4096);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+    echo_byte(&mut stream);
+    (stream, worker)
+}
+
+fn echo_byte(stream: &mut TcpStream) {
+    stream.write_all(b"q").unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, *b"q");
+}
+
+fn assert_tunnel_closed(mut stream: TcpStream, worker: thread::JoinHandle<()>) {
+    match stream.read(&mut [0; 1]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("old connection was not closed: {other:?}"),
+    }
+    worker.join().unwrap();
+}
+
+#[test]
+fn real_core_modes_override_policy_and_switches_close_old_connections() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (_dir, service) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mixed_address = mixed.local_addr().unwrap();
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable_port = unavailable.local_addr().unwrap().port();
+    drop((api, mixed, unavailable));
+    let group = "出口 / 自动";
+    service.update(|state| {
+        state.settings.core_path = binary;
+        state.settings.bypass_lan = false;
+        state.settings.block_ads = true;
+        state.settings.sniff = false;
+        state.settings.routing_mode = "global".into();
+        // A local test rule replaces the ad list; no public DNS or traffic.
+        state.rulesets.iter_mut().find(|r| r.id == model::BUILTIN_ADS_ID).unwrap().content =
+            json!({"version":3,"rules":[{"ip_cidr":"127.0.0.0/8"}]});
+        let config = &mut state.profiles[0].config;
+        config["inbounds"] = json!([{"type":"mixed","listen":"127.0.0.1","listen_port":mixed_address.port()}]);
+        config["experimental"]["clash_api"]["external_controller"] = json!(api_address.to_string());
+        config["route"]["final"] = json!(group);
+        config["outbounds"] = json!([
+            {"type":"selector","tag":group,"outbounds":["first","second"],"default":"first","interrupt_exist_connections":false},
+            {"type":"socks","tag":"proxy","server":"127.0.0.1","server_port":unavailable_port},
+            {"type":"direct","tag":"first"},
+            {"type":"direct","tag":"second"}
+        ]);
+        Ok(())
+    }).unwrap();
+    service
+        .start()
+        .unwrap_or_else(|e| panic!("{e:#}\n{}", service.logs()));
+    let pid = service.status().pid;
+    // Global uses route.final's selected member, not the unrelated dead node
+    // named "proxy", and bypasses the rejecting ad rule.
+    let (connection, worker) = open_echo_tunnel(mixed_address);
+    service.set_routing_mode("rule").unwrap();
+    assert_tunnel_closed(connection, worker);
+
+    let rejected_origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    rejected_origin.set_nonblocking(true).unwrap();
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::http(format!("http://{mixed_address}")).unwrap())
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    assert!(
+        client
+            .get(format!("http://{}", rejected_origin.local_addr().unwrap()))
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .is_err()
+    );
+    assert!(
+        matches!(rejected_origin.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+
+    service.set_routing_mode("direct").unwrap();
+    let (connection, worker) = open_echo_tunnel(mixed_address);
+    service.set_routing_mode("global").unwrap();
+    assert_tunnel_closed(connection, worker);
+
+    let (mut connection, worker) = open_echo_tunnel(mixed_address);
+    assert!(service.select_outbound(group, "missing").is_err());
+    echo_byte(&mut connection);
+    service.select_outbound(group, "second").unwrap();
+    assert_tunnel_closed(connection, worker);
+    assert_eq!(service.status().pid, pid);
+    let group_path = format!(
+        "/proxies/{}",
+        percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+    );
+    assert_eq!(
+        service.api("GET", &group_path, None).unwrap()["now"],
+        "second"
+    );
+    let (connection, worker) = open_echo_tunnel(mixed_address);
+    service.restart().unwrap();
+    assert_tunnel_closed(connection, worker);
+    assert_ne!(service.status().pid, pid);
+    assert_eq!(service.runtime_mode().unwrap(), "global");
+    assert_eq!(
+        service.api("GET", &group_path, None).unwrap()["now"],
+        "second"
+    );
+    service.stop().unwrap();
+}
+
 #[test]
 fn polling_does_not_race_startup_failure() {
     let (dir, s) = service();

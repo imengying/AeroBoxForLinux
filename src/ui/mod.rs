@@ -1,7 +1,9 @@
+mod core;
 mod editors;
 mod home;
 mod settings;
 mod subscriptions;
+mod typography;
 
 use adw::prelude::*;
 use aerobox_for_linux::{
@@ -176,6 +178,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
 }
 
 struct Ui {
+    typography: typography::Typography,
     window: adw::ApplicationWindow,
     service: Arc<Service>,
     toast: adw::ToastOverlay,
@@ -191,6 +194,7 @@ struct Ui {
     subscription_revision: Cell<u64>,
     subscription_update_pending: Cell<bool>,
     dashboard: RefCell<Option<Rc<home::Dashboard>>>,
+    core: RefCell<Option<Rc<core::CorePanel>>>,
     log_buffer: RefCell<Option<gtk::TextBuffer>>,
     node_group: RefCell<String>,
 }
@@ -199,6 +203,7 @@ impl Ui {
     fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
         let settings = service.snapshot().settings;
         apply_theme(&settings.theme);
+        let typography = typography::Typography::new(settings.text_scale, settings.crisp_text);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("AeroBox")
@@ -312,6 +317,7 @@ impl Ui {
         breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(breakpoint);
         let ui = Rc::new(Self {
+            typography,
             window,
             service,
             toast,
@@ -327,6 +333,7 @@ impl Ui {
             subscription_revision: Cell::new(0),
             subscription_update_pending: Cell::new(false),
             dashboard: RefCell::new(None),
+            core: RefCell::new(None),
             log_buffer: RefCell::new(None),
             node_group: RefCell::new(String::new()),
         });
@@ -365,6 +372,9 @@ impl Ui {
             }
             if let Some(dashboard) = ui.dashboard.borrow().as_ref() {
                 dashboard.tick(&ui);
+            }
+            if let Some(core) = ui.core.borrow().as_ref() {
+                core.tick(&ui);
             }
             if let Some(buffer) = ui.log_buffer.borrow().as_ref() {
                 let logs = ui.service.logs();
@@ -476,13 +486,20 @@ impl Ui {
         })
     }
     fn show(self: &Rc<Self>, page: Page) {
+        if self.page.get() == Page::Settings && page != Page::Settings {
+            let settings = self.service.snapshot().settings;
+            self.typography
+                .apply(settings.text_scale, settings.crisp_text);
+        }
         self.page.set(page);
         self.dashboard.replace(None);
+        self.core.replace(None);
         self.body.remove_css_class("settings-page");
         self.body.remove_css_class("home-page");
         self.body.set_spacing(24);
         self.body.set_margin_bottom(32);
         self.scroll.vadjustment().set_value(0.0);
+        self.scroll.set_margin_bottom(0);
         if let Some(button) = self.home_action.borrow_mut().take() {
             self.floating.remove_overlay(&button);
         }
@@ -581,17 +598,21 @@ impl Ui {
                 if self.service.status().running {
                     let reload = icon_button("view-refresh-symbolic", "重新加载此配置");
                     let weak = Rc::downgrade(self);
-                    reload.connect_clicked(move |_| {
+                    reload.connect_clicked(move |button| {
                         if let Some(ui) = weak.upgrade() {
                             if ui.jobs.get() > 0 {
                                 return;
                             }
-                            ui.task(
-                                "重载配置",
+                            ui.button_task(
+                                button,
+                                "重载中…",
                                 |s| s.reload(),
-                                |ui, ()| {
-                                    ui.notify("配置已重新加载");
-                                    ui.refresh(Page::Profiles);
+                                |ui, result| match result {
+                                    Ok(()) => {
+                                        ui.notify("配置已重新加载");
+                                        ui.refresh(Page::Profiles);
+                                    }
+                                    Err(e) => ui.error("重载失败", format!("{e:#}")),
                                 },
                             );
                         }
@@ -992,35 +1013,27 @@ impl Ui {
             modes.append(&button);
             choices.push((mode, button));
         }
-        let current_mode = Rc::new(RefCell::new(String::new()));
         for (mode, button) in &choices {
             let weak = Rc::downgrade(self);
             let mode = mode.to_string();
-            let controls = modes.clone();
-            let choices = choices.clone();
-            let selected = current_mode.clone();
-            button.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
+            let controls = modes.downgrade();
+            button.connect_clicked(move |button| {
+                if let (Some(ui), Some(controls)) = (weak.upgrade(), controls.upgrade()) {
                     controls.set_sensitive(false);
                     let mode = mode.clone();
-                    let new_mode = mode.clone();
                     let controls = controls.clone();
-                    let choices = choices.clone();
-                    let selected = selected.clone();
-                    ui.task(
-                        "切换路由模式",
-                        move |s| Ok(s.api("PATCH", "/configs", Some(&json!({"mode":mode})))),
+                    ui.button_task(
+                        button.upcast_ref::<gtk::Button>(),
+                        "切换中…",
+                        move |s| s.set_routing_mode(&mode),
                         move |ui, result| {
                             controls.set_sensitive(true);
                             match result {
                                 Ok(_) => {
-                                    selected.replace(new_mode);
                                     ui.notify("路由模式已切换");
                                 }
                                 Err(e) => {
-                                    for (mode, button) in &choices {
-                                        button.set_active(*mode == selected.borrow().as_str());
-                                    }
+                                    ui.refresh(Page::Nodes);
                                     ui.error("切换路由模式失败", e);
                                 }
                             }
@@ -1033,10 +1046,8 @@ impl Ui {
         area.append(&mode_row);
         self.task(
             "读取路由模式",
-            |s| s.api("GET", "/configs", None),
-            move |_, config| {
-                let mode = config["mode"].as_str().unwrap_or("rule");
-                current_mode.replace(mode.into());
+            |s| s.runtime_mode(),
+            move |_, mode| {
                 for (name, button) in choices {
                     button.set_active(name == mode);
                 }
@@ -1048,6 +1059,10 @@ impl Ui {
         clear_box(area);
         let group_data = &data["proxies"][group];
         let current = group_data["now"].as_str().unwrap_or("");
+        let manual = group_data["type"] == "Selector";
+        if !manual {
+            area.append(&label("自动选择", "muted"));
+        }
         let filter = filter.to_lowercase();
         let flow = gtk::FlowBox::new();
         flow.set_selection_mode(gtk::SelectionMode::None);
@@ -1089,7 +1104,9 @@ impl Ui {
             });
             check.add_css_class("muted");
             row.append(&check);
-            choose.set_child(Some(&row));
+            if manual {
+                choose.set_child(Some(&row));
+            }
             let weak = Rc::downgrade(self);
             let name_owned = name.to_string();
             let group = group.to_string();
@@ -1099,18 +1116,16 @@ impl Ui {
                     let group = group.clone();
                     ui.task(
                         "选择节点",
-                        move |s| {
-                            s.api(
-                                "PUT",
-                                &format!("/proxies/{}", urlpart(&group)),
-                                Some(&json!({"name":name})),
-                            )
-                        },
+                        move |s| s.select_outbound(&group, &name),
                         |ui, _| ui.refresh(Page::Nodes),
                     )
                 }
             });
-            item.append(&choose);
+            if manual {
+                item.append(&choose);
+            } else {
+                item.append(&row);
+            }
             let meta = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let protocol = label(node["type"].as_str().unwrap_or("代理"), "resource-subtitle");
             protocol.set_hexpand(true);
@@ -1477,7 +1492,13 @@ fn apply_theme(theme: &str) {
 fn label(text: &str, classes: &str) -> gtk::Label {
     let label = gtk::Label::builder().label(text).xalign(0.0).build();
     for class in classes.split_whitespace() {
-        label.add_css_class(class)
+        label.add_css_class(class);
+        match class {
+            "page-title" | "brand" => label.add_css_class("title-2"),
+            "section-title" | "resource-name" => label.add_css_class("heading"),
+            "empty-title" => label.add_css_class("title-3"),
+            _ => {}
+        }
     }
     label
 }
@@ -1518,7 +1539,13 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     let label = label(text, "pill");
     label.set_valign(gtk::Align::Center);
     if !class.is_empty() {
-        label.add_css_class(class)
+        label.add_css_class(class);
+        match class {
+            "page-title" | "brand" => label.add_css_class("title-2"),
+            "section-title" | "resource-name" => label.add_css_class("heading"),
+            "empty-title" => label.add_css_class("title-3"),
+            _ => {}
+        }
     }
     label
 }
@@ -1740,6 +1767,7 @@ fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
 fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let step = Cell::new(0);
     let floating_y = Cell::new(None::<f32>);
+    let font_size = Cell::new(None);
     let parent = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1775,9 +1803,20 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 .active_window()
                 .context("订阅导入未打开")
                 .and_then(|w| screenshot(&w, &parent.join("subscription-import.png"))),
+            15 => screenshot(&ui.window, &parent.join("core-settings.png")),
             _ => Ok(()),
         }
         .and_then(|()| {
+            if current == 0 {
+                let scale = std::env::var("AEROBOX_TEST_SCALE")
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(1);
+                anyhow::ensure!(
+                    ui.window.scale_factor() == scale,
+                    "显示缩放没有按测试设置生效"
+                );
+            }
             if current == 7 || current == 8 {
                 let button = ui.home_action.borrow();
                 let bounds = button
@@ -1807,6 +1846,12 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             Ok(())
         });
         if let Err(e) = capture {
+            // The first HiDPI frame can arrive after activation. Wait for that
+            // frame; the overall timeout still catches a window that never draws.
+            if current == 0 && e.to_string() == "窗口没有渲染内容" {
+                step.set(0);
+                return glib::ControlFlow::Continue;
+            }
             eprintln!("Wayland smoke screenshot {current}: {e:#}");
             failed.set(true);
             app.quit();
@@ -1853,6 +1898,12 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 ui.navigate(Page::Settings);
             }
             10 => {
+                font_size.set(
+                    ui.window
+                        .pango_context()
+                        .font_description()
+                        .map(|font| font.size()),
+                );
                 if let Err(e) = settings::smoke_settings(&ui, false) {
                     eprintln!("Wayland smoke settings: {e:#}");
                     failed.set(true);
@@ -1863,6 +1914,18 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             11 => {
                 if let Err(e) = settings::smoke_settings(&ui, true) {
                     eprintln!("Wayland smoke settings: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+                let larger = ui
+                    .window
+                    .pango_context()
+                    .font_description()
+                    .map(|font| font.size());
+                if !matches!((font_size.get(), larger), (Some(before), Some(after)) if after > before)
+                {
+                    eprintln!("Wayland smoke: text scale did not change rendered font size");
                     failed.set(true);
                     app.quit();
                     return glib::ControlFlow::Break;
@@ -1885,6 +1948,22 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     app.quit();
                     return glib::ControlFlow::Break;
                 }
+                ui.navigate(Page::Settings);
+                fn select_core(widget: &gtk::Widget) {
+                    if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
+                        && stack.widget_name() == "settings-sections"
+                    {
+                        stack.set_visible_child_name("core");
+                    }
+                    let mut child = widget.first_child();
+                    while let Some(widget) = child {
+                        child = widget.next_sibling();
+                        select_core(&widget);
+                    }
+                }
+                select_core(ui.body.upcast_ref());
+            }
+            15 => {
                 let clipboard = ui.window.clipboard();
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();

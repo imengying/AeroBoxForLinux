@@ -47,6 +47,11 @@ jobs:
         run: cargo build --release --locked
       - name: Test Wayland without X11
         run: timeout 90s scripts/test-wayland.sh
+      - name: Test text and layout at 2x display scale
+        if: matrix.arch == 'amd64'
+        env:
+          AEROBOX_TEST_SCALE: "2"
+        run: timeout 90s scripts/test-wayland.sh
       - name: Package
         run: scripts/package.sh ${{ matrix.arch }}
       - uses: actions/upload-artifact@v6
@@ -79,12 +84,10 @@ jobs:
           body: |
             AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
 
-            修复内核启动后立即退出、系统代理切换与设置保存反馈。
-            启动按钮移到右下角，设置仅保留右上角保存按钮，进度显示在按钮中。
-            订阅参考 Hiddify，支持链接、剪贴板和文件导入，以及按间隔自动更新。
-            移除处理脚本与节点筛选，按常规、网络、虚拟网卡和内核整理设置。
-            配置默认保存到用户配置目录下的 AeroBoxForLinux，并迁移旧数据。
-            日志默认 error，保留首页整体内存、网络检测和低内存绘制设置。
+            完善规则、全局、直连的实际路由行为，切换时确认内核状态并清理旧连接。
+            设置中新增内核版本、状态、检查配置、启动/停止和重启操作。
+            使用系统字体与统一排版层级，支持文字大小调整和清晰文字渲染。
+            配置仅保存在 AeroBoxForLinux 用户配置目录，不再迁移旧版本数据。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。

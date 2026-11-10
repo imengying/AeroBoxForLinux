@@ -1,30 +1,32 @@
+/* Font family and body size come from GTK and the application text scale.
+ * GNOME heading/title classes provide the shared text hierarchy. */
 @define-color accent_bg_color #087f83;
 @define-color accent_fg_color #ffffff;
 @define-color accent_color #087f83;
-.aerobox-window { font-family: "Noto Sans", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; font-size: 16px; background: #f7f9fb; color: #263442; }
+.aerobox-window { background: #f7f9fb; color: #263442; }
 .aerobox-window.dark { background: #161d24; color: #e3eaf0; }
 .app-sidebar { background: #eef2f5; border-right: 1px solid alpha(#728292, .13); }
 .dark .app-sidebar { background: #111920; }
-.brand { font-size: 21px; font-weight: 700; }
+
 .nav-list { background: transparent; }
-.nav-list row { border-radius: 10px; margin: 3px 0; padding: 0; color: #637181; }
+.nav-list row { border-radius: 10px; margin: 3px 0; padding: 0; color: alpha(@window_fg_color, .82); }
 .nav-list row:selected { background: #d8edeb; color: #067b79; }
-.dark .nav-list row { color: #a3b2bf; }
+
 .dark .nav-list row:selected { background: #183d40; color: #73d8cc; }
 .nav-list row:hover { background: alpha(#087f83, .07); }
-.nav-item { min-height: 46px; font-weight: 500; }
+.nav-item { min-height: 46px; font-weight: normal; }
 .nav-list row:selected .nav-item { font-weight: 700; }
-.page-title { font-size: 26px; font-weight: 700; }
-.section-title { font-size: 16px; font-weight: 700; }
-.muted { color: #526273; }
-.dark .muted { color: #aebdc9; }
-.small { font-size: 14px; }
+
+
+.muted { color: alpha(@window_fg_color, .78); }
+
+.small { font-size: 0.95em; }
 .surface-card { border-radius: 16px; background: #ffffff; border: 1px solid #e4eaf0; box-shadow: 0 2px 3px alpha(#213b53,.025); }
 .dark .surface-card { background: #1d2832; border-color: #2b3945; box-shadow: none; }
-.metric-value { font-size: 26px; font-feature-settings: "tnum"; font-weight: 600; }
+.metric-value { font-size: 1.5em; font-feature-settings: "tnum"; font-weight: normal; }
 .metric-icon { color: #6e9ca0; }
-.pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: #758493; font-size: 14px; font-weight: 600; }
-.dark .pill { background: #2b3945; color: #aabac7; }
+.pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: alpha(@window_fg_color, .78); font-size: 0.95em; font-weight: normal; }
+.dark .pill { background: #2b3945; color: alpha(@window_fg_color, .78); }
 .pill.active { background: #e1f3eb; color: #288263; }
 .dark .pill.active { background: #1f433b; color: #7bd3b1; }
 .pill.accent { background: #e3f2f1; color: #087f83; }
@@ -33,21 +35,21 @@
 .compact-action { border-radius: 8px; min-height: 30px; }
 .row-icon { background: #edf5f5; color: #538e92; border-radius: 11px; min-width: 42px; min-height: 42px; }
 .dark .row-icon { background: #263b45; color: #8fbfc4; }
-.resource-name { font-size: 16px; font-weight: 700; }
-.resource-subtitle { color: #526273; font-size: 14px; }
-.dark .resource-subtitle, .dark .empty-description { color: #aebdc9; }
+
+.resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.95em; }
+
 .resource-row { padding: 14px 20px; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
 .empty-icon { color: #86abaa; background: alpha(#087f83,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
-.empty-title { font-size: 19px; font-weight: 700; }
-.empty-description { color: #526273; }
+
+.empty-description { color: alpha(@window_fg_color, .78); }
 .search { border-radius: 10px; min-height: 36px; }
 .node-card { padding: 14px 16px; min-width: 186px; }
 .node-card.selected { border-color: #1b9d98; background: #effaf7; }
 .dark .node-card.selected { border-color: #51a9a4; background: #203d3d; }
 .node-card button { padding: 4px; }
-.log-view, .log-view text { font-family: monospace; font-size: 14px; background: transparent; }
-.editor-root { font-family: "Noto Sans", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; font-size: 16px; background: @window_bg_color; }
+.log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
+.editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 8px 16px; border-bottom: 1px solid alpha(@borders,.5); }
 .settings-group { margin-bottom: 4px; }
 .page-content > preferencesgroup { margin-top: 4px; }
@@ -62,31 +64,31 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .upload { color: #506ed4; }
 .dark .download { color: #61d6c2; }
 .dark .upload { color: #8cadff; }
-.settings-page preferencesgroup .title { font-size: 16px; }
-.settings-page preferencesgroup .subtitle { font-size: 14px; color: #526273; opacity: 1; }
-.settings-page preferencesgroup .description { font-size: 14px; color: #526273; opacity: 1; }
-.dark .settings-page preferencesgroup .subtitle, .dark .settings-page preferencesgroup .description { color: #a3b4c2; }
-.settings-page entry { font-size: 16px; }
+.aerobox-window preferencesgroup .title, .editor-root preferencesgroup .title { font-size: 1em; }
+.aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
+.aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
 
-.ip-address { font-size: 15px; font-feature-settings: "tnum"; }
+.settings-page entry { font-size: 1em; }
+
+.ip-address { font-size: 1em; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 56px; }
 
-.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: #526273; }
-.dark .dim-label { color: #aebdc9; }
+.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .78); }
+
 .home-top > flowboxchild { padding: 0; }
 .home-network { padding: 20px; min-width: 278px; }
-.home-network .exit-ip { font-size: 24px; font-weight: 600; }
+.home-network .exit-ip { font-size: 1.5em; font-weight: normal; }
 .speed-card { padding: 18px; min-width: 112px; }
-.speed-value { font-size: 32px; font-weight: 600; font-feature-settings: "tnum"; }
+.speed-value { font-size: 2em; font-weight: normal; font-feature-settings: "tnum"; }
 .home-mode { padding: 12px 20px; }
 .mode-selector { border-radius: 12px; background: #eef2f5; padding: 4px; }
-.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 8px 22px; font-weight: 600; }
+.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 8px 22px; font-weight: normal; }
 .mode-selector button:checked { background: #ffffff; color: #087f83; box-shadow: 0 1px 3px alpha(#213b53,.12); }
 .dark .mode-selector { background: #15212b; }
 .dark .mode-selector button:checked { background: #30424f; color: #77dad1; }
 .home-switch { padding: 18px 20px; min-height: 30px; }
 .home-stat { padding: 18px 20px; }
 .home-stat + .home-stat { border-left: 1px solid alpha(#728292,.18); }
-.home-stat-value { font-size: 24px; font-weight: 600; font-feature-settings: "tnum"; }
+.home-stat-value { font-size: 1.5em; font-weight: normal; font-feature-settings: "tnum"; }
 .home-start { border-radius: 18px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
 .home-start image { -gtk-icon-size: 22px; }

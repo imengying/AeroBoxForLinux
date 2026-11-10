@@ -38,6 +38,27 @@ impl Ui {
             },
         );
         appearance.add(&theme);
+        let text_scale = adw::SpinRow::with_range(100.0, 150.0, 10.0);
+        text_scale.set_title("文字大小（%）");
+        text_scale.set_value(settings.text_scale as f64);
+        appearance.add(&text_scale);
+        let crisp_text = switch_row("清晰文字", "", settings.crisp_text);
+        crisp_text.set_tooltip_text(Some("将字形对齐到像素；关闭后跟随系统文字渲染"));
+        appearance.add(&crisp_text);
+        let weak = Rc::downgrade(self);
+        let crisp = crisp_text.downgrade();
+        text_scale.connect_value_notify(move |row| {
+            if let (Some(ui), Some(crisp)) = (weak.upgrade(), crisp.upgrade()) {
+                ui.typography.apply(row.value() as u32, crisp.is_active());
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let scale = text_scale.downgrade();
+        crisp_text.connect_active_notify(move |row| {
+            if let (Some(ui), Some(scale)) = (weak.upgrade(), scale.upgrade()) {
+                ui.typography.apply(scale.value() as u32, row.is_active());
+            }
+        });
         theme.connect_selected_notify(|row| {
             apply_theme(match row.selected() {
                 1 => "light",
@@ -140,7 +161,8 @@ impl Ui {
         tun_group.add(&permissions);
         tun_page.append(&tun_group);
 
-        let core = group("内核");
+        self.core_panel(&core_page);
+        let core = group("内核设置");
         let core_path = adw::EntryRow::builder()
             .title("内核路径（留空自动检测）")
             .text(&settings.core_path)
@@ -164,49 +186,6 @@ impl Ui {
             );
         });
         core.add(&core_path);
-        let current = adw::ActionRow::builder()
-            .title("sing-box")
-            .subtitle(
-                self.service
-                    .core_binary()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "未安装".into()),
-            )
-            .build();
-        let install = gtk::Button::with_label("下载 / 更新");
-        install.set_valign(gtk::Align::Center);
-        current.add_suffix(&install);
-        let weak = Rc::downgrade(self);
-        let current_row = current.clone();
-        install.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                if ui.jobs.get() > 0 {
-                    return;
-                }
-                button.set_sensitive(false);
-                let button = button.downgrade();
-                let current_row = current_row.clone();
-                ui.task(
-                    "安装内核",
-                    |s| Ok(s.install_core()),
-                    move |ui, result| {
-                        if let Some(button) = button.upgrade() {
-                            button.set_sensitive(true);
-                        }
-                        match result {
-                            Ok(()) => {
-                                ui.notify("内核已安装");
-                                if let Ok(path) = ui.service.core_binary() {
-                                    current_row.set_subtitle(&path.to_string_lossy());
-                                }
-                            }
-                            Err(e) => ui.error("安装失败", format!("{e:#}")),
-                        }
-                    },
-                );
-            }
-        });
-        core.add(&current);
         let levels = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
         let log = combo(
             "日志级别",
@@ -267,6 +246,8 @@ impl Ui {
                 return;
             };
             let mut next = ui.service.snapshot().settings;
+            next.text_scale = text_scale.value() as u32;
+            next.crisp_text = crisp_text.is_active();
             next.theme = match theme.selected() {
                 1 => "light",
                 2 => "dark",
@@ -367,6 +348,8 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ensure!(ui.jobs.get() == 0, "设置保存尚未完成");
         ensure!(
             !settings.ipv6
+                && settings.text_scale == 150
+                && settings.crisp_text
                 && settings.allow_lan
                 && settings.block_ads
                 && !settings.dns_cache
@@ -425,6 +408,12 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .find(|row| row.title() == "MTU")
         .context("缺少 MTU 控件")?
         .set_value(1400.0);
+    widgets
+        .iter()
+        .filter_map(|w| w.clone().downcast::<adw::SpinRow>().ok())
+        .find(|row| row.title() == "文字大小（%）")
+        .context("缺少文字大小控件")?
+        .set_value(150.0);
     save.emit_clicked();
     ensure!(!save.is_sensitive(), "保存期间没有禁用按钮");
     ensure!(
