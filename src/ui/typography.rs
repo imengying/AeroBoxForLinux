@@ -1,7 +1,7 @@
 use super::*;
 
 /// One scale for every window, including dialogs, popovers and source editors.
-/// Font family and DPI remain the desktop's choices; no font is bundled/forced.
+/// Keep the desktop font and valid DPI, with GTK's default for an unset DPI.
 pub(super) struct Typography {
     provider: gtk::CssProvider,
     system_rendering: Vec<(&'static str, glib::Value)>,
@@ -16,6 +16,12 @@ impl Typography {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
         );
         let settings = gtk::Settings::default().expect("GTK settings");
+        // GTK reports -1 when the desktop has not supplied a font DPI. Use
+        // GTK's 96 DPI fallback before libadwaita measures SP-sized layouts;
+        // otherwise some runtimes convert their clamp/breakpoint sizes to 0.
+        if settings.gtk_xft_dpi() <= 0 {
+            settings.set_gtk_xft_dpi(96 * 1024);
+        }
         let system_rendering = [
             "gtk-font-rendering",
             "gtk-hint-font-metrics",

@@ -100,6 +100,13 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        if smoke.is_some() {
+            // A desktop may omit font DPI. Exercise this real layout failure
+            // even when the test compositor normally provides a valid value.
+            gtk::Settings::default()
+                .expect("GTK settings")
+                .set_gtk_xft_dpi(-1);
+        }
         let ui = Ui::new(app, activate_service.clone());
         ui.window.present();
         if let Some(path) = smoke.clone() {
@@ -200,6 +207,8 @@ impl Ui {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("AeroBox")
+            .width_request(480)
+            .height_request(400)
             .default_width(settings.width.max(700))
             .default_height(settings.height.max(600))
             .build();
