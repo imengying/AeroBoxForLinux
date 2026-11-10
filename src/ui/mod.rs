@@ -1,0 +1,2062 @@
+mod editors;
+mod overview;
+
+use adw::prelude::*;
+use aerobox_for_linux::{
+    engine::Service,
+    model::{self, Profile, RuleSet, Subscription},
+    platform,
+};
+use anyhow::{Context, Result};
+use gtk::{gio, glib};
+use serde_json::{Value, json};
+use std::{
+    cell::{Cell, RefCell},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Overview,
+    Nodes,
+    Profiles,
+    Subscriptions,
+    Rules,
+    Connections,
+    Logs,
+    Settings,
+}
+impl Page {
+    const ALL: [Self; 8] = [
+        Self::Overview,
+        Self::Nodes,
+        Self::Profiles,
+        Self::Subscriptions,
+        Self::Rules,
+        Self::Connections,
+        Self::Logs,
+        Self::Settings,
+    ];
+    fn title(self) -> &'static str {
+        match self {
+            Self::Overview => "概览",
+            Self::Nodes => "节点",
+            Self::Profiles => "配置",
+            Self::Subscriptions => "订阅",
+            Self::Rules => "规则集",
+            Self::Connections => "连接",
+            Self::Logs => "日志",
+            Self::Settings => "设置",
+        }
+    }
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Overview => "view-grid-symbolic",
+            Self::Nodes => "network-wireless-symbolic",
+            Self::Profiles => "document-properties-symbolic",
+            Self::Subscriptions => "folder-download-symbolic",
+            Self::Rules => "view-list-bullet-symbolic",
+            Self::Connections => "network-transmit-receive-symbolic",
+            Self::Logs => "utilities-terminal-symbolic",
+            Self::Settings => "preferences-system-symbolic",
+        }
+    }
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Overview => "实时流量、连接状态，一目了然。",
+            Self::Nodes => "选择代理节点，查看可用性与连接延迟。",
+            Self::Profiles => "管理 sing-box 配置、订阅引用与处理脚本。",
+            Self::Subscriptions => "集中管理节点来源，按需更新与筛选。",
+            Self::Rules => "让指定的域名与地址走合适的路线。",
+            Self::Connections => "查看当前流量去向，管理活跃连接。",
+            Self::Logs => "查看内核输出，定位连接与配置问题。",
+            Self::Settings => "按照你的习惯设置 AeroBox。",
+        }
+    }
+}
+
+pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
+    if smoke.is_some()
+        && let Err(e) = seed_smoke(&service)
+    {
+        eprintln!("smoke fixture: {e:#}");
+        return glib::ExitCode::FAILURE;
+    }
+    let app = adw::Application::builder()
+        .application_id(platform::APP_ID)
+        .flags(if smoke.is_some() {
+            gio::ApplicationFlags::NON_UNIQUE
+        } else {
+            gio::ApplicationFlags::FLAGS_NONE
+        })
+        .build();
+    let failed = Rc::new(Cell::new(false));
+    let activate_failed = failed.clone();
+    let activate_service = service.clone();
+    app.connect_activate(move |app| {
+        if let Some(window) = app.active_window() {
+            window.present();
+            return;
+        }
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(include_str!("../../resources/style.css"));
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().expect("Wayland display"),
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        let ui = Ui::new(app, activate_service.clone());
+        ui.window.present();
+        if let Some(path) = smoke.clone() {
+            smoke_sequence(ui.clone(), path, activate_failed.clone());
+        } else if ui.service.snapshot().settings.auto_start {
+            ui.task(
+                "启动内核",
+                |s| s.start(),
+                |ui, ()| ui.refresh(Page::Overview),
+            );
+        }
+    });
+    let monitor = Arc::downgrade(&service);
+    std::thread::spawn(move || {
+        loop {
+            let Some(service) = monitor.upgrade() else {
+                break;
+            };
+            service.poll();
+            drop(service);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+    let result = app.run_with_args::<&str>(&[]);
+    if failed.get() {
+        glib::ExitCode::FAILURE
+    } else {
+        result
+    }
+}
+
+struct Ui {
+    window: adw::ApplicationWindow,
+    service: Arc<Service>,
+    toast: adw::ToastOverlay,
+    body: gtk::Box,
+    nav: gtk::ListBox,
+    page: Cell<Page>,
+    split: adw::OverlaySplitView,
+    spinner: gtk::Spinner,
+    jobs: Cell<usize>,
+    last_pid: Cell<Option<u32>>,
+    dashboard: RefCell<Option<Rc<overview::Dashboard>>>,
+    log_buffer: RefCell<Option<gtk::TextBuffer>>,
+    node_group: RefCell<String>,
+}
+
+impl Ui {
+    fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
+        let settings = service.snapshot().settings;
+        apply_theme(&settings.theme);
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .title("AeroBox")
+            .default_width(settings.width.max(700))
+            .default_height(settings.height.max(600))
+            .build();
+        window.add_css_class("aerobox-window");
+        window.set_icon_name(Some(platform::APP_ID));
+        let manager = adw::StyleManager::default();
+        if manager.is_dark() {
+            window.add_css_class("dark");
+        }
+        let weak_window = window.downgrade();
+        manager.connect_dark_notify(move |manager| {
+            if let Some(window) = weak_window.upgrade() {
+                if manager.is_dark() {
+                    window.add_css_class("dark")
+                } else {
+                    window.remove_css_class("dark")
+                }
+            }
+        });
+        let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar.add_css_class("app-sidebar");
+        let side_header = adw::HeaderBar::new();
+        side_header.add_css_class("transparent-header");
+        side_header.set_show_end_title_buttons(false);
+        side_header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+        sidebar.append(&side_header);
+        let brand = gtk::Box::new(gtk::Orientation::Horizontal, 11);
+        margin(&brand, 24, 24, 2, 28);
+        brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
+        let mark = gtk::Label::new(Some("A"));
+        mark.add_css_class("brand-mark");
+        mark.set_valign(gtk::Align::Center);
+        let name = label("AeroBox", "brand");
+        name.set_valign(gtk::Align::Center);
+        brand.append(&mark);
+        brand.append(&name);
+        sidebar.append(&brand);
+        let nav = gtk::ListBox::new();
+        nav.add_css_class("nav-list");
+        nav.set_selection_mode(gtk::SelectionMode::Single);
+        margin(&nav, 14, 14, 0, 0);
+        for page in Page::ALL {
+            let row = gtk::ListBoxRow::new();
+            let item = gtk::Box::new(gtk::Orientation::Horizontal, 13);
+            item.add_css_class("nav-item");
+            margin(&item, 15, 12, 0, 0);
+            let image = gtk::Image::from_icon_name(page.icon());
+            image.set_pixel_size(18);
+            item.append(&image);
+            item.append(&label(page.title(), ""));
+            row.set_child(Some(&item));
+            nav.append(&row);
+        }
+        nav.select_row(nav.row_at_index(0).as_ref());
+        sidebar.append(&nav);
+        let split = adw::OverlaySplitView::new();
+        split.set_sidebar(Some(&sidebar));
+        split.set_min_sidebar_width(216.0);
+        split.set_max_sidebar_width(216.0);
+        split.set_sidebar_width_fraction(0.2);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let header = adw::HeaderBar::new();
+        header.add_css_class("transparent-header");
+        header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+        let sidebar_button = icon_button("sidebar-show-symbolic", "显示导航");
+        sidebar_button.set_visible(false);
+        let weak = split.downgrade();
+        sidebar_button.connect_clicked(move |_| {
+            if let Some(split) = weak.upgrade() {
+                split.set_show_sidebar(!split.shows_sidebar())
+            }
+        });
+        header.pack_start(&sidebar_button);
+        let weak_button = sidebar_button.downgrade();
+        split.connect_collapsed_notify(move |split| {
+            if let Some(button) = weak_button.upgrade() {
+                button.set_visible(split.is_collapsed())
+            }
+        });
+        let spinner = gtk::Spinner::new();
+        spinner.set_visible(false);
+        header.pack_start(&spinner);
+        content.append(&header);
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        body.add_css_class("page-content");
+        margin(&body, 30, 30, 18, 32);
+        let clamp = adw::Clamp::builder()
+            .maximum_size(1030)
+            .tightening_threshold(850)
+            .child(&body)
+            .build();
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&clamp)
+            .vexpand(true)
+            .build();
+        content.append(&scroll);
+        split.set_content(Some(&content));
+        let toast = adw::ToastOverlay::new();
+        toast.set_child(Some(&split));
+        window.set_content(Some(&toast));
+        let breakpoint = adw::Breakpoint::new(
+            adw::BreakpointCondition::parse("max-width: 860sp").expect("breakpoint"),
+        );
+        breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+        window.add_breakpoint(breakpoint);
+        let ui = Rc::new(Self {
+            window,
+            service,
+            toast,
+            body,
+            nav,
+            page: Cell::new(Page::Overview),
+            split,
+            spinner,
+            jobs: Cell::new(0),
+            last_pid: Cell::new(None),
+            dashboard: RefCell::new(None),
+            log_buffer: RefCell::new(None),
+            node_group: RefCell::new(String::new()),
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.nav.connect_row_selected(move |_, row| {
+            if let (Some(ui), Some(row)) = (weak.upgrade(), row) {
+                ui.show(Page::ALL[row.index() as usize]);
+                if ui.split.is_collapsed() {
+                    ui.split.set_show_sidebar(false)
+                }
+            }
+        });
+        ui.refresh(Page::Overview);
+        let weak = Rc::downgrade(&ui);
+        glib::timeout_add_local(Duration::from_secs(1), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let status = ui.service.status();
+            if ui.last_pid.replace(status.pid) != status.pid {
+                if ui.page.get() == Page::Overview {
+                    ui.refresh(Page::Overview)
+                } else if ui.page.get() == Page::Profiles {
+                    ui.refresh(Page::Profiles)
+                }
+            }
+            if let Some(dashboard) = ui.dashboard.borrow().as_ref() {
+                dashboard.tick(&ui);
+            }
+            if let Some(buffer) = ui.log_buffer.borrow().as_ref() {
+                let logs = ui.service.logs();
+                if buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .as_str()
+                    != logs
+                {
+                    buffer.set_text(&logs);
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+        // Keep the controller alive for the window lifetime without a reference cycle.
+        let retained = RefCell::new(Some(ui.clone()));
+        ui.window.connect_destroy(move |_| {
+            retained.borrow_mut().take();
+        });
+        ui
+    }
+
+    fn notify(&self, message: &str) {
+        self.toast.add_toast(adw::Toast::new(message));
+    }
+    fn error(&self, title: &str, error: impl std::fmt::Display) {
+        let dialog =
+            adw::MessageDialog::new(Some(&self.window), Some(title), Some(&error.to_string()));
+        dialog.add_response("close", "知道了");
+        dialog.set_default_response(Some("close"));
+        dialog.present();
+    }
+    fn task<T: Send + 'static>(
+        self: &Rc<Self>,
+        title: &str,
+        work: impl FnOnce(&Service) -> Result<T> + Send + 'static,
+        done: impl FnOnce(&Rc<Self>, T) + 'static,
+    ) {
+        self.jobs.set(self.jobs.get() + 1);
+        self.spinner.set_visible(true);
+        self.spinner.start();
+        let (tx, rx) = mpsc::channel();
+        let service = self.service.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(work(&service));
+        });
+        let weak = Rc::downgrade(self);
+        let mut done = Some(done);
+        let title = title.to_string();
+        glib::timeout_add_local(Duration::from_millis(40), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(result) => {
+                    ui.jobs.set(ui.jobs.get().saturating_sub(1));
+                    if ui.jobs.get() == 0 {
+                        ui.spinner.stop();
+                        ui.spinner.set_visible(false)
+                    }
+                    match result {
+                        Ok(value) => {
+                            if let Some(done) = done.take() {
+                                done(&ui, value)
+                            }
+                        }
+                        Err(e) => ui.error(&format!("{title}失败"), format!("{e:#}")),
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    ui.jobs.set(ui.jobs.get().saturating_sub(1));
+                    if ui.jobs.get() == 0 {
+                        ui.spinner.stop();
+                        ui.spinner.set_visible(false)
+                    }
+                    ui.error(&title, "后台任务意外结束");
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+    fn saved(self: &Rc<Self>) -> Rc<dyn Fn()> {
+        let weak = Rc::downgrade(self);
+        let page = self.page.get();
+        Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.notify("已保存");
+                ui.refresh(page)
+            }
+        })
+    }
+    fn show(self: &Rc<Self>, page: Page) {
+        self.page.set(page);
+        self.dashboard.replace(None);
+        self.body.remove_css_class("settings-page");
+        self.log_buffer.replace(None);
+        while let Some(child) = self.body.first_child() {
+            self.body.remove(&child)
+        }
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let titles = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        titles.set_hexpand(true);
+        titles.append(&label(page.title(), "page-title"));
+        let subtitle = label(page.subtitle(), "page-subtitle");
+        subtitle.set_wrap(true);
+        titles.append(&subtitle);
+        heading.append(&titles);
+        self.body.append(&heading);
+        match page {
+            Page::Overview => self.overview(&heading),
+            Page::Nodes => self.nodes(&heading),
+            Page::Profiles => self.profiles(&heading),
+            Page::Subscriptions => self.subscriptions(&heading),
+            Page::Rules => self.rules(&heading),
+            Page::Connections => self.connections(&heading),
+            Page::Logs => self.logs(&heading),
+            Page::Settings => self.settings(&heading),
+        }
+    }
+
+    fn profiles(self: &Rc<Self>, heading: &gtk::Box) {
+        let add = primary("新建配置", "list-add-symbolic");
+        heading.append(&add);
+        let weak = Rc::downgrade(self);
+        add.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                editors::profile(
+                    &ui.window,
+                    ui.service.clone(),
+                    Profile::new("新配置"),
+                    ui.saved(),
+                )
+            }
+        });
+        let import = gtk::Button::with_label("导入 JSON");
+        import.add_css_class("compact-action");
+        import.set_valign(gtk::Align::Center);
+        heading.append(&import);
+        let weak = Rc::downgrade(self);
+        import.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.import_profile()
+            }
+        });
+        let state = self.service.snapshot();
+        if state.profiles.is_empty() {
+            self.body.append(&empty(
+                "document-new-symbolic",
+                "还没有配置",
+                "新建一份配置，或者导入现有的 sing-box JSON 文件。",
+            ));
+            return;
+        }
+        let list = card(gtk::Orientation::Vertical, 0);
+        for p in state.profiles {
+            let subtitle = format!(
+                "{} 个订阅 · {} 个规则集{}",
+                p.subscriptions.len(),
+                p.rulesets.len(),
+                if p.script.trim().is_empty() {
+                    ""
+                } else {
+                    " · 含处理脚本"
+                }
+            );
+            let row = resource_row("document-properties-symbolic", &p.name, &subtitle);
+            if p.id == state.settings.active_profile {
+                row.append(&pill("当前配置", "active"));
+                if self.service.status().running {
+                    let reload = icon_button("view-refresh-symbolic", "重新加载此配置");
+                    let weak = Rc::downgrade(self);
+                    reload.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            if ui.jobs.get() > 0 {
+                                return;
+                            }
+                            ui.task(
+                                "重载配置",
+                                |s| s.reload(),
+                                |ui, ()| {
+                                    ui.notify("配置已重新加载");
+                                    ui.refresh(Page::Profiles);
+                                },
+                            );
+                        }
+                    });
+                    row.append(&reload);
+                }
+            } else {
+                let select = icon_button("object-select-symbolic", "设为当前配置");
+                select.set_sensitive(!self.service.status().running);
+                let weak = Rc::downgrade(self);
+                let id = p.id.clone();
+                select.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        let id = id.clone();
+                        match ui.service.update(|s| {
+                            s.settings.active_profile = id;
+                            Ok(())
+                        }) {
+                            Ok(()) => ui.refresh(Page::Profiles),
+                            Err(e) => ui.error("切换配置失败", e),
+                        }
+                    }
+                });
+                row.append(&select);
+            }
+            let edit = gtk::Button::with_label("编辑");
+            edit.add_css_class("compact-action");
+            let weak = Rc::downgrade(self);
+            let item = p.clone();
+            edit.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    editors::profile(&ui.window, ui.service.clone(), item.clone(), ui.saved())
+                }
+            });
+            row.append(&edit);
+            let preview = icon_button("document-open-symbolic", "预览生成的配置");
+            let weak = Rc::downgrade(self);
+            let id = p.id.clone();
+            preview.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let id = id.clone();
+                    ui.task(
+                        "生成配置",
+                        move |s| s.generate(&id),
+                        |ui, value| {
+                            editors::code(
+                                &ui.window,
+                                "运行配置预览",
+                                &model::pretty(&value),
+                                "json",
+                                None,
+                            )
+                        },
+                    )
+                }
+            });
+            row.append(&preview);
+            let check = icon_button("security-high-symbolic", "校验配置");
+            let weak = Rc::downgrade(self);
+            let id = p.id.clone();
+            check.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let id = id.clone();
+                    ui.task(
+                        "校验配置",
+                        move |s| s.check_profile(&id),
+                        |ui, ()| ui.notify("配置校验通过"),
+                    )
+                }
+            });
+            row.append(&check);
+            let export = icon_button("document-save-symbolic", "导出配置");
+            let weak = Rc::downgrade(self);
+            let item = p.clone();
+            export.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.save_text(&format!("{}.json", item.name), model::pretty(&item.config))
+                }
+            });
+            row.append(&export);
+            let copy = icon_button("edit-copy-symbolic", "复制配置");
+            let weak = Rc::downgrade(self);
+            let item = p.clone();
+            copy.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let mut copy = item.clone();
+                    copy.id = model::id();
+                    copy.name = format!("{} 副本", copy.name);
+                    if let Err(e) = ui.service.update(|s| {
+                        s.profiles.push(copy);
+                        Ok(())
+                    }) {
+                        ui.error("复制配置失败", e)
+                    } else {
+                        ui.refresh(Page::Profiles)
+                    }
+                }
+            });
+            row.append(&copy);
+            row.append(&self.delete_button("profiles", &p.id, &p.name));
+            list.append(&row);
+        }
+        self.body.append(&list);
+    }
+
+    fn subscriptions(self: &Rc<Self>, heading: &gtk::Box) {
+        let add = primary("添加订阅", "list-add-symbolic");
+        heading.append(&add);
+        let weak = Rc::downgrade(self);
+        add.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                editors::subscription(
+                    &ui.window,
+                    ui.service.clone(),
+                    Subscription::default(),
+                    ui.saved(),
+                )
+            }
+        });
+        let state = self.service.snapshot();
+        if state.subscriptions.is_empty() {
+            self.body.append(&empty(
+                "folder-download-symbolic",
+                "把节点带到这里",
+                "添加订阅链接，或在订阅编辑器中手动导入节点。",
+            ));
+            return;
+        }
+        let update = icon_button("view-refresh-symbolic", "更新全部订阅");
+        heading.append(&update);
+        let ids: Vec<_> = state
+            .subscriptions
+            .iter()
+            .filter(|s| !s.source.is_empty())
+            .map(|s| s.id.clone())
+            .collect();
+        let weak = Rc::downgrade(self);
+        update.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                let ids = ids.clone();
+                ui.task(
+                    "更新全部订阅",
+                    move |s| {
+                        let mut errors = Vec::new();
+                        for id in ids {
+                            if let Err(e) = s.update_subscription(&id) {
+                                errors.push(format!("{e:#}"))
+                            }
+                        }
+                        if errors.is_empty() {
+                            Ok(())
+                        } else {
+                            anyhow::bail!(errors.join("\n"))
+                        }
+                    },
+                    |ui, ()| {
+                        ui.notify("订阅已更新");
+                        ui.refresh(Page::Subscriptions)
+                    },
+                )
+            }
+        });
+        let list = card(gtk::Orientation::Vertical, 0);
+        for item in state.subscriptions {
+            let meta = if item.total > 0 {
+                format!(
+                    "{} 个节点 · 已用 {} / {}",
+                    item.nodes.len(),
+                    bytes(item.download + item.upload),
+                    bytes(item.total)
+                )
+            } else {
+                format!("{} 个节点 · {}", item.nodes.len(), updated(item.updated))
+            };
+            let row = resource_row("folder-download-symbolic", &item.name, &meta);
+            let nodes = gtk::Button::with_label("查看节点");
+            nodes.add_css_class("flat");
+            let weak = Rc::downgrade(self);
+            let sub = item.clone();
+            nodes.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    editors::nodes(&ui.window, ui.service.clone(), sub.clone(), ui.saved())
+                }
+            });
+            row.append(&nodes);
+            let edit = gtk::Button::with_label("编辑");
+            edit.add_css_class("compact-action");
+            let weak = Rc::downgrade(self);
+            let sub = item.clone();
+            edit.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    editors::subscription(&ui.window, ui.service.clone(), sub.clone(), ui.saved())
+                }
+            });
+            row.append(&edit);
+            let refresh = icon_button("view-refresh-symbolic", "更新订阅");
+            refresh.set_sensitive(!item.source.is_empty());
+            let weak = Rc::downgrade(self);
+            let id = item.id.clone();
+            refresh.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let id = id.clone();
+                    ui.task(
+                        "更新订阅",
+                        move |s| s.update_subscription(&id),
+                        |ui, ()| {
+                            ui.notify("订阅已更新");
+                            ui.refresh(Page::Subscriptions)
+                        },
+                    )
+                }
+            });
+            row.append(&refresh);
+            row.append(&self.delete_button("subscriptions", &item.id, &item.name));
+            list.append(&row);
+        }
+        self.body.append(&list);
+    }
+
+    fn rules(self: &Rc<Self>, heading: &gtk::Box) {
+        let add = primary("新建规则集", "list-add-symbolic");
+        heading.append(&add);
+        let weak = Rc::downgrade(self);
+        add.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                editors::ruleset(
+                    &ui.window,
+                    ui.service.clone(),
+                    RuleSet::default(),
+                    ui.saved(),
+                )
+            }
+        });
+        let state = self.service.snapshot();
+        if state.rulesets.is_empty() {
+            self.body.append(&empty(
+                "view-list-bullet-symbolic",
+                "让流量各行其道",
+                "新建本地规则集，或者添加远程 JSON / SRS 规则来源。",
+            ));
+            return;
+        }
+        let list = card(gtk::Orientation::Vertical, 0);
+        for item in state.rulesets {
+            let meta = format!(
+                "{} · {}",
+                if item.source.is_empty() {
+                    "本地规则"
+                } else {
+                    "远程规则"
+                },
+                updated(item.updated)
+            );
+            let row = resource_row("view-list-bullet-symbolic", &item.name, &meta);
+            row.append(&pill(if item.binary { "SRS" } else { "JSON" }, ""));
+            let edit = gtk::Button::with_label("编辑");
+            edit.add_css_class("compact-action");
+            let weak = Rc::downgrade(self);
+            let rules = item.clone();
+            edit.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    editors::ruleset(&ui.window, ui.service.clone(), rules.clone(), ui.saved())
+                }
+            });
+            row.append(&edit);
+            let content = icon_button("document-edit-symbolic", "编辑规则内容");
+            let weak = Rc::downgrade(self);
+            let rules = item.clone();
+            content.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    editors::rule_content(&ui.window, ui.service.clone(), rules.clone(), ui.saved())
+                }
+            });
+            row.append(&content);
+            let refresh = icon_button("view-refresh-symbolic", "更新规则集");
+            refresh.set_sensitive(!item.source.is_empty());
+            let weak = Rc::downgrade(self);
+            let id = item.id.clone();
+            refresh.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let id = id.clone();
+                    ui.task(
+                        "更新规则集",
+                        move |s| s.update_ruleset(&id),
+                        |ui, ()| {
+                            ui.notify("规则集已更新");
+                            ui.refresh(Page::Rules)
+                        },
+                    )
+                }
+            });
+            row.append(&refresh);
+            row.append(&self.delete_button("rulesets", &item.id, &item.name));
+            list.append(&row);
+        }
+        self.body.append(&list);
+    }
+
+    fn delete_button(self: &Rc<Self>, kind: &str, id: &str, name: &str) -> gtk::Button {
+        let button = icon_button("user-trash-symbolic", "删除");
+        let weak = Rc::downgrade(self);
+        let kind = kind.to_string();
+        let id = id.to_string();
+        let name = name.to_string();
+        button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                if kind == "profiles"
+                    && ui.service.status().running
+                    && ui.service.snapshot().settings.active_profile == id
+                {
+                    ui.notify("请先停止正在使用此配置的内核");
+                    return;
+                }
+                let dialog = adw::MessageDialog::new(
+                    Some(&ui.window),
+                    Some(&format!("删除「{name}」？")),
+                    Some("此操作无法撤销，相关配置中的引用也会一并移除。"),
+                );
+                dialog.add_response("cancel", "取消");
+                dialog.add_response("delete", "删除");
+                dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                let weak = Rc::downgrade(&ui);
+                let kind = kind.clone();
+                let id = id.clone();
+                dialog.connect_response(Some("delete"), move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        match ui.service.update(|s| model::remove_resource(s, &kind, &id)) {
+                            Ok(()) => {
+                                ui.notify("已删除");
+                                ui.show(ui.page.get())
+                            }
+                            Err(e) => ui.error("删除失败", e),
+                        }
+                    }
+                });
+                dialog.present();
+            }
+        });
+        button
+    }
+
+    fn nodes(self: &Rc<Self>, heading: &gtk::Box) {
+        let refresh = icon_button("view-refresh-symbolic", "刷新节点");
+        heading.append(&refresh);
+        let weak = Rc::downgrade(self);
+        refresh.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.refresh(Page::Nodes)
+            }
+        });
+        let area = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        self.body.append(&area);
+        if self.service.status().running {
+            area.append(&label("正在读取代理组…", "muted"));
+            self.task(
+                "读取节点",
+                |s| s.api("GET", "/proxies", None),
+                move |ui, value| {
+                    clear_box(&area);
+                    ui.proxy_groups(&area, value)
+                },
+            );
+        } else {
+            let state = self.service.snapshot();
+            let count = state
+                .subscriptions
+                .iter()
+                .map(|s| s.nodes.len())
+                .sum::<usize>();
+            if count == 0 {
+                area.append(&empty(
+                    "network-wireless-symbolic",
+                    "从一个订阅开始",
+                    "添加订阅并关联到配置，启动内核后即可切换节点与测速。",
+                ));
+                return;
+            }
+            area.append(&info(
+                "内核尚未运行。这里展示已保存的节点；启动后可以切换节点与测速。",
+            ));
+            let search = gtk::SearchEntry::new();
+            search.set_placeholder_text(Some("搜索节点名称或协议"));
+            search.add_css_class("search");
+            area.append(&search);
+            let nodes = gtk::Box::new(gtk::Orientation::Vertical, 16);
+            area.append(&nodes);
+            let data: Vec<_> = state
+                .subscriptions
+                .iter()
+                .map(|s| (s.name.clone(), s.nodes.clone()))
+                .collect();
+            fill_saved_nodes(&nodes, &data, "");
+            search.connect_search_changed(move |search| {
+                fill_saved_nodes(&nodes, &data, &search.text())
+            });
+        }
+    }
+    fn proxy_groups(self: &Rc<Self>, area: &gtk::Box, value: Value) {
+        let Some(proxies) = value["proxies"].as_object() else {
+            area.append(&empty(
+                "network-wireless-symbolic",
+                "没有可选择的代理组",
+                "在配置中添加 selector 或 urltest 出站后重试。",
+            ));
+            return;
+        };
+        let mut groups: Vec<_> = proxies
+            .iter()
+            .filter(|(_, p)| p["all"].is_array())
+            .map(|(name, _)| name.clone())
+            .collect();
+        groups.sort();
+        if groups.is_empty() {
+            area.append(&empty(
+                "network-wireless-symbolic",
+                "没有可选择的代理组",
+                "当前配置没有 selector 或 urltest 代理组。",
+            ));
+            return;
+        }
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        controls.append(&label("代理组", "muted"));
+        let names: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let dropdown = gtk::DropDown::from_strings(&names);
+        if let Some(index) = groups.iter().position(|g| g == &*self.node_group.borrow()) {
+            dropdown.set_selected(index as u32)
+        }
+        controls.append(&dropdown);
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("搜索节点"));
+        search.set_hexpand(true);
+        search.add_css_class("search");
+        controls.append(&search);
+        let test = gtk::Button::with_label("全部测速");
+        test.add_css_class("compact-action");
+        controls.append(&test);
+        area.append(&controls);
+        let nodes = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        area.append(&nodes);
+        let weak = Rc::downgrade(self);
+        let data = Rc::new(value);
+        let groups = Rc::new(groups);
+        let render: Rc<dyn Fn()> = Rc::new({
+            let dropdown = dropdown.clone();
+            let search = search.clone();
+            let groups = groups.clone();
+            let data = data.clone();
+            move || {
+                if let Some(ui) = weak.upgrade()
+                    && let Some(group) = groups.get(dropdown.selected() as usize)
+                {
+                    ui.node_group.replace(group.clone());
+                    ui.fill_proxy_nodes(&nodes, &data, group, &search.text())
+                }
+            }
+        });
+        render();
+        let r = render.clone();
+        dropdown.connect_selected_notify(move |_| r());
+        let r = render;
+        search.connect_search_changed(move |_| r());
+        let weak = Rc::downgrade(self);
+        test.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                let Some(group) = groups.get(dropdown.selected() as usize) else {
+                    return;
+                };
+                let names: Vec<String> = data["proxies"][group]["all"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                ui.task(
+                    "节点测速",
+                    move |s| {
+                        let settings = s.snapshot().settings;
+                        let mut success = 0;
+                        for name in names {
+                            if s.api(
+                                "GET",
+                                &delay_path(&name, &settings.test_url, settings.test_timeout),
+                                None,
+                            )
+                            .is_ok()
+                            {
+                                success += 1;
+                            }
+                        }
+                        Ok(success)
+                    },
+                    |ui, success| {
+                        ui.notify(&format!("已完成测速，{success} 个节点可用"));
+                        ui.refresh(Page::Nodes)
+                    },
+                );
+            }
+        });
+        let mode_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        margin(&mode_row, 0, 0, 10, 0);
+        mode_row.append(&label("路由模式", "muted"));
+        let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        modes.add_css_class("linked");
+        modes.set_sensitive(false);
+        let mut choices: Vec<(&str, gtk::ToggleButton)> = Vec::new();
+        for (text, mode) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
+            let button = gtk::ToggleButton::with_label(text);
+            if let Some((_, first)) = choices.first() {
+                button.set_group(Some(first));
+            }
+            modes.append(&button);
+            choices.push((mode, button));
+        }
+        let current_mode = Rc::new(RefCell::new(String::new()));
+        for (mode, button) in &choices {
+            let weak = Rc::downgrade(self);
+            let mode = mode.to_string();
+            let controls = modes.clone();
+            let choices = choices.clone();
+            let selected = current_mode.clone();
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    controls.set_sensitive(false);
+                    let mode = mode.clone();
+                    let new_mode = mode.clone();
+                    let controls = controls.clone();
+                    let choices = choices.clone();
+                    let selected = selected.clone();
+                    ui.task(
+                        "切换路由模式",
+                        move |s| Ok(s.api("PATCH", "/configs", Some(&json!({"mode":mode})))),
+                        move |ui, result| {
+                            controls.set_sensitive(true);
+                            match result {
+                                Ok(_) => {
+                                    selected.replace(new_mode);
+                                    ui.notify("路由模式已切换");
+                                }
+                                Err(e) => {
+                                    for (mode, button) in &choices {
+                                        button.set_active(*mode == selected.borrow().as_str());
+                                    }
+                                    ui.error("切换路由模式失败", e);
+                                }
+                            }
+                        },
+                    )
+                }
+            });
+        }
+        mode_row.append(&modes);
+        area.append(&mode_row);
+        self.task(
+            "读取路由模式",
+            |s| s.api("GET", "/configs", None),
+            move |_, config| {
+                let mode = config["mode"].as_str().unwrap_or("rule");
+                current_mode.replace(mode.into());
+                for (name, button) in choices {
+                    button.set_active(name == mode);
+                }
+                modes.set_sensitive(true);
+            },
+        );
+    }
+    fn fill_proxy_nodes(self: &Rc<Self>, area: &gtk::Box, data: &Value, group: &str, filter: &str) {
+        clear_box(area);
+        let group_data = &data["proxies"][group];
+        let current = group_data["now"].as_str().unwrap_or("");
+        let filter = filter.to_lowercase();
+        let flow = gtk::FlowBox::new();
+        flow.set_selection_mode(gtk::SelectionMode::None);
+        flow.set_column_spacing(12);
+        flow.set_row_spacing(12);
+        flow.set_homogeneous(true);
+        flow.set_min_children_per_line(1);
+        flow.set_max_children_per_line(3);
+        let mut count = 0;
+        for name in group_data["all"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !name.to_lowercase().contains(&filter) {
+                continue;
+            }
+            count += 1;
+            let selected = name == current;
+            let node = &data["proxies"][name];
+            let item = card(gtk::Orientation::Vertical, 8);
+            item.add_css_class("node-card");
+            if selected {
+                item.add_css_class("selected")
+            }
+            let choose = gtk::Button::new();
+            choose.add_css_class("flat");
+            choose.set_tooltip_text(Some("选择此节点"));
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let title = label(name, "resource-name");
+            title.set_hexpand(true);
+            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            row.append(&title);
+            let check = gtk::Image::from_icon_name(if selected {
+                "object-select-symbolic"
+            } else {
+                "radio-symbolic"
+            });
+            check.add_css_class("muted");
+            row.append(&check);
+            choose.set_child(Some(&row));
+            let weak = Rc::downgrade(self);
+            let name_owned = name.to_string();
+            let group = group.to_string();
+            choose.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let name = name_owned.clone();
+                    let group = group.clone();
+                    ui.task(
+                        "选择节点",
+                        move |s| {
+                            s.api(
+                                "PUT",
+                                &format!("/proxies/{}", urlpart(&group)),
+                                Some(&json!({"name":name})),
+                            )
+                        },
+                        |ui, _| ui.refresh(Page::Nodes),
+                    )
+                }
+            });
+            item.append(&choose);
+            let meta = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let protocol = label(node["type"].as_str().unwrap_or("代理"), "resource-subtitle");
+            protocol.set_hexpand(true);
+            meta.append(&protocol);
+            let delay = node["history"]
+                .as_array()
+                .and_then(|h| h.last())
+                .and_then(|h| h["delay"].as_u64());
+            let text = delay
+                .map(|v| {
+                    if v == 0 {
+                        "超时".to_string()
+                    } else {
+                        format!("{v} ms")
+                    }
+                })
+                .unwrap_or_else(|| "测速".into());
+            let test = gtk::Button::with_label(&text);
+            test.add_css_class("flat");
+            test.add_css_class("small");
+            let weak = Rc::downgrade(self);
+            let name = name.to_string();
+            test.connect_clicked(move |button| {
+                if let Some(ui) = weak.upgrade() {
+                    let name = name.clone();
+                    let weak_button = button.downgrade();
+                    button.set_label("测试中…");
+                    ui.task(
+                        "节点测速",
+                        move |s| {
+                            let settings = s.snapshot().settings;
+                            Ok(s.api(
+                                "GET",
+                                &delay_path(&name, &settings.test_url, settings.test_timeout),
+                                None,
+                            ))
+                        },
+                        move |_, result| {
+                            if let Some(button) = weak_button.upgrade() {
+                                match result {
+                                    Ok(value) => button.set_label(&format!(
+                                        "{} ms",
+                                        value["delay"].as_u64().unwrap_or(0)
+                                    )),
+                                    Err(e) => {
+                                        button.set_label("重试");
+                                        button.set_tooltip_text(Some(&format!("{e:#}")))
+                                    }
+                                }
+                            }
+                        },
+                    );
+                }
+            });
+            meta.append(&test);
+            item.append(&meta);
+            flow.insert(&item, -1);
+        }
+        if count == 0 {
+            area.append(&empty(
+                "edit-find-symbolic",
+                "没有匹配的节点",
+                "试试其他名称。",
+            ))
+        } else {
+            area.append(&flow)
+        }
+    }
+
+    fn connections(self: &Rc<Self>, heading: &gtk::Box) {
+        let refresh = icon_button("view-refresh-symbolic", "刷新连接");
+        heading.append(&refresh);
+        let weak = Rc::downgrade(self);
+        refresh.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.refresh(Page::Connections)
+            }
+        });
+        let close = gtk::Button::with_label("关闭全部");
+        close.add_css_class("compact-action");
+        close.set_sensitive(self.service.status().running);
+        heading.append(&close);
+        let weak = Rc::downgrade(self);
+        close.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.task(
+                    "关闭连接",
+                    |s| s.api("DELETE", "/connections", None),
+                    |ui, _| {
+                        ui.notify("所有连接已关闭");
+                        ui.refresh(Page::Connections)
+                    },
+                )
+            }
+        });
+        if !self.service.status().running {
+            self.body.append(&empty(
+                "network-transmit-receive-symbolic",
+                "连接将在这里出现",
+                "启动内核后，你可以查看流量去向与活跃连接。",
+            ));
+            return;
+        }
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("搜索域名、地址或进程"));
+        search.add_css_class("search");
+        self.body.append(&search);
+        let area = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        self.body.append(&area);
+        area.append(&label("正在读取连接…", "muted"));
+        self.task(
+            "读取连接",
+            |s| s.api("GET", "/connections", None),
+            move |ui, value| {
+                clear_box(&area);
+                let metrics = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+                metrics.set_homogeneous(true);
+                let connections = value["connections"].as_array().cloned().unwrap_or_default();
+                metrics.append(&metric(
+                    "go-up-symbolic",
+                    "累计上传",
+                    &bytes(value["uploadTotal"].as_u64().unwrap_or(0)),
+                    "本次内核运行期间",
+                ));
+                metrics.append(&metric(
+                    "go-down-symbolic",
+                    "累计下载",
+                    &bytes(value["downloadTotal"].as_u64().unwrap_or(0)),
+                    "本次内核运行期间",
+                ));
+                metrics.append(&metric(
+                    "network-workgroup-symbolic",
+                    "活跃连接",
+                    &connections.len().to_string(),
+                    "点击刷新获取最新状态",
+                ));
+                area.append(&metrics);
+                let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                area.append(&list);
+                ui.fill_connections(&list, &connections, "");
+                let weak = Rc::downgrade(ui);
+                search.connect_search_changed(move |search| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.fill_connections(&list, &connections, &search.text())
+                    }
+                });
+            },
+        );
+    }
+    fn fill_connections(self: &Rc<Self>, list: &gtk::Box, connections: &[Value], filter: &str) {
+        clear_box(list);
+        list.add_css_class("surface-card");
+        let filter = filter.to_lowercase();
+        let mut count = 0;
+        for item in connections {
+            let metadata = &item["metadata"];
+            let host = metadata["host"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| metadata["destinationIP"].as_str())
+                .unwrap_or("未知目标");
+            let process = metadata["processPath"]
+                .as_str()
+                .or_else(|| metadata["process"].as_str())
+                .unwrap_or("");
+            if !format!("{host} {process} {}", metadata["sourceIP"])
+                .to_lowercase()
+                .contains(&filter)
+            {
+                continue;
+            }
+            count += 1;
+            let chain = item["chains"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" → ");
+            let protocol = metadata["network"].as_str().unwrap_or("TCP").to_uppercase();
+            let subtitle = format!(
+                "{protocol} · {chain}{}",
+                if process.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " · {}",
+                        Path::new(process)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    )
+                }
+            );
+            let row = resource_row("network-transmit-receive-symbolic", host, &subtitle);
+            let traffic = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            traffic.append(&label(
+                &format!("↓ {}", bytes(item["download"].as_u64().unwrap_or(0))),
+                "small",
+            ));
+            traffic.append(&label(
+                &format!("↑ {}", bytes(item["upload"].as_u64().unwrap_or(0))),
+                "muted small",
+            ));
+            row.append(&traffic);
+            let close = icon_button("window-close-symbolic", "关闭此连接");
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let weak = Rc::downgrade(self);
+            close.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let id = id.clone();
+                    ui.task(
+                        "关闭连接",
+                        move |s| s.api("DELETE", &format!("/connections/{}", urlpart(&id)), None),
+                        |ui, _| ui.refresh(Page::Connections),
+                    )
+                }
+            });
+            row.append(&close);
+            list.append(&row);
+        }
+        if count == 0 {
+            list.remove_css_class("surface-card");
+            list.append(&empty(
+                "network-transmit-receive-symbolic",
+                "没有活跃连接",
+                if filter.is_empty() {
+                    "网络请求经过内核时会显示在这里。"
+                } else {
+                    "没有找到符合筛选条件的连接。"
+                },
+            ));
+        }
+    }
+
+    fn logs(self: &Rc<Self>, heading: &gtk::Box) {
+        let copy = icon_button("edit-copy-symbolic", "复制日志");
+        heading.append(&copy);
+        let weak = Rc::downgrade(self);
+        copy.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.window.clipboard().set_text(&ui.service.logs());
+                ui.notify("日志已复制")
+            }
+        });
+        let export = icon_button("document-save-symbolic", "导出日志");
+        heading.append(&export);
+        let weak = Rc::downgrade(self);
+        export.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.save_text("AeroBox.log", ui.service.logs())
+            }
+        });
+        let clear = gtk::Button::with_label("清空");
+        clear.add_css_class("compact-action");
+        heading.append(&clear);
+        let weak = Rc::downgrade(self);
+        clear.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.service.clear_logs();
+                if let Some(buffer) = ui.log_buffer.borrow().as_ref() {
+                    buffer.set_text("")
+                }
+            }
+        });
+        let logs = self.service.logs();
+        let frame = card(gtk::Orientation::Vertical, 0);
+        let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+        buffer.set_text(&logs);
+        let view = gtk::TextView::with_buffer(&buffer);
+        view.set_editable(false);
+        view.set_cursor_visible(false);
+        view.set_monospace(true);
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.set_left_margin(18);
+        view.set_right_margin(18);
+        view.set_top_margin(18);
+        view.set_bottom_margin(18);
+        view.add_css_class("log-view");
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&view)
+            .min_content_height(420)
+            .vexpand(true)
+            .build();
+        frame.append(&scroll);
+        self.body.append(&frame);
+        self.log_buffer.replace(Some(buffer));
+        self.body.append(&label(
+            "日志随内核实时更新；退出应用后不保留。",
+            "resource-subtitle",
+        ));
+    }
+
+    fn settings(self: &Rc<Self>, heading: &gtk::Box) {
+        self.body.add_css_class("settings-page");
+        let state = self.service.snapshot();
+        let settings = state.settings;
+        let save = primary("保存设置", "object-select-symbolic");
+        heading.append(&save);
+        let appearance = adw::PreferencesGroup::new();
+        appearance.set_title("外观与启动");
+        appearance.add_css_class("settings-group");
+        let theme = adw::ComboRow::builder()
+            .title("外观")
+            .subtitle("选择适合当前环境的配色")
+            .model(&gtk::StringList::new(&["跟随系统", "浅色", "深色"]))
+            .selected(match settings.theme.as_str() {
+                "light" => 1,
+                "dark" => 2,
+                _ => 0,
+            })
+            .build();
+        appearance.add(&theme);
+        theme.connect_selected_notify(|row| {
+            apply_theme(match row.selected() {
+                1 => "light",
+                2 => "dark",
+                _ => "system",
+            })
+        });
+        let autostart = switch_row(
+            "登录时启动",
+            "进入桌面后自动打开 AeroBox",
+            platform::autostart_enabled(),
+        );
+        appearance.add(&autostart);
+        let auto_core = switch_row(
+            "打开应用时连接",
+            "自动启动当前配置的内核",
+            settings.auto_start,
+        );
+        appearance.add(&auto_core);
+        let restart = switch_row(
+            "内核异常退出后重启",
+            "恢复意外中断的连接",
+            settings.auto_restart,
+        );
+        appearance.add(&restart);
+        let system_proxy = switch_row(
+            "连接时启用系统代理",
+            "启动内核后设置桌面代理，停止后恢复",
+            settings.system_proxy,
+        );
+        appearance.add(&system_proxy);
+        self.body.append(&appearance);
+        let core = adw::PreferencesGroup::new();
+        core.set_title("内核");
+        core.set_description(Some(
+            "使用系统中的 sing-box，或者下载稳定版本到应用数据目录。",
+        ));
+        let core_path = adw::EntryRow::builder()
+            .title("自定义内核路径（留空使用自动检测）")
+            .text(&settings.core_path)
+            .build();
+        let browse = icon_button("folder-open-symbolic", "选择 sing-box 可执行文件");
+        browse.set_valign(gtk::Align::Center);
+        core_path.add_suffix(&browse);
+        let parent = self.window.clone();
+        let path_entry = core_path.clone();
+        browse.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::builder()
+                .title("选择 sing-box 内核")
+                .build();
+            let entry = path_entry.clone();
+            dialog.open(Some(&parent), None::<&gio::Cancellable>, move |result| {
+                if let Ok(file) = result
+                    && let Some(path) = file.path()
+                {
+                    entry.set_text(&path.to_string_lossy())
+                }
+            })
+        });
+        core.add(&core_path);
+        let current = adw::ActionRow::builder()
+            .title("当前内核")
+            .subtitle(
+                self.service
+                    .core_binary()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "尚未安装 sing-box 内核".into()),
+            )
+            .build();
+        let install = gtk::Button::with_label("下载 / 更新");
+        install.set_valign(gtk::Align::Center);
+        install.add_css_class("compact-action");
+        current.add_suffix(&install);
+        let weak = Rc::downgrade(self);
+        let current_row = current.clone();
+        install.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                if ui.jobs.get() > 0 {
+                    return;
+                }
+                let current_row = current_row.clone();
+                ui.task(
+                    "安装内核",
+                    |s| s.install_core(),
+                    move |ui, ()| {
+                        ui.notify("内核已安装");
+                        if let Ok(path) = ui.service.core_binary() {
+                            current_row.set_subtitle(&path.to_string_lossy());
+                        }
+                    },
+                )
+            }
+        });
+        core.add(&current);
+        self.body.append(&core);
+        let network = adw::PreferencesGroup::new();
+        network.set_title("下载与测速");
+        let proxy = adw::EntryRow::builder()
+            .title("订阅 / 规则 / 内核下载代理（可留空）")
+            .text(&settings.request_proxy)
+            .build();
+        network.add(&proxy);
+        let test_url = adw::EntryRow::builder()
+            .title("延迟测试地址")
+            .text(&settings.test_url)
+            .build();
+        network.add(&test_url);
+        let timeout = adw::SpinRow::with_range(500.0, 30000.0, 500.0);
+        timeout.set_title("测试超时（毫秒）");
+        timeout.set_value(settings.test_timeout as f64);
+        network.add(&timeout);
+        self.body.append(&network);
+        let data = adw::PreferencesGroup::new();
+        data.set_title("应用数据");
+        let directory = self.service.dir();
+        let dir = adw::ActionRow::builder()
+            .title("数据目录")
+            .subtitle(directory.to_string_lossy().as_ref())
+            .build();
+        let open = icon_button("folder-open-symbolic", "打开数据目录");
+        open.set_valign(gtk::Align::Center);
+        dir.add_suffix(&open);
+        let weak = Rc::downgrade(self);
+        open.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                let file = gio::File::for_path(ui.service.dir());
+                let launcher = gtk::FileLauncher::new(Some(&file));
+                let weak = Rc::downgrade(&ui);
+                launcher.launch(Some(&ui.window), None::<&gio::Cancellable>, move |result| {
+                    if let (Err(e), Some(ui)) = (result, weak.upgrade()) {
+                        ui.error("打开目录失败", e)
+                    }
+                });
+            }
+        });
+        data.add(&dir);
+        let version = option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        let about = adw::ActionRow::builder()
+            .title("AeroBox")
+            .subtitle(format!("{version} · Linux"))
+            .build();
+        let license = pill("开源软件", "");
+        about.add_suffix(&license);
+        data.add(&about);
+        self.body.append(&data);
+        let weak = Rc::downgrade(self);
+        save.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                let mut settings = ui.service.snapshot().settings;
+                settings.theme = match theme.selected() {
+                    1 => "light",
+                    2 => "dark",
+                    _ => "system",
+                }
+                .into();
+                settings.core_path = core_path.text().trim().into();
+                settings.auto_start = auto_core.is_active();
+                settings.auto_restart = restart.is_active();
+                settings.system_proxy = system_proxy.is_active();
+                settings.request_proxy = proxy.text().trim().into();
+                settings.test_url = test_url.text().trim().into();
+                settings.test_timeout = timeout.value() as u32;
+                if let Err(e) = url::Url::parse(&settings.test_url) {
+                    ui.error("测试地址无效", e);
+                    return;
+                }
+                if !settings.request_proxy.is_empty()
+                    && let Err(e) = url::Url::parse(&settings.request_proxy)
+                {
+                    ui.error("下载代理地址无效", e);
+                    return;
+                }
+                match platform::set_autostart(autostart.is_active()).and_then(|_| {
+                    ui.service.update(|s| {
+                        s.settings = settings;
+                        Ok(())
+                    })
+                }) {
+                    Ok(()) => ui.notify("设置已保存"),
+                    Err(e) => ui.error("保存设置失败", e),
+                }
+            }
+        });
+    }
+
+    fn import_profile(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder()
+            .title("导入 sing-box 配置")
+            .build();
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("JSON 配置"));
+        filter.add_pattern("*.json");
+        filters.append(&filter);
+        dialog.set_filters(Some(&filters));
+        let weak = Rc::downgrade(self);
+        dialog.open(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let (Ok(file), Some(ui)) = (result, weak.upgrade()) {
+                    let Some(path) = file.path() else { return };
+                    ui.task(
+                        "导入配置",
+                        move |_| {
+                            let config: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+                            anyhow::ensure!(config.is_object(), "配置必须是 JSON 对象");
+                            let mut profile = Profile::new(
+                                path.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("导入的配置"),
+                            );
+                            profile.config = config;
+                            Ok(profile)
+                        },
+                        |ui, profile| {
+                            editors::profile(&ui.window, ui.service.clone(), profile, ui.saved())
+                        },
+                    )
+                }
+            },
+        );
+    }
+    fn refresh(self: &Rc<Self>, page: Page) {
+        if self.page.get() == page {
+            self.show(page)
+        }
+    }
+    fn save_text(self: &Rc<Self>, name: &str, text: String) {
+        let dialog = gtk::FileDialog::builder()
+            .title("保存文件")
+            .initial_name(name)
+            .build();
+        let weak = Rc::downgrade(self);
+        dialog.save(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let (Ok(file), Some(ui)) = (result, weak.upgrade())
+                    && let Some(path) = file.path()
+                {
+                    ui.task(
+                        "保存文件",
+                        move |_| model::atomic_write(&path, text.as_bytes(), 0o600),
+                        |ui, ()| ui.notify("文件已保存"),
+                    )
+                }
+            },
+        );
+    }
+}
+
+fn apply_theme(theme: &str) {
+    adw::StyleManager::default().set_color_scheme(match theme {
+        "light" => adw::ColorScheme::ForceLight,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
+    });
+}
+fn label(text: &str, classes: &str) -> gtk::Label {
+    let label = gtk::Label::builder().label(text).xalign(0.0).build();
+    for class in classes.split_whitespace() {
+        label.add_css_class(class)
+    }
+    label
+}
+fn margin(widget: &impl IsA<gtk::Widget>, left: i32, right: i32, top: i32, bottom: i32) {
+    widget.set_margin_start(left);
+    widget.set_margin_end(right);
+    widget.set_margin_top(top);
+    widget.set_margin_bottom(bottom);
+}
+fn margin_inner(widget: &impl IsA<gtk::Widget>, _: i32) {
+    widget.add_css_class("padded-card");
+}
+fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
+    let card = gtk::Box::new(orientation, spacing);
+    card.add_css_class("surface-card");
+    card
+}
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.set_tooltip_text(Some(tooltip));
+    button.add_css_class("flat");
+    button.add_css_class("compact-action");
+    button.set_valign(gtk::Align::Center);
+    button
+}
+fn primary(title: &str, icon: &str) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("suggested-action");
+    button.add_css_class("primary-action");
+    button.set_valign(gtk::Align::Center);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    row.append(&gtk::Image::from_icon_name(icon));
+    row.append(&label(title, ""));
+    button.set_child(Some(&row));
+    button
+}
+fn pill(text: &str, class: &str) -> gtk::Label {
+    let label = label(text, "pill");
+    label.set_valign(gtk::Align::Center);
+    if !class.is_empty() {
+        label.add_css_class(class)
+    }
+    label
+}
+fn metric(icon: &str, title: &str, value: &str, subtitle: &str) -> gtk::Box {
+    let card = card(gtk::Orientation::Vertical, 10);
+    margin_inner(&card, 20);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.append(&label(title, "muted small"));
+    let icon = gtk::Image::from_icon_name(icon);
+    icon.add_css_class("metric-icon");
+    icon.set_hexpand(true);
+    icon.set_halign(gtk::Align::End);
+    row.append(&icon);
+    card.append(&row);
+    card.append(&label(value, "metric-value"));
+    card.append(&label(subtitle, "resource-subtitle"));
+    card
+}
+fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("resource-row");
+    let image = gtk::Image::from_icon_name(icon);
+    image.set_pixel_size(20);
+    image.add_css_class("row-icon");
+    row.append(&image);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    text.set_hexpand(true);
+    text.set_valign(gtk::Align::Center);
+    let title = label(title, "resource-name");
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_width_chars(9);
+    text.append(&title);
+    let subtitle = label(subtitle, "resource-subtitle");
+    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.append(&subtitle);
+    row.append(&text);
+    row
+}
+fn detail_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
+    let row = resource_row(icon, title, subtitle);
+    row.add_css_class("detail-row");
+    row
+}
+fn empty(icon: &str, title: &str, description: &str) -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    margin(&root, 24, 24, 54, 54);
+    root.set_halign(gtk::Align::Center);
+    let image = gtk::Image::from_icon_name(icon);
+    image.set_pixel_size(34);
+    image.add_css_class("empty-icon");
+    image.set_halign(gtk::Align::Center);
+    root.append(&image);
+    let title = label(title, "empty-title");
+    title.set_halign(gtk::Align::Center);
+    root.append(&title);
+    let description = label(description, "empty-description");
+    description.set_wrap(true);
+    description.set_max_width_chars(48);
+    description.set_justify(gtk::Justification::Center);
+    description.set_halign(gtk::Align::Center);
+    root.append(&description);
+    root
+}
+fn info(text: &str) -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    root.add_css_class("info-strip");
+    root.append(&gtk::Image::from_icon_name("dialog-information-symbolic"));
+    let label = label(text, "");
+    label.set_wrap(true);
+    root.append(&label);
+    root
+}
+fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
+    adw::SwitchRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .active(active)
+        .build()
+}
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child)
+    }
+}
+fn duration(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else {
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+fn bytes(bytes: u64) -> String {
+    let n = bytes as f64;
+    if n >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB", n / 1024.0 / 1024.0 / 1024.0)
+    } else if n >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", n / 1024.0 / 1024.0)
+    } else if n >= 1024.0 {
+        format!("{:.1} KB", n / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+fn updated(time: u64) -> String {
+    if time == 0 {
+        "尚未更新".into()
+    } else {
+        let age = model::now().saturating_sub(time);
+        if age < 60 {
+            "刚刚更新".into()
+        } else if age < 3600 {
+            format!("{} 分钟前更新", age / 60)
+        } else if age < 86400 {
+            format!("{} 小时前更新", age / 3600)
+        } else {
+            format!("{} 天前更新", age / 86400)
+        }
+    }
+}
+fn urlpart(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+fn delay_path(name: &str, url: &str, timeout: u32) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", url)
+        .append_pair("timeout", &timeout.to_string())
+        .finish();
+    format!("/proxies/{}/delay?{query}", urlpart(name))
+}
+fn fill_saved_nodes(area: &gtk::Box, data: &[(String, Vec<Value>)], filter: &str) {
+    clear_box(area);
+    let filter = filter.to_lowercase();
+    for (subscription, nodes) in data {
+        let matching: Vec<_> = nodes
+            .iter()
+            .filter(|node| {
+                format!("{} {}", node["tag"], node["type"])
+                    .to_lowercase()
+                    .contains(&filter)
+            })
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&label(subscription, "section-title"));
+        row.append(&pill(&format!("{} 个节点", matching.len()), ""));
+        area.append(&row);
+        let flow = gtk::FlowBox::new();
+        flow.set_selection_mode(gtk::SelectionMode::None);
+        flow.set_homogeneous(true);
+        flow.set_min_children_per_line(1);
+        flow.set_max_children_per_line(3);
+        flow.set_column_spacing(12);
+        flow.set_row_spacing(12);
+        for node in matching {
+            let item = card(gtk::Orientation::Vertical, 9);
+            item.add_css_class("node-card");
+            let name = label(
+                node["tag"].as_str().unwrap_or("未命名节点"),
+                "resource-name",
+            );
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            item.append(&name);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let protocol = label(
+                &node["type"].as_str().unwrap_or("代理").to_uppercase(),
+                "resource-subtitle",
+            );
+            protocol.set_hexpand(true);
+            row.append(&protocol);
+            row.append(&label("未连接", "muted small"));
+            item.append(&row);
+            flow.insert(&item, -1);
+        }
+        area.append(&flow);
+    }
+    if area.first_child().is_none() {
+        area.append(&empty(
+            "edit-find-symbolic",
+            "没有匹配的节点",
+            "试试其他名称或协议。",
+        ));
+    }
+}
+
+fn seed_smoke(service: &Service) -> Result<()> {
+    service.update(|state| {
+        state.settings.theme="light".into();state.settings.width=1180;state.settings.height=800;
+        let subscription=Subscription {name:"日常连接".into(),nodes:vec![
+            json!({"type":"shadowsocks","tag":"香港 · 01","server":"hk.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
+            json!({"type":"trojan","tag":"日本 · 01","server":"jp.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
+            json!({"type":"hysteria2","tag":"新加坡 · 01","server":"sg.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
+            json!({"type":"shadowsocks","tag":"美国 · 01","server":"us.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
+            json!({"type":"trojan","tag":"德国 · 01","server":"de.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
+            json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080})],updated:model::now()-1200,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
+        let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
+        let mut primary=Profile::new("日常上网");primary.subscriptions.push(subscription.id.clone());primary.rulesets.push(rules.id.clone());
+        let mut second=Profile::new("工作网络");second.subscriptions.push(subscription.id.clone());
+        state.settings.active_profile=primary.id.clone();state.profiles=vec![primary,second];state.subscriptions=vec![subscription];state.rulesets=vec![rules];Ok(())
+    })
+}
+
+fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
+    let window = window.as_ref();
+    let width = window.width();
+    let height = window.height();
+    anyhow::ensure!(width > 0 && height > 0, "窗口尚未分配尺寸");
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, width as f64, height as f64);
+    let node = snapshot.to_node().context("窗口没有渲染内容")?;
+    let renderer = window.renderer().context("Wayland 渲染器不可用")?;
+    let texture = renderer.render_texture(
+        &node,
+        Some(&gtk::graphene::Rect::new(
+            0.0,
+            0.0,
+            width as f32,
+            height as f32,
+        )),
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?
+    }
+    texture.save_to_png(path)?;
+    anyhow::ensure!(std::fs::metadata(path)?.len() > 4000, "截图内容不足");
+    Ok(())
+}
+
+fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
+    let step = Cell::new(0);
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let app = ui.window.application().expect("application");
+    let guard_app = app.clone();
+    let guard_failed = failed.clone();
+    glib::timeout_add_local_once(Duration::from_secs(30), move || {
+        guard_failed.set(true);
+        eprintln!("Wayland smoke: timed out");
+        guard_app.quit();
+    });
+    glib::timeout_add_local(Duration::from_millis(850), move || {
+        let current = step.get();
+        step.set(current + 1);
+        let capture = match current {
+            0 => screenshot(&ui.window, &path),
+            1 => screenshot(&ui.window, &parent.join("profiles.png")),
+            2 => screenshot(&ui.window, &parent.join("nodes.png")),
+            3 => screenshot(&ui.window, &parent.join("subscriptions.png")),
+            4 => screenshot(&ui.window, &parent.join("rules.png")),
+            5 => screenshot(&ui.window, &parent.join("overview-dark.png")),
+            6 => screenshot(&ui.window, &parent.join("overview-narrow.png")),
+            7 => app
+                .active_window()
+                .context("配置编辑器没有打开")
+                .and_then(|w| screenshot(&w, &parent.join("profile-editor.png"))),
+            8 => screenshot(&ui.window, &parent.join("settings.png")),
+            _ => Ok(()),
+        };
+        if let Err(e) = capture {
+            eprintln!("Wayland smoke screenshot {current}: {e:#}");
+            failed.set(true);
+            app.quit();
+            return glib::ControlFlow::Break;
+        }
+        match current {
+            0 => ui.nav.select_row(ui.nav.row_at_index(2).as_ref()),
+            1 => ui.nav.select_row(ui.nav.row_at_index(1).as_ref()),
+            2 => ui.nav.select_row(ui.nav.row_at_index(3).as_ref()),
+            3 => ui.nav.select_row(ui.nav.row_at_index(4).as_ref()),
+            4 => {
+                ui.nav.select_row(ui.nav.row_at_index(0).as_ref());
+                apply_theme("dark");
+            }
+            5 => {
+                apply_theme("light");
+                ui.window.set_default_size(790, 800);
+            }
+            6 => {
+                ui.window.set_default_size(1180, 800);
+                ui.nav.select_row(ui.nav.row_at_index(2).as_ref());
+                let profile = ui.service.snapshot().profiles[0].clone();
+                editors::profile(&ui.window, ui.service.clone(), profile, ui.saved());
+            }
+            7 => {
+                if let Err(e) = editors::smoke_profile(&ui.window, ui.service.clone()) {
+                    eprintln!("Wayland smoke editor: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+                if let Some(editor) = app.active_window()
+                    && editor != ui.window.clone().upcast::<gtk::Window>()
+                {
+                    editor.close()
+                }
+                ui.nav.select_row(ui.nav.row_at_index(7).as_ref());
+            }
+            8 => {
+                let clipboard = ui.window.clipboard();
+                clipboard.set_text("AeroBox Wayland 剪贴板测试");
+                let failed = failed.clone();
+                let app = app.clone();
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: overview, theme, narrow window, collections, editor and clipboard passed")}app.quit();});
+                return glib::ControlFlow::Break;
+            }
+            _ => {
+                app.quit();
+                return glib::ControlFlow::Break;
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}

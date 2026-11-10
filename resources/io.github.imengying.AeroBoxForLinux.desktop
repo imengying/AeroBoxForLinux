@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AeroBox
+Comment=Native sing-box manager for Wayland
+Comment[zh_CN]=原生 Wayland sing-box 管理器
+Exec=AeroBox
+Icon=io.github.imengying.AeroBoxForLinux
+Terminal=false
+Categories=Network;Settings;
+StartupNotify=true

@@ -1,0 +1,90 @@
+name: AeroBoxForLinux
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev pkg-config weston dbus-daemon fonts-noto-cjk
+      - name: Check formatting and lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Build
+        env:
+          AEROBOX_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --locked
+      - name: Test Wayland without X11
+        run: timeout 90s scripts/test-wayland.sh
+      - name: Package
+        run: scripts/package.sh ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-${{ matrix.arch }}
+          path: target/packages/AeroBoxForLinux-linux-*.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: wayland-${{ matrix.arch }}
+          path: target/wayland/
+
+  release:
+    needs: linux
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: linux-*
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release-assets/AeroBoxForLinux-linux-*.tar.gz
+          prerelease: ${{ contains(github.ref_name, 'dev') || contains(github.ref_name, 'preview') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          body: |
+            AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
+
+            概览集中显示实时流量、活跃连接与运行时间，配置选择和编辑集中在配置页。
+            支持浅色、深色和窄窗口，设置页提供更清晰的字体与说明。
+            提供内核管理、订阅、节点、配置、规则集、脚本、连接和日志功能。
+
+            Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5`
+            Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。
+            从应用菜单启动 AeroBox；在设置中下载或指定 sing-box 内核。运行成品无需安装 Rust。
+
+            安装与使用说明见 README.md。
