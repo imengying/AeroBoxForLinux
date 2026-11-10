@@ -85,7 +85,12 @@ impl Ui {
         });
         for item in state.subscriptions {
             let card = card(gtk::Orientation::Vertical, 12);
-            let meta = format!("{} 个节点 · {}", item.nodes.len(), updated(item.updated));
+            let count = item
+                .nodes
+                .iter()
+                .filter(|node| model::is_connection_node(node))
+                .count();
+            let meta = format!("{} 个节点 · {}", count, updated(item.updated));
             let row = resource_row("folder-download-symbolic", &item.name, &meta);
             let edit = icon_button("document-edit-symbolic", "订阅设置");
             let weak = Rc::downgrade(self);
@@ -175,6 +180,7 @@ impl Ui {
                 use_subscription.connect_clicked(move |button| {
                     if let Some(ui) = weak.upgrade() {
                         let subscription_id = subscription_id.clone();
+                        let view_subscription = subscription_id.clone();
                         let profile_id = profile_id.clone();
                         ui.button_task(
                             button,
@@ -182,8 +188,9 @@ impl Ui {
                             move |s| {
                                 s.associate_subscription_with_profile(&subscription_id, &profile_id)
                             },
-                            |ui, result| match result {
+                            move |ui, result| match result {
                                 Ok(()) => {
+                                    ui.node_subscription.replace(view_subscription);
                                     ui.notify("已用于当前配置");
                                     ui.refresh(Page::Subscriptions);
                                 }
@@ -200,7 +207,8 @@ impl Ui {
             let weak = Rc::downgrade(self);
             nodes.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
-                    editors::nodes(&ui.window, ui.service.clone(), item.clone(), ui.saved());
+                    ui.node_subscription.replace(item.id.clone());
+                    ui.navigate(Page::Nodes);
                 }
             });
             footer.append(&nodes);
@@ -417,12 +425,15 @@ impl Ui {
                     }
                     sub.auto_update = auto_update && !sub.source.is_empty();
                     sub.update_interval_hours = interval;
-                    s.import_subscription_for_profile(sub, profile_id.as_deref())
+                    let id = sub.id.clone();
+                    s.import_subscription_for_profile(sub, profile_id.as_deref())?;
+                    Ok(id)
                 },
                 move |ui, result| {
                     busy.set(false);
                     match result {
-                        Ok(()) => {
+                        Ok(id) => {
+                            ui.node_subscription.replace(id);
                             if let Some(window) = window.upgrade() {
                                 window.close();
                             }

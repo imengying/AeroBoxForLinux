@@ -123,6 +123,12 @@ impl Settings {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct NodeSelection {
+    pub subscription_id: String,
+    pub node_tag: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -132,6 +138,8 @@ pub struct Profile {
     pub subscriptions: Vec<String>,
     #[serde(default)]
     pub rulesets: Vec<String>,
+    #[serde(default)]
+    pub selected_node: Option<NodeSelection>,
 }
 impl Profile {
     pub fn new(name: &str) -> Self {
@@ -140,6 +148,7 @@ impl Profile {
             name: name.into(),
             subscriptions: vec![],
             rulesets: vec![],
+            selected_node: None,
             config: json!({
                 "log":{"level":"error","timestamp":true},
                 "dns":{"servers":[{"type":"udp","tag":"dns-local","server":"223.5.5.5"}],"final":"dns-local"},
@@ -474,6 +483,22 @@ pub fn validate_nodes(nodes: &[Value]) -> Result<()> {
     Ok(())
 }
 
+/// Only dialable subscription outbounds belong in the node picker. Helper
+/// groups and terminal routing actions stay available to generated references.
+pub fn is_connection_node(node: &Value) -> bool {
+    node["type"].as_str().is_some_and(|kind| {
+        !matches!(
+            kind,
+            "selector" | "urltest" | "direct" | "block" | "dns" | "reject" | "hysteria-realm"
+        )
+    }) && node["server"]
+        .as_str()
+        .is_some_and(|host| !host.trim().is_empty())
+        && node["server_port"]
+            .as_u64()
+            .is_some_and(|port| (1..=65535).contains(&port))
+}
+
 pub struct Store {
     pub dir: PathBuf,
     pub state: State,
@@ -504,6 +529,19 @@ impl Store {
     pub fn update(&mut self, edit: impl FnOnce(&mut State) -> Result<()>) -> Result<()> {
         let mut next = self.state.clone();
         edit(&mut next)?;
+        for profile in &mut next.profiles {
+            if profile.selected_node.as_ref().is_some_and(|selected| {
+                !profile.subscriptions.contains(&selected.subscription_id)
+                    || !next.subscriptions.iter().any(|sub| {
+                        sub.id == selected.subscription_id
+                            && sub.nodes.iter().any(|node| {
+                                node["tag"] == selected.node_tag && is_connection_node(node)
+                            })
+                    })
+            }) {
+                profile.selected_node = None;
+            }
+        }
         next.validate()?;
         atomic_write(
             &self.dir.join("state.json"),
@@ -553,7 +591,13 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
         "subscriptions" => {
             state.subscriptions.retain(|s| s.id != id);
             for p in &mut state.profiles {
-                p.subscriptions.retain(|s| s != id)
+                p.subscriptions.retain(|s| s != id);
+                if p.selected_node
+                    .as_ref()
+                    .is_some_and(|selected| selected.subscription_id == id)
+                {
+                    p.selected_node = None;
+                }
             }
         }
         "rulesets" => {

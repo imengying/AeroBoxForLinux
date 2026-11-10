@@ -1,5 +1,7 @@
 use crate::{
-    model::{self, Profile, RuleSet, Settings, State, Store, atomic_write, now, pretty},
+    model::{
+        self, NodeSelection, Profile, RuleSet, Settings, State, Store, atomic_write, now, pretty,
+    },
     network, platform, subscription,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -40,6 +42,41 @@ pub struct CoreInfo {
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 const RULE_DOWNLOAD_GROUP: &str = "aerobox-rule-download";
+
+#[derive(Clone, Debug)]
+pub struct SubscriptionNode {
+    pub subscription_id: String,
+    pub node_tag: String,
+    pub name: String,
+    pub protocol: String,
+    pub selected: bool,
+    pub delay_ms: Option<u64>,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GeneratedNode {
+    tag: String,
+    source: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PreparedConfig {
+    config: Value,
+    nodes: HashMap<NodeSelection, GeneratedNode>,
+    selected_node: Option<NodeSelection>,
+}
+impl std::ops::Deref for PreparedConfig {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.config
+    }
+}
+impl std::ops::DerefMut for PreparedConfig {
+    fn deref_mut(&mut self) -> &mut Value {
+        &mut self.config
+    }
+}
 #[derive(Default)]
 struct Running {
     child: Option<Child>,
@@ -47,6 +84,8 @@ struct Running {
     started: Option<Instant>,
     binary: Option<PathBuf>,
     profile_id: String,
+    nodes: HashMap<NodeSelection, GeneratedNode>,
+    selected_node: Option<NodeSelection>,
 }
 pub struct Service {
     pub store: Mutex<Store>,
@@ -229,6 +268,9 @@ impl Service {
         self.generate_profile(&state, profile)
     }
     pub fn generate_profile(&self, state: &State, profile: &Profile) -> Result<Value> {
+        Ok(self.prepare_profile(state, profile)?.config)
+    }
+    fn prepare_profile(&self, state: &State, profile: &Profile) -> Result<PreparedConfig> {
         let mut config = profile.config.clone();
         ensure!(config.is_object(), "配置必须是 JSON 对象");
         let outbounds = config
@@ -243,6 +285,8 @@ impl Service {
             .filter_map(|v| v["tag"].as_str().map(str::to_string))
             .collect();
         let mut added = vec![];
+        let mut nodes = HashMap::new();
+        let mut first_node = None;
         for id in &profile.subscriptions {
             let sub = state
                 .subscriptions
@@ -295,20 +339,46 @@ impl Service {
                 }
                 // Direct/block helper outbounds are needed by imported groups,
                 // but must not become the default node of our proxy selector.
-                if !matches!(generated["type"].as_str(), Some("direct" | "block" | "dns")) {
+                if model::is_connection_node(node) {
+                    let identity = NodeSelection {
+                        subscription_id: sub.id.clone(),
+                        node_tag: tag.to_owned(),
+                    };
+                    first_node.get_or_insert_with(|| identity.clone());
+                    nodes.insert(
+                        identity,
+                        GeneratedNode {
+                            tag: generated_tag.clone(),
+                            source: node.clone(),
+                        },
+                    );
                     added.push(Value::String(generated_tag.clone()));
                 }
                 outbounds.push(generated);
             }
         }
+        let explicit_selection = profile
+            .selected_node
+            .as_ref()
+            .filter(|selected| nodes.contains_key(*selected))
+            .cloned();
+        let selected_node = explicit_selection.clone().or(first_node);
         if !added.is_empty() {
             let group = outbounds
                 .iter_mut()
                 .find(|o| o["tag"] == "proxy" && o["type"] == "selector")
                 .context("添加订阅需要一个标签为 proxy 的 selector 代理组")?;
             group["outbounds"] = json!(added);
-            if group.get("default").is_some() && !added.iter().any(|tag| tag == &group["default"]) {
-                group.as_object_mut().unwrap().remove("default");
+            group["default"] = json!(nodes[selected_node.as_ref().unwrap()].tag);
+            // A deliberate node choice controls the default proxy in both rule
+            // and global modes. Merely linking a subscription must preserve a
+            // direct/custom profile's existing default and explicit rules.
+            if explicit_selection.is_some() {
+                if config.get("route").is_none() {
+                    config["route"] = json!({});
+                }
+                ensure!(config["route"].is_object(), "route 必须是对象");
+                config["route"]["final"] = json!("proxy");
             }
         }
         let mut rules = vec![];
@@ -388,6 +458,30 @@ impl Service {
         let lan_tag = rule_tag(model::BUILTIN_LAN_ID);
         let ads_tag = rule_tag(model::BUILTIN_ADS_ID);
         crate::config::apply_profile_settings(&mut config, &state.settings, lan_tag, ads_tag)?;
+        if !nodes.is_empty() {
+            // Global always follows the application node picker, independently
+            // of the profile's default in rule mode. Its DNS transport must use
+            // that same selector, including before the first explicit choice.
+            for rule in config["route"]["rules"].as_array_mut().unwrap() {
+                if rule["clash_mode"] == "global" {
+                    rule["outbound"] = json!("proxy");
+                }
+            }
+            let global_dns = config["dns"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|rule| rule["clash_mode"] == "global")
+                .and_then(|rule| rule["server"].as_str())
+                .map(str::to_owned);
+            if let Some(tag) = global_dns {
+                for server in config["dns"]["servers"].as_array_mut().unwrap() {
+                    if server["tag"] == tag {
+                        server["detour"] = json!("proxy");
+                    }
+                }
+            }
+        }
         if !remote_tags.is_empty() {
             // A small initial file makes the first connection independent of
             // the rules server. sing-box prefers its own downloaded cache and
@@ -430,7 +524,11 @@ impl Service {
                 }
             }
         }
-        Ok(config)
+        Ok(PreparedConfig {
+            config,
+            nodes,
+            selected_node,
+        })
     }
     fn rule_path(&self, r: &RuleSet) -> PathBuf {
         self.store.lock().unwrap().rule_path(r)
@@ -456,7 +554,12 @@ impl Service {
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(self.status().running, "请先启动内核");
         let state = self.snapshot();
-        let config = self.generate(&state.settings.active_profile)?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.settings.active_profile)
+            .context("请选择一个配置")?;
+        let config = self.prepare_profile(&state, profile)?;
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
@@ -505,7 +608,12 @@ impl Service {
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         ensure!(!self.status().running, "内核已运行");
         let state = self.snapshot();
-        let config = self.generate(&state.settings.active_profile)?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.settings.active_profile)
+            .context("请选择一个配置")?;
+        let config = self.prepare_profile(&state, profile)?;
         let binary = self.core_binary_for(&state.settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
@@ -522,16 +630,21 @@ impl Service {
     }
     fn start_config_locked(
         &self,
-        config: Value,
+        config: PreparedConfig,
         binary: PathBuf,
         proxy: bool,
         profile_id: String,
     ) -> Result<()> {
         ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
         ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
+        let selected_tag = config
+            .selected_node
+            .as_ref()
+            .and_then(|key| config.nodes.get(key))
+            .map(|node| node.tag.clone());
         let dir = self.dir().join("core");
         let path = dir.join("config.json");
-        atomic_write(&path, &serde_json::to_vec_pretty(&config)?, 0o600)?;
+        atomic_write(&path, &serde_json::to_vec_pretty(&config.config)?, 0o600)?;
         let mut cmd = Command::new(&binary);
         cmd.args(["run", "--disable-color", "-c"])
             .arg(path)
@@ -564,7 +677,9 @@ impl Service {
         {
             let mut r = self.running.lock().unwrap();
             r.child = Some(child);
-            r.config = config;
+            r.config = config.config;
+            r.nodes = config.nodes;
+            r.selected_node = config.selected_node;
             r.started = Some(Instant::now());
             r.binary = Some(binary);
             r.profile_id = profile_id;
@@ -596,6 +711,17 @@ impl Service {
                     Err(_) => thread::sleep(Duration::from_millis(30)),
                 }
             }
+        }
+        // A selector's cache can override its configured default. Apply the
+        // profile's selected leaf before exposing the connected state.
+        if let Some(tag) = selected_tag {
+            self.set_selector("proxy", &tag, CONTROL_TIMEOUT)?;
+            let mut run = self.running.lock().unwrap();
+            run.selected_node = run
+                .nodes
+                .iter()
+                .find(|(_, node)| node.tag == tag)
+                .map(|(key, _)| key.clone());
         }
         self.log("内核已启动");
         if proxy {
@@ -731,12 +857,16 @@ impl Service {
         Ok(())
     }
 
-    fn running_config(&self) -> Result<(Value, PathBuf, String)> {
+    fn running_config(&self) -> Result<(PreparedConfig, PathBuf, String)> {
         let mut snapshot = {
             let running = self.running.lock().unwrap();
             ensure!(running.child.is_some(), "请先启动内核");
             (
-                running.config.clone(),
+                PreparedConfig {
+                    config: running.config.clone(),
+                    nodes: running.nodes.clone(),
+                    selected_node: running.selected_node.clone(),
+                },
                 running.binary.clone().context("运行内核路径不可用")?,
                 running.profile_id.clone(),
             )
@@ -746,6 +876,24 @@ impl Service {
         // restarting a stuck core; its last known configuration remains usable.
         if let Ok(mode) = self.runtime_mode() {
             snapshot.0["experimental"]["clash_api"]["default_mode"] = json!(mode);
+        }
+        if !snapshot.0.nodes.is_empty()
+            && let Ok(actual) =
+                self.api_with_timeout("GET", "/proxies/proxy", None, CONTROL_TIMEOUT)
+            && let Some(tag) = actual["now"].as_str()
+        {
+            snapshot.0.selected_node = snapshot
+                .0
+                .nodes
+                .iter()
+                .find(|(_, node)| node.tag == tag)
+                .map(|(key, _)| key.clone());
+            if let Some(group) = snapshot.0["outbounds"]
+                .as_array_mut()
+                .and_then(|outbounds| outbounds.iter_mut().find(|o| o["tag"] == "proxy"))
+            {
+                group["default"] = json!(tag);
+            }
         }
         Ok(snapshot)
     }
@@ -857,8 +1005,22 @@ impl Service {
         Ok(())
     }
 
+    fn set_selector(&self, group: &str, name: &str, timeout: Duration) -> Result<()> {
+        let path = format!(
+            "/proxies/{}",
+            percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC)
+        );
+        self.api_with_timeout("PUT", &path, Some(&json!({"name":name})), timeout)?;
+        let actual = self.api_with_timeout("GET", &path, None, timeout)?;
+        ensure!(actual["now"].as_str() == Some(name), "内核未应用节点选择");
+        Ok(())
+    }
+
     pub fn select_outbound(&self, group: &str, name: &str) -> Result<()> {
         let _op = self.operation.lock().unwrap();
+        self.select_outbound_locked(group, name)
+    }
+    fn select_outbound_locked(&self, group: &str, name: &str) -> Result<()> {
         let tag = percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC);
         let path = format!("/proxies/{tag}");
         let current = self.api_with_timeout("GET", &path, None, CONTROL_TIMEOUT)?;
@@ -873,20 +1035,7 @@ impl Service {
         if previous == name {
             return Ok(());
         }
-        let select = |selected: &str| -> Result<()> {
-            self.api_with_timeout(
-                "PUT",
-                &path,
-                Some(&json!({"name":selected})),
-                CONTROL_TIMEOUT,
-            )?;
-            let actual = self.api_with_timeout("GET", &path, None, CONTROL_TIMEOUT)?;
-            ensure!(
-                actual["now"].as_str() == Some(selected),
-                "内核未应用节点选择"
-            );
-            Ok(())
-        };
+        let select = |selected: &str| self.set_selector(group, selected, CONTROL_TIMEOUT);
         if let Err(error) = select(name).and_then(|()| self.close_connections()) {
             return Err(match select(previous) {
                 Ok(()) => error,
@@ -894,6 +1043,268 @@ impl Service {
             });
         }
         Ok(())
+    }
+
+    pub fn subscription_nodes(&self, subscription_id: &str) -> Result<Vec<SubscriptionNode>> {
+        let state = self.snapshot();
+        let subscription = state
+            .subscriptions
+            .iter()
+            .find(|s| s.id == subscription_id)
+            .context("订阅不存在")?;
+        let profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.settings.active_profile);
+        let run = self.running.lock().unwrap();
+        let running = run.child.is_some();
+        let same_profile = profile.is_some_and(|p| p.id == run.profile_id);
+        let selected = if running {
+            same_profile.then_some(run.selected_node.as_ref()).flatten()
+        } else {
+            profile.and_then(|p| p.selected_node.as_ref())
+        };
+        Ok(subscription
+            .nodes
+            .iter()
+            .filter(|node| model::is_connection_node(node))
+            .map(|node| {
+                let key = NodeSelection {
+                    subscription_id: subscription_id.into(),
+                    node_tag: node["tag"].as_str().unwrap_or("").into(),
+                };
+                let available = running
+                    && same_profile
+                    && run
+                        .nodes
+                        .get(&key)
+                        .is_some_and(|loaded| loaded.source == *node);
+                SubscriptionNode {
+                    name: key.node_tag.clone(),
+                    protocol: node["type"].as_str().unwrap_or("").into(),
+                    selected: selected == Some(&key) && (!running || available),
+                    delay_ms: None,
+                    available,
+                    subscription_id: key.subscription_id,
+                    node_tag: key.node_tag,
+                }
+            })
+            .collect())
+    }
+
+    pub fn subscription_nodes_runtime(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<SubscriptionNode>> {
+        let revision = self.subscription_revision();
+        let mut nodes = self.subscription_nodes(subscription_id)?;
+        let (pid, mapping) = {
+            let run = self.running.lock().unwrap();
+            (run.child.as_ref().map(Child::id), run.nodes.clone())
+        };
+        if pid.is_none() {
+            return Ok(nodes);
+        }
+        let response = self.api_with_timeout("GET", "/proxies", None, CONTROL_TIMEOUT)?;
+        let proxies = &response["proxies"];
+        let mut current = proxies["proxy"]["now"].as_str();
+        let mut visited = HashSet::new();
+        while let Some(tag) = current {
+            if !visited.insert(tag) {
+                current = None;
+                break;
+            }
+            if let Some(next) = proxies[tag]["now"].as_str() {
+                current = Some(next);
+            } else {
+                break;
+            }
+        }
+        let selected = current.and_then(|tag| {
+            mapping
+                .iter()
+                .find(|(_, node)| node.tag == tag)
+                .map(|(key, _)| key.clone())
+        });
+        for node in &mut nodes {
+            let key = NodeSelection {
+                subscription_id: node.subscription_id.clone(),
+                node_tag: node.node_tag.clone(),
+            };
+            node.selected = node.available && selected.as_ref() == Some(&key);
+            if let Some(loaded) = mapping.get(&key) {
+                let info = &proxies[&loaded.tag];
+                node.available &= info.is_object();
+                node.selected &= node.available;
+                node.delay_ms = info["history"]
+                    .as_array()
+                    .and_then(|history| history.last())
+                    .and_then(|entry| entry["delay"].as_u64());
+            }
+        }
+        let mut run = self.running.lock().unwrap();
+        ensure!(
+            run.child.as_ref().map(Child::id) == pid,
+            "内核已变化，请刷新节点"
+        );
+        ensure!(
+            self.subscription_revision() == revision,
+            "节点已变化，请刷新列表"
+        );
+        run.selected_node = selected;
+        Ok(nodes)
+    }
+
+    pub fn select_subscription_node(&self, subscription_id: &str, node_tag: &str) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let selected = NodeSelection {
+            subscription_id: subscription_id.into(),
+            node_tag: node_tag.into(),
+        };
+        ensure!(
+            before
+                .subscriptions
+                .iter()
+                .find(|s| s.id == subscription_id)
+                .is_some_and(|sub| sub
+                    .nodes
+                    .iter()
+                    .any(|n| n["tag"] == node_tag && model::is_connection_node(n))),
+            "节点不存在或不是可连接的节点"
+        );
+        let profile_id = before.settings.active_profile.clone();
+        let old_profile = before
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .context("请选择一个配置")?;
+        let old_selection = old_profile.selected_node.clone();
+        let was_linked = old_profile
+            .subscriptions
+            .iter()
+            .any(|id| id == subscription_id);
+        let mut candidate = before.clone();
+        link_subscription(&mut candidate, subscription_id, &profile_id)?;
+        candidate
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .unwrap()
+            .selected_node = Some(selected.clone());
+        if self.status().running {
+            let (old_config, _, running_profile) = self.running_config()?;
+            ensure!(
+                running_profile == profile_id,
+                "当前配置与运行配置不同，请先重新加载配置"
+            );
+            let profile = candidate
+                .profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .unwrap();
+            let mut next = self.prepare_profile(&candidate, profile)?;
+            next["experimental"]["clash_api"]["default_mode"] =
+                old_config["experimental"]["clash_api"]["default_mode"].clone();
+            let target = next.nodes[&selected].tag.clone();
+            let mut comparable = old_config.config.clone();
+            if let Some(group) = comparable["outbounds"]
+                .as_array_mut()
+                .and_then(|outbounds| {
+                    outbounds
+                        .iter_mut()
+                        .find(|o| o["tag"] == "proxy" && o["type"] == "selector")
+                })
+            {
+                group["default"] = json!(target);
+            }
+            if comparable == next.config && old_config.nodes == next.nodes {
+                let current =
+                    self.api_with_timeout("GET", "/proxies/proxy", None, CONTROL_TIMEOUT)?;
+                let previous = current["now"].as_str().context("内核没有返回当前节点")?;
+                self.select_outbound_locked("proxy", &target)?;
+                let expected = serde_json::to_value(&before)?;
+                if let Err(error) = self.update(|state| {
+                    ensure!(
+                        serde_json::to_value(&*state)? == expected,
+                        "配置在选择节点期间已改变，请重试"
+                    );
+                    *state = candidate;
+                    Ok(())
+                }) {
+                    return Err(match self.select_outbound_locked("proxy", previous) {
+                        Ok(()) => error,
+                        Err(restore) => error.context(format!("恢复原节点失败：{restore:#}")),
+                    });
+                }
+                let mut run = self.running.lock().unwrap();
+                run.config = next.config;
+                run.nodes = next.nodes;
+                run.selected_node = Some(selected);
+                self.subscription_revision.fetch_add(1, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
+        self.commit_subscription_state(&before, candidate, Some(&profile_id), |state| {
+            if let Some(profile) = state.profiles.iter_mut().find(|p| p.id == profile_id) {
+                profile.selected_node = old_selection;
+                if !was_linked {
+                    profile.subscriptions.retain(|id| id != subscription_id);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn test_subscription_node(&self, subscription_id: &str, node_tag: &str) -> Result<u64> {
+        let state = self.snapshot();
+        let test_url = url::Url::parse(&state.settings.test_url).context("测速地址无效")?;
+        ensure!(
+            test_url.scheme() == "https",
+            "内核测速需要 HTTPS 地址，请在设置中修改测速地址"
+        );
+        let key = NodeSelection {
+            subscription_id: subscription_id.into(),
+            node_tag: node_tag.into(),
+        };
+        let source = state
+            .subscriptions
+            .iter()
+            .find(|s| s.id == subscription_id)
+            .and_then(|s| {
+                s.nodes
+                    .iter()
+                    .find(|n| n["tag"] == node_tag && model::is_connection_node(n))
+            })
+            .context("节点不存在")?;
+        let (pid, tag) = {
+            let run = self.running.lock().unwrap();
+            let pid = run
+                .child
+                .as_ref()
+                .map(Child::id)
+                .context("请先启动内核后测速")?;
+            let node = run
+                .nodes
+                .get(&key)
+                .filter(|node| node.source == *source)
+                .context("请先选择此订阅的节点以加载配置")?;
+            (pid, node.tag.clone())
+        };
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("url", &state.settings.test_url)
+            .append_pair(
+                "timeout",
+                &state.settings.test_timeout.min(32767).to_string(),
+            )
+            .finish();
+        let path = format!(
+            "/proxies/{}/delay?{query}",
+            percent_encoding::utf8_percent_encode(&tag, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let response = self.api("GET", &path, None)?;
+        ensure!(self.status().pid == Some(pid), "内核已变化，请重新测速");
+        response["delay"].as_u64().context("内核没有返回延迟")
     }
 
     /// Validate before interrupting the current core. If the new listener or
@@ -925,7 +1336,7 @@ impl Service {
             .iter()
             .find(|profile| profile.id == candidate.settings.active_profile)
             .context("请选择一个配置")?;
-        let config = self.generate_profile(&candidate, profile)?;
+        let config = self.prepare_profile(&candidate, profile)?;
         let binary = self.core_binary_for(&settings)?;
         self.check_with_binary(&config, &binary)?;
         self.ensure_tun_available(&config, &binary)?;
@@ -1238,14 +1649,16 @@ impl Service {
             .running
             .then(|| self.running_config())
             .transpose()?;
-        let next_running = if let Some((_, binary, running_profile)) = &old_running {
+        let next_running = if let Some((old_config, binary, running_profile)) = &old_running {
             if profile_id == Some(running_profile.as_str()) {
                 let profile = candidate
                     .profiles
                     .iter()
                     .find(|p| &p.id == running_profile)
                     .unwrap();
-                let config = self.generate_profile(&candidate, profile)?;
+                let mut config = self.prepare_profile(&candidate, profile)?;
+                config["experimental"]["clash_api"]["default_mode"] =
+                    old_config["experimental"]["clash_api"]["default_mode"].clone();
                 self.check_with_binary(&config, binary)?;
                 self.ensure_tun_available(&config, binary)?;
                 Some((config, binary.clone(), running_profile.clone()))
@@ -1459,7 +1872,9 @@ impl Service {
             if let Some(profile) = candidate.profiles.iter().find(|profile| {
                 &profile.id == profile_id && profile.subscriptions.iter().any(|linked| linked == id)
             }) {
-                let config = self.generate_profile(&candidate, profile)?;
+                let mut config = self.prepare_profile(&candidate, profile)?;
+                config["experimental"]["clash_api"]["default_mode"] =
+                    old_config["experimental"]["clash_api"]["default_mode"].clone();
                 if &config != old_config {
                     self.check_with_binary(&config, binary)?;
                     self.ensure_tun_available(&config, binary)?;
@@ -1506,6 +1921,18 @@ impl Service {
                         "订阅已被编辑，无法恢复旧内容"
                     );
                     copy_subscription_data(target, original);
+                    for profile in &mut state.profiles {
+                        if profile.selected_node.is_none()
+                            && let Some(previous) = before
+                                .profiles
+                                .iter()
+                                .find(|old| old.id == profile.id)
+                                .and_then(|old| old.selected_node.as_ref())
+                            && previous.subscription_id == id
+                        {
+                            profile.selected_node = Some(previous.clone());
+                        }
+                    }
                     Ok(())
                 });
                 let _ = self.stop_locked();

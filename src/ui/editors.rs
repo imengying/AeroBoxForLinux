@@ -445,6 +445,13 @@ pub fn profile(
             .filter(|(_, r)| r.is_active())
             .map(|(id, _)| id.clone())
             .collect();
+        if next
+            .selected_node
+            .as_ref()
+            .is_some_and(|node| !next.subscriptions.contains(&node.subscription_id))
+        {
+            next.selected_node = None;
+        }
         next.rulesets = rule_controls
             .iter()
             .filter(|(_, r)| r.is_active())
@@ -605,6 +612,29 @@ pub fn subscription(
     updates.add(&auto_update);
     updates.add(&interval);
     form.append(&updates);
+    let edit_nodes = gtk::Button::with_label("编辑节点数据");
+    edit_nodes.set_halign(gtk::Align::Start);
+    let weak = editor.window.downgrade();
+    let nodes_service = service.clone();
+    let nodes_id = item.id.clone();
+    let nodes_saved = on_saved.clone();
+    edit_nodes.connect_clicked(move |_| {
+        if let Some(parent) = weak.upgrade()
+            && let Some(subscription) = nodes_service
+                .snapshot()
+                .subscriptions
+                .into_iter()
+                .find(|s| s.id == nodes_id)
+        {
+            nodes(
+                &parent,
+                nodes_service.clone(),
+                subscription,
+                nodes_saved.clone(),
+            );
+        }
+    });
+    form.append(&edit_nodes);
     editor.body.append(&scroll);
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
@@ -848,7 +878,7 @@ pub fn ruleset(
 }
 
 pub fn nodes(
-    parent: &adw::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     service: Arc<Service>,
     item: Subscription,
     on_saved: Saved,

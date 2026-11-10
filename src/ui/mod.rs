@@ -1,6 +1,7 @@
 mod core;
 mod editors;
 mod home;
+mod nodes;
 mod settings;
 mod subscriptions;
 mod typography;
@@ -196,7 +197,8 @@ struct Ui {
     dashboard: RefCell<Option<Rc<home::Dashboard>>>,
     core: RefCell<Option<Rc<core::CorePanel>>>,
     log_buffer: RefCell<Option<gtk::TextBuffer>>,
-    node_group: RefCell<String>,
+    node_subscription: RefCell<String>,
+    node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
 }
 
 impl Ui {
@@ -335,7 +337,8 @@ impl Ui {
             dashboard: RefCell::new(None),
             core: RefCell::new(None),
             log_buffer: RefCell::new(None),
-            node_group: RefCell::new(String::new()),
+            node_subscription: RefCell::new(String::new()),
+            node_panel: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
         ui.nav.connect_row_selected(move |_, row| {
@@ -353,11 +356,12 @@ impl Ui {
                 return glib::ControlFlow::Break;
             };
             let status = ui.service.status();
-            if ui.last_pid.replace(status.pid) != status.pid {
-                if ui.page.get() == Page::Home {
-                    ui.refresh(Page::Home)
-                } else if ui.page.get() == Page::Profiles {
-                    ui.refresh(Page::Profiles)
+            if ui.last_pid.get() != status.pid
+                && (ui.jobs.get() == 0 || ui.page.get() == Page::Home)
+            {
+                ui.last_pid.set(status.pid);
+                if matches!(ui.page.get(), Page::Home | Page::Profiles | Page::Nodes) {
+                    ui.refresh(ui.page.get())
                 }
             }
             let revision = ui.service.subscription_revision();
@@ -494,6 +498,7 @@ impl Ui {
         self.page.set(page);
         self.dashboard.replace(None);
         self.core.replace(None);
+        self.node_panel.replace(None);
         self.body.remove_css_class("settings-page");
         self.body.remove_css_class("home-page");
         self.body.set_spacing(24);
@@ -631,7 +636,10 @@ impl Ui {
                             s.settings.active_profile = id;
                             Ok(())
                         }) {
-                            Ok(()) => ui.refresh(Page::Profiles),
+                            Ok(()) => {
+                                ui.node_subscription.borrow_mut().clear();
+                                ui.refresh(Page::Profiles);
+                            }
                             Err(e) => ui.error("切换配置失败", e),
                         }
                     }
@@ -863,358 +871,6 @@ impl Ui {
             }
         });
         button
-    }
-
-    fn nodes(self: &Rc<Self>, heading: &gtk::Box) {
-        let refresh = icon_button("view-refresh-symbolic", "刷新节点");
-        heading.append(&refresh);
-        let weak = Rc::downgrade(self);
-        refresh.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                ui.refresh(Page::Nodes)
-            }
-        });
-        let area = gtk::Box::new(gtk::Orientation::Vertical, 16);
-        self.body.append(&area);
-        if self.service.status().running {
-            area.append(&label("正在读取代理组…", "muted"));
-            self.task(
-                "读取节点",
-                |s| s.api("GET", "/proxies", None),
-                move |ui, value| {
-                    clear_box(&area);
-                    ui.proxy_groups(&area, value)
-                },
-            );
-        } else {
-            let state = self.service.snapshot();
-            let count = state
-                .subscriptions
-                .iter()
-                .map(|s| s.nodes.len())
-                .sum::<usize>();
-            if count == 0 {
-                area.append(&empty(
-                    "network-wireless-symbolic",
-                    "从一个订阅开始",
-                    "添加订阅并关联到配置，启动内核后即可切换节点与测速。",
-                ));
-                return;
-            }
-            let search = gtk::SearchEntry::new();
-            search.set_placeholder_text(Some("搜索节点名称或协议"));
-            search.add_css_class("search");
-            area.append(&search);
-            let nodes = gtk::Box::new(gtk::Orientation::Vertical, 16);
-            area.append(&nodes);
-            let data: Vec<_> = state
-                .subscriptions
-                .iter()
-                .map(|s| (s.name.clone(), s.nodes.clone()))
-                .collect();
-            fill_saved_nodes(&nodes, &data, "");
-            search.connect_search_changed(move |search| {
-                fill_saved_nodes(&nodes, &data, &search.text())
-            });
-        }
-    }
-    fn proxy_groups(self: &Rc<Self>, area: &gtk::Box, value: Value) {
-        let Some(proxies) = value["proxies"].as_object() else {
-            area.append(&empty(
-                "network-wireless-symbolic",
-                "没有可选择的代理组",
-                "在配置中添加 selector 或 urltest 出站后重试。",
-            ));
-            return;
-        };
-        let mut groups: Vec<_> = proxies
-            .iter()
-            .filter(|(name, p)| p["all"].is_array() && !name.starts_with("aerobox-rule-download"))
-            .map(|(name, _)| name.clone())
-            .collect();
-        groups.sort();
-        if groups.is_empty() {
-            area.append(&empty(
-                "network-wireless-symbolic",
-                "没有可选择的代理组",
-                "当前配置没有 selector 或 urltest 代理组。",
-            ));
-            return;
-        }
-        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        controls.append(&label("代理组", "muted"));
-        let names: Vec<&str> = groups.iter().map(String::as_str).collect();
-        let dropdown = gtk::DropDown::from_strings(&names);
-        if let Some(index) = groups.iter().position(|g| g == &*self.node_group.borrow()) {
-            dropdown.set_selected(index as u32)
-        }
-        controls.append(&dropdown);
-        let search = gtk::SearchEntry::new();
-        search.set_placeholder_text(Some("搜索节点"));
-        search.set_hexpand(true);
-        search.add_css_class("search");
-        controls.append(&search);
-        let test = gtk::Button::with_label("全部测速");
-        test.add_css_class("compact-action");
-        controls.append(&test);
-        area.append(&controls);
-        let nodes = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        area.append(&nodes);
-        let weak = Rc::downgrade(self);
-        let data = Rc::new(value);
-        let groups = Rc::new(groups);
-        let render: Rc<dyn Fn()> = Rc::new({
-            let dropdown = dropdown.clone();
-            let search = search.clone();
-            let groups = groups.clone();
-            let data = data.clone();
-            move || {
-                if let Some(ui) = weak.upgrade()
-                    && let Some(group) = groups.get(dropdown.selected() as usize)
-                {
-                    ui.node_group.replace(group.clone());
-                    ui.fill_proxy_nodes(&nodes, &data, group, &search.text())
-                }
-            }
-        });
-        render();
-        let r = render.clone();
-        dropdown.connect_selected_notify(move |_| r());
-        let r = render;
-        search.connect_search_changed(move |_| r());
-        let weak = Rc::downgrade(self);
-        test.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                let Some(group) = groups.get(dropdown.selected() as usize) else {
-                    return;
-                };
-                let names: Vec<String> = data["proxies"][group]["all"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                ui.task(
-                    "节点测速",
-                    move |s| {
-                        let settings = s.snapshot().settings;
-                        let mut success = 0;
-                        for name in names {
-                            if s.api(
-                                "GET",
-                                &delay_path(&name, &settings.test_url, settings.test_timeout),
-                                None,
-                            )
-                            .is_ok()
-                            {
-                                success += 1;
-                            }
-                        }
-                        Ok(success)
-                    },
-                    |ui, success| {
-                        ui.notify(&format!("已完成测速，{success} 个节点可用"));
-                        ui.refresh(Page::Nodes)
-                    },
-                );
-            }
-        });
-        let mode_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        margin(&mode_row, 0, 0, 10, 0);
-        mode_row.append(&label("路由模式", "muted"));
-        let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        modes.add_css_class("linked");
-        modes.set_sensitive(false);
-        let mut choices: Vec<(&str, gtk::ToggleButton)> = Vec::new();
-        for (text, mode) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
-            let button = gtk::ToggleButton::with_label(text);
-            if let Some((_, first)) = choices.first() {
-                button.set_group(Some(first));
-            }
-            modes.append(&button);
-            choices.push((mode, button));
-        }
-        for (mode, button) in &choices {
-            let weak = Rc::downgrade(self);
-            let mode = mode.to_string();
-            let controls = modes.downgrade();
-            button.connect_clicked(move |button| {
-                if let (Some(ui), Some(controls)) = (weak.upgrade(), controls.upgrade()) {
-                    controls.set_sensitive(false);
-                    let mode = mode.clone();
-                    let controls = controls.clone();
-                    ui.button_task(
-                        button.upcast_ref::<gtk::Button>(),
-                        "切换中…",
-                        move |s| s.set_routing_mode(&mode),
-                        move |ui, result| {
-                            controls.set_sensitive(true);
-                            match result {
-                                Ok(_) => {
-                                    ui.notify("路由模式已切换");
-                                }
-                                Err(e) => {
-                                    ui.refresh(Page::Nodes);
-                                    ui.error("切换路由模式失败", e);
-                                }
-                            }
-                        },
-                    )
-                }
-            });
-        }
-        mode_row.append(&modes);
-        area.append(&mode_row);
-        self.task(
-            "读取路由模式",
-            |s| s.runtime_mode(),
-            move |_, mode| {
-                for (name, button) in choices {
-                    button.set_active(name == mode);
-                }
-                modes.set_sensitive(true);
-            },
-        );
-    }
-    fn fill_proxy_nodes(self: &Rc<Self>, area: &gtk::Box, data: &Value, group: &str, filter: &str) {
-        clear_box(area);
-        let group_data = &data["proxies"][group];
-        let current = group_data["now"].as_str().unwrap_or("");
-        let manual = group_data["type"] == "Selector";
-        if !manual {
-            area.append(&label("自动选择", "muted"));
-        }
-        let filter = filter.to_lowercase();
-        let flow = gtk::FlowBox::new();
-        flow.set_selection_mode(gtk::SelectionMode::None);
-        flow.set_column_spacing(12);
-        flow.set_row_spacing(12);
-        flow.set_homogeneous(true);
-        flow.set_min_children_per_line(1);
-        flow.set_max_children_per_line(3);
-        let mut count = 0;
-        for name in group_data["all"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if !name.to_lowercase().contains(&filter) {
-                continue;
-            }
-            count += 1;
-            let selected = name == current;
-            let node = &data["proxies"][name];
-            let item = card(gtk::Orientation::Vertical, 8);
-            item.add_css_class("node-card");
-            if selected {
-                item.add_css_class("selected")
-            }
-            let choose = gtk::Button::new();
-            choose.add_css_class("flat");
-            choose.set_tooltip_text(Some("选择此节点"));
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let title = label(name, "resource-name");
-            title.set_hexpand(true);
-            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            row.append(&title);
-            let check = gtk::Image::from_icon_name(if selected {
-                "object-select-symbolic"
-            } else {
-                "radio-symbolic"
-            });
-            check.add_css_class("muted");
-            row.append(&check);
-            if manual {
-                choose.set_child(Some(&row));
-            }
-            let weak = Rc::downgrade(self);
-            let name_owned = name.to_string();
-            let group = group.to_string();
-            choose.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    let name = name_owned.clone();
-                    let group = group.clone();
-                    ui.task(
-                        "选择节点",
-                        move |s| s.select_outbound(&group, &name),
-                        |ui, _| ui.refresh(Page::Nodes),
-                    )
-                }
-            });
-            if manual {
-                item.append(&choose);
-            } else {
-                item.append(&row);
-            }
-            let meta = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let protocol = label(node["type"].as_str().unwrap_or("代理"), "resource-subtitle");
-            protocol.set_hexpand(true);
-            meta.append(&protocol);
-            let delay = node["history"]
-                .as_array()
-                .and_then(|h| h.last())
-                .and_then(|h| h["delay"].as_u64());
-            let text = delay
-                .map(|v| {
-                    if v == 0 {
-                        "超时".to_string()
-                    } else {
-                        format!("{v} ms")
-                    }
-                })
-                .unwrap_or_else(|| "测速".into());
-            let test = gtk::Button::with_label(&text);
-            test.add_css_class("flat");
-            test.add_css_class("small");
-            let weak = Rc::downgrade(self);
-            let name = name.to_string();
-            test.connect_clicked(move |button| {
-                if let Some(ui) = weak.upgrade() {
-                    let name = name.clone();
-                    let weak_button = button.downgrade();
-                    button.set_label("测试中…");
-                    ui.task(
-                        "节点测速",
-                        move |s| {
-                            let settings = s.snapshot().settings;
-                            Ok(s.api(
-                                "GET",
-                                &delay_path(&name, &settings.test_url, settings.test_timeout),
-                                None,
-                            ))
-                        },
-                        move |_, result| {
-                            if let Some(button) = weak_button.upgrade() {
-                                match result {
-                                    Ok(value) => button.set_label(&format!(
-                                        "{} ms",
-                                        value["delay"].as_u64().unwrap_or(0)
-                                    )),
-                                    Err(e) => {
-                                        button.set_label("重试");
-                                        button.set_tooltip_text(Some(&format!("{e:#}")))
-                                    }
-                                }
-                            }
-                        },
-                    );
-                }
-            });
-            meta.append(&test);
-            item.append(&meta);
-            flow.insert(&item, -1);
-        }
-        if count == 0 {
-            area.append(&empty(
-                "edit-find-symbolic",
-                "没有匹配的节点",
-                "试试其他名称。",
-            ))
-        } else {
-            area.append(&flow)
-        }
     }
 
     fn connections(self: &Rc<Self>, heading: &gtk::Box) {
@@ -1678,70 +1334,6 @@ fn updated(time: u64) -> String {
 fn urlpart(text: &str) -> String {
     percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
-fn delay_path(name: &str, url: &str, timeout: u32) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("url", url)
-        .append_pair("timeout", &timeout.to_string())
-        .finish();
-    format!("/proxies/{}/delay?{query}", urlpart(name))
-}
-fn fill_saved_nodes(area: &gtk::Box, data: &[(String, Vec<Value>)], filter: &str) {
-    clear_box(area);
-    let filter = filter.to_lowercase();
-    for (subscription, nodes) in data {
-        let matching: Vec<_> = nodes
-            .iter()
-            .filter(|node| {
-                format!("{} {}", node["tag"], node["type"])
-                    .to_lowercase()
-                    .contains(&filter)
-            })
-            .collect();
-        if matching.is_empty() {
-            continue;
-        }
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.append(&label(subscription, "section-title"));
-        row.append(&pill(&format!("{} 个节点", matching.len()), ""));
-        area.append(&row);
-        let flow = gtk::FlowBox::new();
-        flow.set_selection_mode(gtk::SelectionMode::None);
-        flow.set_homogeneous(true);
-        flow.set_min_children_per_line(1);
-        flow.set_max_children_per_line(3);
-        flow.set_column_spacing(12);
-        flow.set_row_spacing(12);
-        for node in matching {
-            let item = card(gtk::Orientation::Vertical, 9);
-            item.add_css_class("node-card");
-            let name = label(
-                node["tag"].as_str().unwrap_or("未命名节点"),
-                "resource-name",
-            );
-            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            item.append(&name);
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            let protocol = label(
-                &node["type"].as_str().unwrap_or("代理").to_uppercase(),
-                "resource-subtitle",
-            );
-            protocol.set_hexpand(true);
-            row.append(&protocol);
-            row.append(&label("未连接", "muted small"));
-            item.append(&row);
-            flow.insert(&item, -1);
-        }
-        area.append(&flow);
-    }
-    if area.first_child().is_none() {
-        area.append(&empty(
-            "edit-find-symbolic",
-            "没有匹配的节点",
-            "试试其他名称或协议。",
-        ));
-    }
-}
-
 fn seed_smoke(service: &Service) -> Result<()> {
     service.update(|state| {
         state.settings.theme="light".into();state.settings.width=1180;state.settings.height=800;state.settings.auto_detect_ip=false;
@@ -1751,11 +1343,20 @@ fn seed_smoke(service: &Service) -> Result<()> {
             json!({"type":"hysteria2","tag":"新加坡 · 01","server":"sg.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
             json!({"type":"shadowsocks","tag":"美国 · 01","server":"us.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
             json!({"type":"trojan","tag":"德国 · 01","server":"de.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
-            json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080})],updated:model::now()-1200,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
+            json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080}),
+            json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
+            json!({"type":"urltest","tag":"自动选择","outbounds":["香港 · 01"]}),
+            json!({"type":"direct","tag":"默认"})],updated:model::now()-1200,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
         let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
+        let backup = Subscription { name: "备用订阅".into(), nodes: vec![
+            json!({"type":"socks","tag":"香港 · 01","server":"127.0.0.1","server_port":1081}),
+            json!({"type":"socks","tag":"备用 · 02","server":"127.0.0.1","server_port":1082}),
+            json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
+            json!({"type":"direct","tag":"默认"})], ..Subscription::default() };
         let mut primary=Profile::new("日常上网");primary.subscriptions.push(subscription.id.clone());primary.rulesets.push(rules.id.clone());
+        primary.selected_node=Some(model::NodeSelection{subscription_id:subscription.id.clone(),node_tag:"日本 · 01".into()});
         let mut second=Profile::new("工作网络");second.subscriptions.push(subscription.id.clone());
-        state.settings.active_profile=primary.id.clone();state.profiles=vec![primary,second];state.subscriptions=vec![subscription];state.rulesets=vec![rules];state.rulesets.extend(model::builtin_resources().1);Ok(())
+        state.settings.active_profile=primary.id.clone();state.profiles=vec![primary,second];state.subscriptions=vec![subscription,backup];state.rulesets=vec![rules];state.rulesets.extend(model::builtin_resources().1);Ok(())
     })
 }
 
@@ -1841,6 +1442,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 .active_window()
                 .context("在线规则编辑器未打开")
                 .and_then(|w| screenshot(&w, &parent.join("online-rules-editor.png"))),
+            18 => screenshot(&ui.window, &parent.join("nodes-selected.png")),
+            19 => screenshot(&ui.window, &parent.join("nodes-other-subscription.png")),
+            20 => screenshot(&ui.window, &parent.join("nodes-backup-selected.png")),
+            21 => screenshot(&ui.window, &parent.join("nodes-returned.png")),
+            22 => screenshot(&ui.window, &parent.join("nodes-compact.png")),
             _ => Ok(()),
         }
         .and_then(|()| {
@@ -2023,11 +1629,25 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     app.quit();
                     return glib::ControlFlow::Break;
                 }
+                ui.node_subscription
+                    .replace(ui.service.snapshot().subscriptions[0].id.clone());
+                ui.navigate(Page::Nodes);
+            }
+            17..=22 => {
+                if let Err(error) = nodes::smoke_nodes(&ui, current - 17) {
+                    eprintln!("Wayland smoke nodes: {error:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+                if current != 22 {
+                    return glib::ControlFlow::Continue;
+                }
                 let clipboard = ui.window.clipboard();
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();
                 let app = app.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings, subscription import, online rules and clipboard passed")}app.quit();});
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings, subscription import, online rules, node selection and clipboard passed")}app.quit();});
                 return glib::ControlFlow::Break;
             }
             _ => {
