@@ -9,7 +9,7 @@
 从 [GitHub Releases](https://github.com/imengying/AeroBoxForLinux/releases) 下载：Intel / AMD 电脑选择 `AeroBoxForLinux-linux-amd64.tar.gz`，ARM64 设备选择 `AeroBoxForLinux-linux-arm64.tar.gz`。
 
 ```sh
-sudo pacman -S --needed gtk4 libadwaita gtksourceview5
+sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg
 tar -xzf AeroBoxForLinux-linux-amd64.tar.gz
 cd AeroBoxForLinux-linux-amd64
 ./install.sh
@@ -63,14 +63,14 @@ function onSubscribe(nodes) {
 ## 从源码构建
 
 ```sh
-sudo pacman -S --needed rust gcc make pkgconf gtk4 libadwaita gtksourceview5
+sudo pacman -S --needed rust gcc make pkgconf gtk4 libadwaita gtksourceview5 librsvg
 git clone https://github.com/imengying/AeroBoxForLinux.git
 cd AeroBoxForLinux
 cargo build --release --locked
 ./target/release/AeroBox
 ```
 
-Rust 版本要求见 `Cargo.toml`。桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.4、GtkSourceView ≥ 5.6；Ubuntu 24.04 对应开发包为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev pkg-config`。
+Rust 版本要求见 `Cargo.toml`。桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.4、GtkSourceView ≥ 5.6；Ubuntu 24.04 对应开发包为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config`。librsvg 用于系统主题中的 SVG 图标；AeroBox 自身图标内嵌 PNG。
 
 ```sh
 make test     # 格式、Clippy 和单元测试

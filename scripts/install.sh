@@ -9,7 +9,8 @@ trap 'rm -f "$stage_binary"' EXIT
 trap 'exit 1' HUP INT TERM
 install -m755 "$package_dir/AeroBox" "$stage_binary"
 mv -f "$stage_binary" "$install_prefix/bin/AeroBox"
-install -Dm644 "$package_dir/io.github.imengying.AeroBoxForLinux.svg" "$install_prefix/share/icons/hicolor/scalable/apps/io.github.imengying.AeroBoxForLinux.svg"
+install -Dm644 "$package_dir/io.github.imengying.AeroBoxForLinux.png" "$install_prefix/share/icons/hicolor/512x512/apps/io.github.imengying.AeroBoxForLinux.png"
+rm -f "$install_prefix/share/icons/hicolor/scalable/apps/io.github.imengying.AeroBoxForLinux.svg"
 # Absolute Exec also works when ~/.local/bin is not in the graphical session PATH.
 "$install_prefix/bin/AeroBox" --install-desktop "$install_prefix"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$install_prefix/share/applications" || true; fi

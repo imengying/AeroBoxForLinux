@@ -228,18 +228,10 @@ impl Ui {
         margin(&brand, 24, 24, 2, 28);
         brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
         let data = glib::Bytes::from_static(include_bytes!(
-            "../../resources/io.github.imengying.AeroBoxForLinux.svg"
+            "../../resources/io.github.imengying.AeroBoxForLinux.png"
         ));
-        let stream = gio::MemoryInputStream::from_bytes(&data);
-        let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
-            &stream,
-            42,
-            42,
-            true,
-            None::<&gio::Cancellable>,
-        )
-        .expect("application icon");
-        let mark = gtk::Image::from_paintable(Some(&gtk::gdk::Texture::for_pixbuf(&pixbuf)));
+        let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
+        let mark = gtk::Image::from_paintable(Some(&texture));
         mark.set_pixel_size(42);
         let name = label("AeroBox", "brand");
         name.set_valign(gtk::Align::Center);

@@ -27,6 +27,11 @@ export GDK_BACKEND=wayland
 export GSK_RENDERER=cairo
 export G_DEBUG=fatal-criticals
 export GTK_A11Y=none
+# Opt-in regression check for desktops without SVG/Pixbuf loader packages.
+if [ "${AEROBOX_TEST_NO_SVG:-0}" = 1 ]; then
+  : > "$test_dir/pixbuf-loaders.cache"
+  export GDK_PIXBUF_MODULE_FILE="$test_dir/pixbuf-loaders.cache"
+fi
 unset DISPLAY
 weston --backend=headless-backend.so --use-pixman --width=1400 --height=1000 --socket="$WAYLAND_DISPLAY" --idle-time=0 --no-config --log="$test_dir/weston.log" &
 weston_pid=$!

@@ -21,6 +21,6 @@ trap 'exit 1' HUP INT TERM
 mkdir "$stage/$name"
 install -m755 "$binary" "$stage/$name/AeroBox"
 install -m755 scripts/install.sh scripts/uninstall.sh "$stage/$name/"
-install -m644 resources/io.github.imengying.AeroBoxForLinux.desktop resources/io.github.imengying.AeroBoxForLinux.svg README.md LICENSE "$stage/$name/"
+install -m644 resources/io.github.imengying.AeroBoxForLinux.desktop resources/io.github.imengying.AeroBoxForLinux.png README.md LICENSE "$stage/$name/"
 tar -C "$stage" -czf "$output_dir/$name.tar.gz" "$name"
 printf 'Package: %s/%s.tar.gz\n' "$output_dir" "$name"

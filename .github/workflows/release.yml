@@ -34,7 +34,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev pkg-config weston dbus-daemon fonts-noto-cjk
+          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config weston dbus-daemon fonts-noto-cjk
       - name: Check formatting and lint
         run: |
           cargo fmt --all --check
@@ -84,7 +84,7 @@ jobs:
             内置三种配置和基础规则集，下载自动跟随当前连接。
             支持内核管理、订阅、节点、配置、规则集、脚本、连接和日志。
 
-            Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5`
+            Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。
             从应用菜单启动 AeroBox；在设置中下载或指定 sing-box 1.14+ 内核。运行成品无需安装 Rust。
 
