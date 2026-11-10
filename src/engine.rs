@@ -1,6 +1,6 @@
 use crate::{
-    model::{self, Profile, RuleSet, State, Store, atomic_write, now, pretty},
-    platform, script, subscription,
+    model::{self, Profile, RuleSet, Settings, State, Store, atomic_write, now, pretty},
+    network, platform, script, subscription,
 };
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Method, blocking::Client};
@@ -10,8 +10,8 @@ use std::{
     collections::{HashSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read},
-    os::unix::process::CommandExt,
-    path::PathBuf,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -33,6 +33,7 @@ struct Running {
     child: Option<Child>,
     config: Value,
     started: Option<Instant>,
+    binary: Option<PathBuf>,
 }
 pub struct Service {
     pub store: Mutex<Store>,
@@ -134,8 +135,11 @@ impl Service {
     }
     pub fn core_binary(&self) -> Result<PathBuf> {
         let settings = self.snapshot().settings;
+        self.core_binary_for(&settings)
+    }
+    fn core_binary_for(&self, settings: &Settings) -> Result<PathBuf> {
         if !settings.core_path.is_empty() {
-            let p = PathBuf::from(settings.core_path);
+            let p = PathBuf::from(&settings.core_path);
             ensure!(p.is_file(), "内核路径不存在");
             return Ok(p.canonicalize()?);
         }
@@ -237,8 +241,36 @@ impl Service {
                 existing.push(rule)
             }
         }
-        let config = script::transform(&profile.script, "onGenerate", &config)?;
+        let mut config = script::transform(&profile.script, "onGenerate", &config)?;
         ensure!(config.is_object(), "配置脚本必须返回对象");
+        if config["experimental"]["clash_api"].is_object()
+            && config["experimental"]["clash_api"].get("secret").is_none()
+        {
+            config["experimental"]["clash_api"]["secret"] = json!(profile.id);
+        } else if config.get("experimental").is_none() {
+            config["experimental"] = json!({"clash_api":{"secret":profile.id}});
+        } else if config["experimental"].is_object()
+            && config["experimental"].get("clash_api").is_none()
+        {
+            config["experimental"]["clash_api"] = json!({"secret":profile.id});
+        }
+        let rule_tag = |id: &str| {
+            profile
+                .rulesets
+                .iter()
+                .any(|item| item == id)
+                .then(|| state.rulesets.iter().find(|rule| rule.id == id))
+                .flatten()
+                .map(|rule| rule.name.as_str())
+                .filter(|tag| {
+                    config["route"]["rule_set"].as_array().is_some_and(|rules| {
+                        rules.iter().any(|rule| rule["tag"].as_str() == Some(*tag))
+                    })
+                })
+        };
+        let lan_tag = rule_tag(model::BUILTIN_LAN_ID);
+        let ads_tag = rule_tag(model::BUILTIN_ADS_ID);
+        crate::config::apply_profile_settings(&mut config, &state.settings, lan_tag, ads_tag)?;
         Ok(config)
     }
     fn rule_path(&self, r: &RuleSet) -> PathBuf {
@@ -248,18 +280,40 @@ impl Service {
         self.check(&self.generate(id)?)
     }
     pub fn reload(&self) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
         ensure!(self.status().running, "请先启动内核");
-        // Keep the current connection alive if the edited profile is invalid.
-        self.check_profile(&self.snapshot().settings.active_profile)?;
-        self.stop()?;
-        self.start()
+        let state = self.snapshot();
+        let config = self.generate(&state.settings.active_profile)?;
+        let binary = self.core_binary_for(&state.settings)?;
+        self.check_with_binary(&config, &binary)?;
+        self.ensure_tun_available(&config, &binary)?;
+        let (previous, previous_binary) = self.running_config()?;
+        let proxy = self.status().proxy;
+        let result = self
+            .stop_locked()
+            .and_then(|()| self.start_config_locked(config, binary, proxy));
+        if let Err(error) = result {
+            let _ = self.stop_locked();
+            let restore = self.start_config_locked(previous, previous_binary, proxy);
+            return match restore {
+                Ok(()) => Err(error.context("重新加载失败，已恢复原连接")),
+                Err(restore) => {
+                    let _ = self.stop_locked();
+                    Err(error.context(format!("重新加载失败，恢复原连接失败：{restore:#}")))
+                }
+            };
+        }
+        Ok(())
     }
     pub fn check(&self, config: &Value) -> Result<()> {
+        self.check_with_binary(config, &self.core_binary()?)
+    }
+    fn check_with_binary(&self, config: &Value, binary: &Path) -> Result<()> {
         let dir = self.dir().join("core");
         fs::create_dir_all(&dir)?;
         let tmp = tempfile::NamedTempFile::new_in(&dir)?;
         atomic_write(tmp.path(), &serde_json::to_vec(config)?, 0o600)?;
-        let mut cmd = Command::new(self.core_binary()?);
+        let mut cmd = Command::new(binary);
         cmd.args(["check", "-c"]).arg(tmp.path()).arg("-D").arg(dir);
         run_command(cmd, Duration::from_secs(15)).context("sing-box 配置检查失败")?;
         Ok(())
@@ -275,11 +329,22 @@ impl Service {
         ensure!(!self.status().running, "内核已运行");
         let state = self.snapshot();
         let config = self.generate(&state.settings.active_profile)?;
-        self.check(&config)?;
+        let binary = self.core_binary_for(&state.settings)?;
+        self.check_with_binary(&config, &binary)?;
+        self.ensure_tun_available(&config, &binary)?;
+        let result = self.start_config_locked(config, binary, state.settings.system_proxy);
+        if result.is_err() {
+            let _ = self.stop_locked();
+        }
+        result
+    }
+    fn start_config_locked(&self, config: Value, binary: PathBuf, proxy: bool) -> Result<()> {
+        ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
+        ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
         let dir = self.dir().join("core");
         let path = dir.join("config.json");
         atomic_write(&path, &serde_json::to_vec_pretty(&config)?, 0o600)?;
-        let mut cmd = Command::new(self.core_binary()?);
+        let mut cmd = Command::new(&binary);
         cmd.args(["run", "--disable-color", "-c"])
             .arg(path)
             .arg("-D")
@@ -309,6 +374,7 @@ impl Service {
             r.child = Some(child);
             r.config = config;
             r.started = Some(Instant::now());
+            r.binary = Some(binary);
         }
         thread::sleep(Duration::from_millis(200));
         {
@@ -319,8 +385,32 @@ impl Service {
                 bail!("内核启动后退出: {exit}。详情见日志。")
             }
         }
+        // The cache file can restore a mode different from default_mode. Match
+        // the generated configuration before exposing the connection as ready.
+        let api = self.running.lock().unwrap().config["experimental"]["clash_api"].clone();
+        if api["external_controller"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+        {
+            let mode = api["default_mode"].as_str().unwrap_or("rule");
+            let until = Instant::now() + Duration::from_secs(3);
+            loop {
+                match self.api_with_timeout(
+                    "PATCH",
+                    "/configs",
+                    Some(&json!({"mode":mode})),
+                    Duration::from_millis(500),
+                ) {
+                    Ok(_) => break,
+                    Err(error) if Instant::now() >= until => {
+                        return Err(error.context("内核模式同步失败"));
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(30)),
+                }
+            }
+        }
         self.log("内核已启动");
-        if state.settings.system_proxy {
+        if proxy {
             self.set_proxy(true)?
         };
         Ok(())
@@ -328,6 +418,9 @@ impl Service {
     pub fn stop(&self) -> Result<()> {
         self.desired_running.store(false, Ordering::SeqCst);
         let _op = self.operation.lock().unwrap();
+        self.stop_locked()
+    }
+    fn stop_locked(&self) -> Result<()> {
         let mut child = {
             let mut r = self.running.lock().unwrap();
             r.started = None;
@@ -373,9 +466,21 @@ impl Service {
         let inbound = config["inbounds"]
             .as_array()
             .and_then(|a| {
-                a.iter().find(|v| {
-                    ["mixed", "http", "socks"].contains(&v["type"].as_str().unwrap_or(""))
-                })
+                a.iter()
+                    .filter(|v| {
+                        ["mixed", "http", "socks"].contains(&v["type"].as_str().unwrap_or(""))
+                            && v["users"].as_array().is_none_or(Vec::is_empty)
+                            && v["listen_port"]
+                                .as_u64()
+                                .is_some_and(|port| (1..=65535).contains(&port))
+                    })
+                    .min_by_key(|v| {
+                        if v["tag"] == "aerobox-download-in" {
+                            0
+                        } else {
+                            1
+                        }
+                    })
             })
             .context("配置没有 HTTP / SOCKS 入站")?;
         ensure!(
@@ -385,7 +490,8 @@ impl Service {
             "系统代理需要无认证的本地 HTTP / SOCKS 入站"
         );
         let host = match inbound["listen"].as_str().unwrap_or("127.0.0.1") {
-            "0.0.0.0" | "::" => "127.0.0.1",
+            "0.0.0.0" | "" => "127.0.0.1",
+            "::" => "::1",
             h => h,
         };
         let port = inbound["listen_port"].as_u64().context("入站缺少端口")?;
@@ -408,6 +514,215 @@ impl Service {
             *proxy = None;
             self.proxy_active.store(false, Ordering::SeqCst);
         };
+        Ok(())
+    }
+
+    fn running_config(&self) -> Result<(Value, PathBuf)> {
+        let running = self.running.lock().unwrap();
+        ensure!(running.child.is_some(), "请先启动内核");
+        Ok((
+            running.config.clone(),
+            running.binary.clone().context("运行内核路径不可用")?,
+        ))
+    }
+
+    pub fn set_routing_mode(&self, mode: &str) -> Result<()> {
+        ensure!(
+            matches!(mode, "rule" | "global" | "direct"),
+            "无效的出站模式"
+        );
+        let _op = self.operation.lock().unwrap();
+        let previous = self.snapshot().settings.routing_mode;
+        let running = self.status().running;
+        if running && let Err(error) = self.set_runtime_mode(mode) {
+            return Err(match self.set_runtime_mode(&previous) {
+                Ok(()) => error,
+                Err(restore) => error.context(format!("恢复出站模式失败：{restore:#}")),
+            });
+        }
+        if let Err(error) = self.update(|state| {
+            state.settings.routing_mode = mode.into();
+            Ok(())
+        }) {
+            if running && let Err(restore) = self.set_runtime_mode(&previous) {
+                return Err(error.context(format!("恢复出站模式失败：{restore:#}")));
+            }
+            return Err(error);
+        }
+        if running {
+            self.running.lock().unwrap().config["experimental"]["clash_api"]["default_mode"] =
+                json!(mode);
+        }
+        Ok(())
+    }
+
+    fn set_runtime_mode(&self, mode: &str) -> Result<()> {
+        self.api("PATCH", "/configs", Some(&json!({"mode":mode})))?;
+        let actual = self.api("GET", "/configs", None)?;
+        ensure!(actual["mode"].as_str() == Some(mode), "内核未应用出站模式");
+        Ok(())
+    }
+
+    /// Validate before interrupting the current core. If the new listener or
+    /// TUN cannot start, restore both persisted settings and the old process.
+    pub fn apply_settings(&self, settings: Settings) -> Result<()> {
+        settings.validate()?;
+        let url = url::Url::parse(&settings.test_url).context("测速地址无效")?;
+        ensure!(
+            matches!(url.scheme(), "http" | "https"),
+            "测速地址必须使用 HTTP 或 HTTPS"
+        );
+        ensure!(
+            (500..=60_000).contains(&settings.test_timeout),
+            "测速超时必须在 500 到 60000 毫秒之间"
+        );
+        let _op = self.operation.lock().unwrap();
+        let previous_settings = self.snapshot().settings;
+        if !self.status().running {
+            return self.update(|state| {
+                state.settings = settings;
+                Ok(())
+            });
+        }
+        let mut candidate = self.snapshot();
+        candidate.settings = settings.clone();
+        candidate.validate()?;
+        let profile = candidate
+            .profiles
+            .iter()
+            .find(|profile| profile.id == candidate.settings.active_profile)
+            .context("请选择一个配置")?;
+        let config = self.generate_profile(&candidate, profile)?;
+        let binary = self.core_binary_for(&settings)?;
+        self.check_with_binary(&config, &binary)?;
+        self.ensure_tun_available(&config, &binary)?;
+        let (old_config, old_binary) = self.running_config()?;
+        let old_proxy = self.status().proxy;
+        let proxy = if previous_settings.system_proxy == settings.system_proxy {
+            old_proxy
+        } else {
+            settings.system_proxy
+        };
+        self.update(|state| {
+            state.settings = settings;
+            Ok(())
+        })?;
+        let result = if config == old_config && binary == old_binary {
+            if proxy == old_proxy {
+                Ok(())
+            } else {
+                self.set_proxy(proxy)
+            }
+        } else {
+            self.stop_locked()
+                .and_then(|()| self.start_config_locked(config, binary, proxy))
+        };
+        if let Err(error) = result {
+            let restore_settings = self.update(|state| {
+                state.settings = previous_settings;
+                Ok(())
+            });
+            let _ = self.stop_locked();
+            let restore_core = self.start_config_locked(old_config, old_binary, old_proxy);
+            if restore_core.is_err() {
+                let _ = self.stop_locked();
+            }
+            if let Err(restore) = restore_settings.and(restore_core) {
+                return Err(error.context(format!("应用设置失败，恢复失败：{restore:#}")));
+            }
+            return Err(error.context("应用设置失败，已恢复原连接"));
+        }
+        Ok(())
+    }
+
+    pub fn network_info(&self) -> Result<network::NetworkInfo> {
+        let (pid, config) = {
+            let running = self.running.lock().unwrap();
+            (
+                running.child.as_ref().map(Child::id),
+                running.child.as_ref().map(|_| running.config.clone()),
+            )
+        };
+        let ipv6 = self.snapshot().settings.ipv6;
+        let client = network::client(config.as_ref(), Duration::from_secs(4))?;
+        let info = network::detect(client, ipv6, config.is_some())?;
+        let unchanged = {
+            let running = self.running.lock().unwrap();
+            running.child.as_ref().map(Child::id) == pid
+                && config
+                    .as_ref()
+                    .is_none_or(|config| &running.config == config)
+        };
+        ensure!(
+            unchanged && self.snapshot().settings.ipv6 == ipv6,
+            "连接已变化，请重新检测"
+        );
+        Ok(info)
+    }
+
+    pub fn memory_usage(&self) -> network::MemoryUsage {
+        network::memory_usage(self.status().pid)
+    }
+
+    fn ensure_tun_available(&self, config: &Value, binary: &Path) -> Result<()> {
+        if config["inbounds"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["type"] == "tun"))
+        {
+            ensure!(
+                tun_available(binary)?,
+                "虚拟网卡需要网络管理权限，请先在设置中授权"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn tun_available(&self) -> Result<bool> {
+        tun_available(&self.core_binary()?)
+    }
+
+    /// Called only after the user chooses the dedicated TUN authorization action.
+    pub fn authorize_tun(&self) -> Result<()> {
+        let binary = self.core_binary()?;
+        ensure!(
+            binary.file_name().is_some_and(|name| name == "sing-box"),
+            "只允许授权 sing-box 内核文件"
+        );
+        let metadata = fs::metadata(&binary)?;
+        ensure!(
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            "内核不是可执行文件"
+        );
+        ensure!(
+            metadata.permissions().mode() & 0o022 == 0,
+            "请先移除内核的组或其他用户写入权限"
+        );
+        let mut header = [0; 4];
+        fs::File::open(&binary)?.read_exact(&mut header)?;
+        ensure!(&header == b"\x7fELF", "只允许授权 sing-box 原生可执行文件");
+        let mut version = Command::new(&binary);
+        version.arg("version");
+        ensure!(
+            run_command(version, Duration::from_secs(5))?.starts_with("sing-box version "),
+            "所选文件不是 sing-box 内核"
+        );
+        let pkexec = Path::new("/usr/bin/pkexec");
+        ensure!(pkexec.is_file(), "请安装 polkit 并启用桌面授权代理");
+        let setcap = ["/usr/sbin/setcap", "/usr/bin/setcap", "/sbin/setcap"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())
+            .context("请安装 libcap（setcap）")?;
+        let mut command = Command::new(pkexec);
+        command
+            .arg(setcap)
+            .arg("cap_net_admin,cap_net_bind_service=+ep")
+            .arg(&binary);
+        run_command(command, Duration::from_secs(120)).context("虚拟网卡授权未完成")?;
+        ensure!(
+            tun_available(&binary)?,
+            "权限未生效，请检查系统能力限制或文件系统挂载选项"
+        );
         Ok(())
     }
     pub fn api(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
@@ -474,14 +789,11 @@ impl Service {
         }
     }
     fn client(&self) -> Result<Client> {
-        let settings = self.snapshot().settings;
-        let mut c = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .user_agent(concat!("AeroBox/", env!("CARGO_PKG_VERSION")));
-        if !settings.request_proxy.is_empty() {
-            c = c.proxy(reqwest::Proxy::all(&settings.request_proxy)?)
+        let config = {
+            let running = self.running.lock().unwrap();
+            running.child.as_ref().map(|_| running.config.clone())
         };
-        Ok(c.build()?)
+        network::client(config.as_ref(), Duration::from_secs(60))
     }
     fn download(&self, url: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap)> {
         let parsed = url::Url::parse(url)?;
@@ -582,6 +894,18 @@ impl Service {
         })?;
         self.log(format!("订阅「{}」更新完成", sub.name));
         Ok(())
+    }
+    pub fn update_all_subscriptions(&self) -> Result<usize> {
+        let mut updated = 0;
+        let mut errors = Vec::new();
+        for subscription in self.snapshot().subscriptions {
+            match self.update_subscription(&subscription.id) {
+                Ok(()) => updated += 1,
+                Err(error) => errors.push(format!("{}：{error:#}", subscription.name)),
+            }
+        }
+        ensure!(errors.is_empty(), "{}", errors.join("\n"));
+        Ok(updated)
     }
     pub fn update_ruleset(&self, id: &str) -> Result<()> {
         let mut r = self
@@ -689,8 +1013,6 @@ impl Service {
         })
     }
     pub fn install_core(&self) -> Result<()> {
-        let _op = self.operation.lock().unwrap();
-        ensure!(!self.status().running, "请先停止内核");
         let release: Value = self
             .client()?
             .get("https://api.github.com/repos/SagerNet/sing-box/releases/latest")
@@ -738,14 +1060,70 @@ impl Service {
                 ensure!(entry.size() <= 128 * 1024 * 1024, "内核文件过大");
                 let mut binary = vec![];
                 entry.read_to_end(&mut binary)?;
+                let _op = self.operation.lock().unwrap();
                 atomic_write(&self.dir().join("core/sing-box"), &binary, 0o700)?;
-                self.log(format!("sing-box {version} 安装完成"));
+                self.log(format!(
+                    "sing-box {version} 安装完成{}",
+                    if self.status().running {
+                        "，下次启动生效"
+                    } else {
+                        ""
+                    }
+                ));
                 return Ok(());
             }
         }
         bail!("归档内未找到 sing-box")
     }
 }
+
+fn tun_available(binary: &Path) -> Result<bool> {
+    if fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let status = fs::read_to_string("/proc/self/status")?;
+    let capability = 1_u64 << 12; // CAP_NET_ADMIN
+    let bits = |name: &str| -> Option<u64> {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+    };
+    if bits("CapEff:").is_some_and(|effective| effective & capability != 0) {
+        return Ok(true);
+    }
+    if bits("CapBnd:").is_none_or(|bounding| bounding & capability == 0)
+        || status.lines().any(|line| {
+            line.strip_prefix("NoNewPrivs:")
+                .is_some_and(|value| value.trim() == "1")
+        })
+    {
+        return Ok(false);
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(binary.as_os_str().as_bytes())?;
+    let mut attribute = [0_u8; 24];
+    let length = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"security.capability".as_ptr(),
+            attribute.as_mut_ptr().cast(),
+            attribute.len(),
+        )
+    };
+    if length < 12 {
+        return Ok(false);
+    }
+    let magic = u32::from_le_bytes(attribute[0..4].try_into().unwrap());
+    let permitted = u32::from_le_bytes(attribute[4..8].try_into().unwrap());
+    Ok(magic & 1 != 0 && permitted & capability as u32 != 0)
+}
+
 fn push_log(logs: &Mutex<VecDeque<String>>, line: String) {
     let mut logs = logs.lock().unwrap();
     logs.push_back(line);

@@ -32,7 +32,21 @@ pub struct Settings {
     pub auto_start: bool,
     pub auto_restart: bool,
     pub system_proxy: bool,
-    pub request_proxy: String,
+    pub routing_mode: String,
+    pub ipv6: bool,
+    pub tun_enabled: bool,
+    pub tun_stack: String,
+    pub tun_mtu: u32,
+    pub strict_route: bool,
+    pub allow_lan: bool,
+    pub sniff: bool,
+    pub dns_hijack: bool,
+    pub dns_cache: bool,
+    pub block_ads: bool,
+    pub bypass_lan: bool,
+    pub auto_detect_ip: bool,
+    pub update_subscriptions_on_start: bool,
+    pub log_level: String,
     pub test_url: String,
     pub test_timeout: u32,
     pub width: i32,
@@ -47,12 +61,55 @@ impl Default for Settings {
             auto_start: false,
             auto_restart: false,
             system_proxy: false,
-            request_proxy: String::new(),
+            routing_mode: "rule".into(),
+            ipv6: true,
+            tun_enabled: false,
+            tun_stack: "system".into(),
+            tun_mtu: 1500,
+            strict_route: true,
+            allow_lan: false,
+            sniff: true,
+            dns_hijack: true,
+            dns_cache: true,
+            block_ads: false,
+            bypass_lan: true,
+            auto_detect_ip: true,
+            update_subscriptions_on_start: false,
+            log_level: "info".into(),
             test_url: "https://www.gstatic.com/generate_204".into(),
             test_timeout: 5000,
             width: 1180,
             height: 800,
         }
+    }
+}
+
+impl Settings {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.routing_mode.as_str(), "rule" | "global" | "direct"),
+            "无效的出站模式"
+        );
+        ensure!(
+            matches!(self.tun_stack.as_str(), "system" | "gvisor" | "mixed"),
+            "无效的 TUN 协议栈"
+        );
+        ensure!(
+            (576..=9000).contains(&self.tun_mtu),
+            "MTU 必须在 576 到 9000 之间"
+        );
+        ensure!(
+            !self.tun_enabled || !self.ipv6 || self.tun_mtu >= 1280,
+            "IPv6 的 TUN MTU 不能小于 1280"
+        );
+        ensure!(
+            matches!(
+                self.log_level.as_str(),
+                "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "panic"
+            ),
+            "无效的日志级别"
+        );
+        Ok(())
     }
 }
 
@@ -148,6 +205,140 @@ impl Default for RuleSet {
     }
 }
 
+pub const BUILTIN_LAN_ID: &str = "aeb00000-0000-4000-8000-000000000001";
+pub const BUILTIN_DOMESTIC_ID: &str = "aeb00000-0000-4000-8000-000000000002";
+pub const BUILTIN_ADS_ID: &str = "aeb00000-0000-4000-8000-000000000003";
+
+/// Small, editable local lists. They do not claim to be a complete GeoIP or
+/// advertising database, and need no downloads before the first connection.
+pub fn builtin_resources() -> (Vec<Profile>, Vec<RuleSet>) {
+    let rulesets = vec![
+        RuleSet {
+            id: BUILTIN_LAN_ID.into(),
+            name: "局域网".into(),
+            content: json!({"version":3,"rules":[{"ip_cidr":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","169.254.0.0/16","100.64.0.0/10","::1/128","fc00::/7","fe80::/10"]},{"domain_suffix":["localhost","local","lan"]}]}),
+            ..RuleSet::default()
+        },
+        RuleSet {
+            id: BUILTIN_DOMESTIC_ID.into(),
+            name: "国内常用域名".into(),
+            content: json!({"version":3,"rules":[{"domain_suffix":["baidu.com","qq.com","tencent.com","aliyun.com","alipay.com","taobao.com","tmall.com","jd.com","bilibili.com","163.com","126.com","sina.com.cn","weibo.com","zhihu.com","douban.com","mi.com"]}]}),
+            ..RuleSet::default()
+        },
+        RuleSet {
+            id: BUILTIN_ADS_ID.into(),
+            name: "常见广告".into(),
+            content: json!({"version":3,"rules":[{"domain_suffix":["doubleclick.net","googlesyndication.com","googleadservices.com","adservice.google.com","ad.qq.com","pos.baidu.com","cpro.baidu.com"]}]}),
+            ..RuleSet::default()
+        },
+    ];
+    let mut profiles = vec![];
+    for (index, name) in ["智能分流", "代理优先", "直连网络"].iter().enumerate() {
+        let mut profile = Profile::new(name);
+        profile.id = format!("aeb10000-0000-4000-8000-{:012}", index + 1);
+        profile.rulesets = rulesets.iter().map(|r| r.id.clone()).collect();
+        profile.config["route"]["rules"] = json!([]);
+        if index == 0 {
+            profile.config["route"]["rules"] = json!([
+                {"rule_set":"国内常用域名","action":"route","outbound":"direct"}
+            ]);
+            profile.config["dns"]["rules"] = json!([
+                {"rule_set":"国内常用域名","action":"route","server":"dns-local"}
+            ]);
+        }
+        if index == 2 {
+            profile.config["route"]["final"] = json!("direct");
+        } else {
+            profile.config["dns"]["servers"].as_array_mut().unwrap().push(json!({
+                "type":"https","tag":"dns-remote","server":"1.1.1.1","path":"/dns-query","detour":"proxy"
+            }));
+            profile.config["dns"]["final"] = json!("dns-remote");
+        }
+        profiles.push(profile);
+    }
+    (profiles, rulesets)
+}
+
+/// Add missing presets while preserving existing edits, selection and IDs.
+pub fn add_builtin_resources(state: &mut State) -> Result<usize> {
+    let (mut profiles, rulesets) = builtin_resources();
+    let mut added = 0;
+    for rule in rulesets {
+        if let Some(existing) = state
+            .rulesets
+            .iter()
+            .find(|r| r.id == rule.id || r.name == rule.name)
+        {
+            for profile in &mut profiles {
+                for id in &mut profile.rulesets {
+                    if *id == rule.id {
+                        *id = existing.id.clone();
+                    }
+                }
+                replace_rule_tag(&mut profile.config, &rule.name, &existing.name);
+            }
+        } else {
+            state.rulesets.push(rule);
+            added += 1;
+        }
+    }
+    for mut profile in profiles {
+        if state.profiles.iter().any(|p| p.id == profile.id) {
+            continue;
+        }
+        if state.profiles.iter().any(|p| p.name == profile.name) {
+            profile.name.push_str("（内置）");
+        }
+        state.profiles.push(profile);
+        added += 1;
+    }
+    if state.settings.active_profile.is_empty() {
+        state.settings.active_profile = state
+            .profiles
+            .first()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
+    }
+    state.validate()?;
+    Ok(added)
+}
+
+fn replace_rule_tag(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "rule_set" {
+                    if child.as_str() == Some(from) {
+                        *child = json!(to);
+                    } else if let Some(tags) = child.as_array_mut() {
+                        for tag in tags {
+                            if tag.as_str() == Some(from) {
+                                *tag = json!(to);
+                            }
+                        }
+                    }
+                } else {
+                    replace_rule_tag(child, from, to);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_rule_tag(item, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn rename_rule_references(state: &mut State, id: &str, from: &str, to: &str) {
+    for profile in &mut state.profiles {
+        if profile.rulesets.iter().any(|linked| linked == id) {
+            replace_rule_tag(&mut profile.config, from, to);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -159,22 +350,23 @@ pub struct State {
 }
 impl Default for State {
     fn default() -> Self {
-        let p = Profile::new("默认配置");
+        let (profiles, rulesets) = builtin_resources();
         Self {
             schema: 1,
             settings: Settings {
-                active_profile: p.id.clone(),
+                active_profile: profiles[0].id.clone(),
                 ..Settings::default()
             },
-            profiles: vec![p],
+            profiles,
             subscriptions: vec![],
-            rulesets: vec![],
+            rulesets,
         }
     }
 }
 impl State {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.schema == 1, "不支持的数据格式版本 {}", self.schema);
+        self.settings.validate()?;
         let mut ids = HashSet::new();
         for (id, name) in self
             .profiles
@@ -327,6 +519,54 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn existing_settings_migrate_without_restoring_the_download_proxy() {
+        let settings: Settings = serde_json::from_value(json!({
+            "theme":"dark", "request_proxy":"http://127.0.0.1:7890", "auto_start":true
+        }))
+        .unwrap();
+        settings.validate().unwrap();
+        assert_eq!(settings.theme, "dark");
+        assert!(settings.auto_start && settings.ipv6);
+        assert_eq!(settings.routing_mode, "rule");
+        assert!(!settings.tun_enabled);
+        assert!(
+            serde_json::to_value(settings)
+                .unwrap()
+                .get("request_proxy")
+                .is_none()
+        );
+    }
+    #[test]
+    fn adding_presets_preserves_edits_and_reconnects_renamed_rules() {
+        let mut state = State::default();
+        let active = state.settings.active_profile.clone();
+        state.profiles[0].name = "我的配置".into();
+        rename_rule_references(
+            &mut state,
+            BUILTIN_DOMESTIC_ID,
+            "国内常用域名",
+            "自定义国内域名",
+        );
+        state.rulesets[1].name = "自定义国内域名".into();
+        state.rulesets[1].content["rules"] = json!([{"domain_suffix":"example.cn"}]);
+        let before = pretty(&state);
+        assert_eq!(add_builtin_resources(&mut state).unwrap(), 0);
+        assert_eq!(pretty(&state), before);
+        state.profiles.clear();
+        state.settings.active_profile.clear();
+        assert_eq!(add_builtin_resources(&mut state).unwrap(), 3);
+        assert_eq!(state.settings.active_profile, active);
+        assert_eq!(
+            state.profiles[0].config["route"]["rules"][0]["rule_set"],
+            "自定义国内域名"
+        );
+        assert_eq!(
+            state.rulesets[1].content["rules"][0]["domain_suffix"],
+            "example.cn"
+        );
+        state.validate().unwrap();
+    }
+    #[test]
     fn failed_update_leaves_state_and_disk_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(Some(dir.path().into())).unwrap();
@@ -341,7 +581,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(old, fs::read(dir.path().join("state.json")).unwrap());
-        assert_eq!(store.state.profiles[0].name, "默认配置");
+        assert_eq!(store.state.profiles[0].name, "智能分流");
     }
     #[test]
     fn corrupt_state_is_not_replaced() {

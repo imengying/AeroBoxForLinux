@@ -1,5 +1,6 @@
 mod editors;
 mod overview;
+mod settings;
 
 use adw::prelude::*;
 use aerobox_for_linux::{
@@ -33,8 +34,8 @@ impl Page {
     const ALL: [Self; 8] = [
         Self::Overview,
         Self::Nodes,
-        Self::Profiles,
         Self::Subscriptions,
+        Self::Profiles,
         Self::Rules,
         Self::Connections,
         Self::Logs,
@@ -62,18 +63,6 @@ impl Page {
             Self::Connections => "network-transmit-receive-symbolic",
             Self::Logs => "utilities-terminal-symbolic",
             Self::Settings => "preferences-system-symbolic",
-        }
-    }
-    fn subtitle(self) -> &'static str {
-        match self {
-            Self::Overview => "实时流量、连接状态，一目了然。",
-            Self::Nodes => "选择代理节点，查看可用性与连接延迟。",
-            Self::Profiles => "管理 sing-box 配置、订阅引用与处理脚本。",
-            Self::Subscriptions => "集中管理节点来源，按需更新与筛选。",
-            Self::Rules => "让指定的域名与地址走合适的路线。",
-            Self::Connections => "查看当前流量去向，管理活跃连接。",
-            Self::Logs => "查看内核输出，定位连接与配置问题。",
-            Self::Settings => "按照你的习惯设置 AeroBox。",
         }
     }
 }
@@ -112,12 +101,59 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
         ui.window.present();
         if let Some(path) = smoke.clone() {
             smoke_sequence(ui.clone(), path, activate_failed.clone());
-        } else if ui.service.snapshot().settings.auto_start {
-            ui.task(
-                "启动内核",
-                |s| s.start(),
-                |ui, ()| ui.refresh(Page::Overview),
-            );
+        } else {
+            let settings = ui.service.snapshot().settings;
+            if settings.auto_start || settings.update_subscriptions_on_start {
+                ui.task(
+                    "启动",
+                    move |s| {
+                        let result = (|| {
+                            let state = s.snapshot();
+                            let needs_nodes = state
+                                .profiles
+                                .iter()
+                                .find(|p| p.id == settings.active_profile)
+                                .is_some_and(|p| {
+                                    p.subscriptions.iter().any(|id| {
+                                        state
+                                            .subscriptions
+                                            .iter()
+                                            .any(|sub| &sub.id == id && sub.nodes.is_empty())
+                                    })
+                                });
+                            let update_first = settings.auto_start
+                                && settings.update_subscriptions_on_start
+                                && needs_nodes;
+                            if update_first {
+                                s.update_all_subscriptions()?;
+                            }
+                            let start = if settings.auto_start {
+                                s.start()
+                            } else {
+                                Ok(())
+                            };
+                            let update = if settings.update_subscriptions_on_start && !update_first
+                            {
+                                s.update_all_subscriptions()
+                            } else {
+                                Ok(0)
+                            };
+                            start?;
+                            if update? > 0 && settings.auto_start {
+                                s.reload()?;
+                            }
+                            Ok(())
+                        })();
+                        Ok(result)
+                    },
+                    |ui, result: Result<()>| {
+                        ui.refresh(Page::Overview);
+                        if let Err(e) = result {
+                            ui.error("启动失败", format!("{e:#}"));
+                        }
+                    },
+                );
+            }
         }
     });
     let monitor = Arc::downgrade(&service);
@@ -191,9 +227,20 @@ impl Ui {
         let brand = gtk::Box::new(gtk::Orientation::Horizontal, 11);
         margin(&brand, 24, 24, 2, 28);
         brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
-        let mark = gtk::Label::new(Some("A"));
-        mark.add_css_class("brand-mark");
-        mark.set_valign(gtk::Align::Center);
+        let data = glib::Bytes::from_static(include_bytes!(
+            "../../resources/io.github.imengying.AeroBoxForLinux.svg"
+        ));
+        let stream = gio::MemoryInputStream::from_bytes(&data);
+        let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
+            &stream,
+            42,
+            42,
+            true,
+            None::<&gio::Cancellable>,
+        )
+        .expect("application icon");
+        let mark = gtk::Image::from_paintable(Some(&gtk::gdk::Texture::for_pixbuf(&pixbuf)));
+        mark.set_pixel_size(42);
         let name = label("AeroBox", "brand");
         name.set_valign(gtk::Align::Center);
         brand.append(&mark);
@@ -412,9 +459,6 @@ impl Ui {
         let titles = gtk::Box::new(gtk::Orientation::Vertical, 7);
         titles.set_hexpand(true);
         titles.append(&label(page.title(), "page-title"));
-        let subtitle = label(page.subtitle(), "page-subtitle");
-        subtitle.set_wrap(true);
-        titles.append(&subtitle);
         heading.append(&titles);
         self.body.append(&heading);
         match page {
@@ -429,7 +473,34 @@ impl Ui {
         }
     }
 
+    fn navigate(self: &Rc<Self>, page: Page) {
+        let index = Page::ALL.iter().position(|p| *p == page).expect("page");
+        self.nav
+            .select_row(self.nav.row_at_index(index as i32).as_ref());
+    }
+    fn preset_button(self: &Rc<Self>, heading: &gtk::Box) {
+        let button = gtk::Button::with_label("添加内置");
+        button.add_css_class("compact-action");
+        button.set_valign(gtk::Align::Center);
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                match ui
+                    .service
+                    .update(|s| model::add_builtin_resources(s).map(|_| ()))
+                {
+                    Ok(()) => {
+                        ui.notify("内置配置与规则已就绪");
+                        ui.refresh(ui.page.get());
+                    }
+                    Err(e) => ui.error("添加失败", e),
+                }
+            }
+        });
+        heading.append(&button);
+    }
     fn profiles(self: &Rc<Self>, heading: &gtk::Box) {
+        self.preset_button(heading);
         let add = primary("新建配置", "list-add-symbolic");
         heading.append(&add);
         let weak = Rc::downgrade(self);
@@ -711,6 +782,7 @@ impl Ui {
     }
 
     fn rules(self: &Rc<Self>, heading: &gtk::Box) {
+        self.preset_button(heading);
         let add = primary("新建规则集", "list-add-symbolic");
         heading.append(&add);
         let weak = Rc::downgrade(self);
@@ -1413,215 +1485,6 @@ impl Ui {
         frame.append(&scroll);
         self.body.append(&frame);
         self.log_buffer.replace(Some(buffer));
-        self.body.append(&label(
-            "日志随内核实时更新；退出应用后不保留。",
-            "resource-subtitle",
-        ));
-    }
-
-    fn settings(self: &Rc<Self>, heading: &gtk::Box) {
-        self.body.add_css_class("settings-page");
-        let state = self.service.snapshot();
-        let settings = state.settings;
-        let save = primary("保存设置", "object-select-symbolic");
-        heading.append(&save);
-        let appearance = adw::PreferencesGroup::new();
-        appearance.set_title("外观与启动");
-        appearance.add_css_class("settings-group");
-        let theme = adw::ComboRow::builder()
-            .title("外观")
-            .subtitle("选择适合当前环境的配色")
-            .model(&gtk::StringList::new(&["跟随系统", "浅色", "深色"]))
-            .selected(match settings.theme.as_str() {
-                "light" => 1,
-                "dark" => 2,
-                _ => 0,
-            })
-            .build();
-        appearance.add(&theme);
-        theme.connect_selected_notify(|row| {
-            apply_theme(match row.selected() {
-                1 => "light",
-                2 => "dark",
-                _ => "system",
-            })
-        });
-        let autostart = switch_row(
-            "登录时启动",
-            "进入桌面后自动打开 AeroBox",
-            platform::autostart_enabled(),
-        );
-        appearance.add(&autostart);
-        let auto_core = switch_row(
-            "打开应用时连接",
-            "自动启动当前配置的内核",
-            settings.auto_start,
-        );
-        appearance.add(&auto_core);
-        let restart = switch_row(
-            "内核异常退出后重启",
-            "恢复意外中断的连接",
-            settings.auto_restart,
-        );
-        appearance.add(&restart);
-        let system_proxy = switch_row(
-            "连接时启用系统代理",
-            "启动内核后设置桌面代理，停止后恢复",
-            settings.system_proxy,
-        );
-        appearance.add(&system_proxy);
-        self.body.append(&appearance);
-        let core = adw::PreferencesGroup::new();
-        core.set_title("内核");
-        core.set_description(Some(
-            "使用系统中的 sing-box，或者下载稳定版本到应用数据目录。",
-        ));
-        let core_path = adw::EntryRow::builder()
-            .title("自定义内核路径（留空使用自动检测）")
-            .text(&settings.core_path)
-            .build();
-        let browse = icon_button("folder-open-symbolic", "选择 sing-box 可执行文件");
-        browse.set_valign(gtk::Align::Center);
-        core_path.add_suffix(&browse);
-        let parent = self.window.clone();
-        let path_entry = core_path.clone();
-        browse.connect_clicked(move |_| {
-            let dialog = gtk::FileDialog::builder()
-                .title("选择 sing-box 内核")
-                .build();
-            let entry = path_entry.clone();
-            dialog.open(Some(&parent), None::<&gio::Cancellable>, move |result| {
-                if let Ok(file) = result
-                    && let Some(path) = file.path()
-                {
-                    entry.set_text(&path.to_string_lossy())
-                }
-            })
-        });
-        core.add(&core_path);
-        let current = adw::ActionRow::builder()
-            .title("当前内核")
-            .subtitle(
-                self.service
-                    .core_binary()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "尚未安装 sing-box 内核".into()),
-            )
-            .build();
-        let install = gtk::Button::with_label("下载 / 更新");
-        install.set_valign(gtk::Align::Center);
-        install.add_css_class("compact-action");
-        current.add_suffix(&install);
-        let weak = Rc::downgrade(self);
-        let current_row = current.clone();
-        install.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                if ui.jobs.get() > 0 {
-                    return;
-                }
-                let current_row = current_row.clone();
-                ui.task(
-                    "安装内核",
-                    |s| s.install_core(),
-                    move |ui, ()| {
-                        ui.notify("内核已安装");
-                        if let Ok(path) = ui.service.core_binary() {
-                            current_row.set_subtitle(&path.to_string_lossy());
-                        }
-                    },
-                )
-            }
-        });
-        core.add(&current);
-        self.body.append(&core);
-        let network = adw::PreferencesGroup::new();
-        network.set_title("下载与测速");
-        let proxy = adw::EntryRow::builder()
-            .title("订阅 / 规则 / 内核下载代理（可留空）")
-            .text(&settings.request_proxy)
-            .build();
-        network.add(&proxy);
-        let test_url = adw::EntryRow::builder()
-            .title("延迟测试地址")
-            .text(&settings.test_url)
-            .build();
-        network.add(&test_url);
-        let timeout = adw::SpinRow::with_range(500.0, 30000.0, 500.0);
-        timeout.set_title("测试超时（毫秒）");
-        timeout.set_value(settings.test_timeout as f64);
-        network.add(&timeout);
-        self.body.append(&network);
-        let data = adw::PreferencesGroup::new();
-        data.set_title("应用数据");
-        let directory = self.service.dir();
-        let dir = adw::ActionRow::builder()
-            .title("数据目录")
-            .subtitle(directory.to_string_lossy().as_ref())
-            .build();
-        let open = icon_button("folder-open-symbolic", "打开数据目录");
-        open.set_valign(gtk::Align::Center);
-        dir.add_suffix(&open);
-        let weak = Rc::downgrade(self);
-        open.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                let file = gio::File::for_path(ui.service.dir());
-                let launcher = gtk::FileLauncher::new(Some(&file));
-                let weak = Rc::downgrade(&ui);
-                launcher.launch(Some(&ui.window), None::<&gio::Cancellable>, move |result| {
-                    if let (Err(e), Some(ui)) = (result, weak.upgrade()) {
-                        ui.error("打开目录失败", e)
-                    }
-                });
-            }
-        });
-        data.add(&dir);
-        let version = option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-        let about = adw::ActionRow::builder()
-            .title("AeroBox")
-            .subtitle(format!("{version} · Linux"))
-            .build();
-        let license = pill("开源软件", "");
-        about.add_suffix(&license);
-        data.add(&about);
-        self.body.append(&data);
-        let weak = Rc::downgrade(self);
-        save.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                let mut settings = ui.service.snapshot().settings;
-                settings.theme = match theme.selected() {
-                    1 => "light",
-                    2 => "dark",
-                    _ => "system",
-                }
-                .into();
-                settings.core_path = core_path.text().trim().into();
-                settings.auto_start = auto_core.is_active();
-                settings.auto_restart = restart.is_active();
-                settings.system_proxy = system_proxy.is_active();
-                settings.request_proxy = proxy.text().trim().into();
-                settings.test_url = test_url.text().trim().into();
-                settings.test_timeout = timeout.value() as u32;
-                if let Err(e) = url::Url::parse(&settings.test_url) {
-                    ui.error("测试地址无效", e);
-                    return;
-                }
-                if !settings.request_proxy.is_empty()
-                    && let Err(e) = url::Url::parse(&settings.request_proxy)
-                {
-                    ui.error("下载代理地址无效", e);
-                    return;
-                }
-                match platform::set_autostart(autostart.is_active()).and_then(|_| {
-                    ui.service.update(|s| {
-                        s.settings = settings;
-                        Ok(())
-                    })
-                }) {
-                    Ok(()) => ui.notify("设置已保存"),
-                    Err(e) => ui.error("保存设置失败", e),
-                }
-            }
-        });
     }
 
     fn import_profile(self: &Rc<Self>) {
@@ -1777,7 +1640,9 @@ fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
     text.append(&title);
     let subtitle = label(subtitle, "resource-subtitle");
     subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    text.append(&subtitle);
+    if !subtitle.text().is_empty() {
+        text.append(&subtitle);
+    }
     row.append(&text);
     row
 }
@@ -1931,7 +1796,7 @@ fn fill_saved_nodes(area: &gtk::Box, data: &[(String, Vec<Value>)], filter: &str
 
 fn seed_smoke(service: &Service) -> Result<()> {
     service.update(|state| {
-        state.settings.theme="light".into();state.settings.width=1180;state.settings.height=800;
+        state.settings.theme="light".into();state.settings.width=1180;state.settings.height=800;state.settings.auto_detect_ip=false;
         let subscription=Subscription {name:"日常连接".into(),nodes:vec![
             json!({"type":"shadowsocks","tag":"香港 · 01","server":"hk.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
             json!({"type":"trojan","tag":"日本 · 01","server":"jp.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
@@ -2003,6 +1868,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 .context("配置编辑器没有打开")
                 .and_then(|w| screenshot(&w, &parent.join("profile-editor.png"))),
             8 => screenshot(&ui.window, &parent.join("settings.png")),
+            9 => screenshot(&ui.window, &parent.join("settings-network.png")),
             _ => Ok(()),
         };
         if let Err(e) = capture {
@@ -2012,12 +1878,12 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         match current {
-            0 => ui.nav.select_row(ui.nav.row_at_index(2).as_ref()),
-            1 => ui.nav.select_row(ui.nav.row_at_index(1).as_ref()),
-            2 => ui.nav.select_row(ui.nav.row_at_index(3).as_ref()),
-            3 => ui.nav.select_row(ui.nav.row_at_index(4).as_ref()),
+            0 => ui.navigate(Page::Profiles),
+            1 => ui.navigate(Page::Nodes),
+            2 => ui.navigate(Page::Subscriptions),
+            3 => ui.navigate(Page::Rules),
             4 => {
-                ui.nav.select_row(ui.nav.row_at_index(0).as_ref());
+                ui.navigate(Page::Overview);
                 apply_theme("dark");
             }
             5 => {
@@ -2026,7 +1892,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             }
             6 => {
                 ui.window.set_default_size(1180, 800);
-                ui.nav.select_row(ui.nav.row_at_index(2).as_ref());
+                ui.navigate(Page::Profiles);
                 let profile = ui.service.snapshot().profiles[0].clone();
                 editors::profile(&ui.window, ui.service.clone(), profile, ui.saved());
             }
@@ -2042,14 +1908,28 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 {
                     editor.close()
                 }
-                ui.nav.select_row(ui.nav.row_at_index(7).as_ref());
+                ui.navigate(Page::Settings);
             }
             8 => {
+                if let Err(e) = settings::smoke_settings(&ui, false) {
+                    eprintln!("Wayland smoke settings: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
+            }
+            9 => {
+                if let Err(e) = settings::smoke_settings(&ui, true) {
+                    eprintln!("Wayland smoke settings: {e:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
                 let clipboard = ui.window.clipboard();
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();
                 let app = app.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: overview, theme, narrow window, collections, editor and clipboard passed")}app.quit();});
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: overview, theme, narrow window, collections, editor, settings and clipboard passed")}app.quit();});
                 return glib::ControlFlow::Break;
             }
             _ => {

@@ -1,11 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
-
-pub const HISTORY_SECONDS: u64 = 60;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counters {
@@ -30,24 +25,19 @@ impl Counters {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Sample {
-    pub at: Instant,
+pub struct Rates {
     pub download: f64,
     pub upload: f64,
 }
 
 #[derive(Default)]
-pub struct History {
-    pub samples: VecDeque<Sample>,
+pub struct RateMeter {
     previous: Option<(Instant, Counters)>,
 }
 
-impl History {
-    pub fn record(&mut self, at: Instant, counters: Counters) -> Option<Sample> {
+impl RateMeter {
+    pub fn record(&mut self, at: Instant, counters: Counters) -> Option<Rates> {
         let previous = self.previous.replace((at, counters));
-        self.samples.retain(|sample| {
-            at.saturating_duration_since(sample.at) <= Duration::from_secs(HISTORY_SECONDS)
-        });
         let (before, old) = previous?;
         let elapsed = at.saturating_duration_since(before).as_secs_f64();
         // A stopped/reloaded core, missed polling interval or reset counter is
@@ -57,20 +47,16 @@ impl History {
             || counters.download < old.download
             || counters.upload < old.upload
         {
-            self.samples.clear();
             return None;
         }
-        let sample = Sample {
-            at,
+        let sample = Rates {
             download: (counters.download - old.download) as f64 / elapsed,
             upload: (counters.upload - old.upload) as f64 / elapsed,
         };
-        self.samples.push_back(sample);
         Some(sample)
     }
 
     pub fn clear(&mut self) {
-        self.samples.clear();
         self.previous = None;
     }
 }
@@ -79,6 +65,7 @@ impl History {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn parses_totals_including_closed_connections_and_null_connection_list() {
@@ -106,7 +93,7 @@ mod tests {
     #[test]
     fn rates_use_elapsed_time_and_begin_with_a_baseline() {
         let at = Instant::now();
-        let mut history = History::default();
+        let mut history = RateMeter::default();
         assert!(
             history
                 .record(
@@ -136,7 +123,7 @@ mod tests {
     #[test]
     fn resets_and_gaps_do_not_produce_misleading_rates() {
         let at = Instant::now();
-        let mut history = History::default();
+        let mut history = RateMeter::default();
         history.record(
             at,
             Counters {
@@ -157,7 +144,6 @@ mod tests {
                 .record(at + Duration::from_secs(2), Counters::default())
                 .is_none()
         );
-        assert!(history.samples.is_empty());
         assert!(
             history
                 .record(
@@ -174,26 +160,6 @@ mod tests {
             history
                 .record(at + Duration::from_secs(21), Counters::default())
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn history_is_limited_to_the_last_minute() {
-        let at = Instant::now();
-        let mut history = History::default();
-        for second in 0..=100 {
-            history.record(
-                at + Duration::from_secs(second),
-                Counters {
-                    download: second * 1024,
-                    ..Counters::default()
-                },
-            );
-        }
-        assert_eq!(history.samples.len(), 61);
-        assert_eq!(
-            history.samples.front().unwrap().at,
-            at + Duration::from_secs(40)
         );
     }
 }

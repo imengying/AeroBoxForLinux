@@ -1,6 +1,6 @@
 use aerobox_for_linux::{
     engine::Service,
-    model::{self, Profile, RuleSet, Store, Subscription},
+    model::{self, Profile, RuleSet, Settings, Store, Subscription},
 };
 use serde_json::json;
 use std::{
@@ -8,7 +8,10 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     os::unix::fs::PermissionsExt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -40,7 +43,7 @@ fn native_generation_resolves_resources_without_mutating_source() {
     .unwrap();
     let result = s.generate(&id).unwrap();
     assert_eq!(result["outbounds"][0]["outbounds"], json!(["node"]));
-    assert_eq!(result["log"]["level"], "debug");
+    assert_eq!(result["log"]["level"], "info");
     assert!(
         result["route"]["rule_set"][0]["path"]
             .as_str()
@@ -102,15 +105,33 @@ fn subscription_updates_are_atomic_and_run_transform() {
 #[test]
 fn process_stops_and_is_reaped() {
     let (dir, s) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let api_worker = thread::spawn(move || {
+        let (mut stream, _) = api.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..size]).starts_with("PATCH /configs "));
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
     let bin = dir.path().join("core-test");
     fs::write(&bin,"#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\necho ready\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
     s.update(|state| {
         state.settings.core_path = bin.to_string_lossy().to_string();
+        state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+            json!(api_address.to_string());
         Ok(())
     })
     .unwrap();
-    s.start().unwrap();
+    s.start()
+        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
+    api_worker.join().unwrap();
     let pid = s.status().pid.unwrap();
     assert!(s.start().is_err());
     s.stop().unwrap();
@@ -141,7 +162,9 @@ fn real_core_roundtrip() {
     .unwrap();
     s.check_profile(&s.snapshot().settings.active_profile)
         .unwrap();
-    s.start().unwrap();
+    s.start()
+        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
+    assert!(s.memory_usage().core_bytes.is_some_and(|bytes| bytes > 0));
     let until = Instant::now() + Duration::from_secs(5);
     while s.api("GET", "/version", None).is_err() {
         assert!(Instant::now() < until);
@@ -149,6 +172,14 @@ fn real_core_roundtrip() {
     }
     let proxies = s.api("GET", "/proxies", None).unwrap();
     assert!(proxies["proxies"].get("proxy").is_some());
+    let pid = s.status().pid;
+    for mode in ["direct", "global", "rule"] {
+        s.set_routing_mode(mode).unwrap();
+        assert_eq!(s.snapshot().settings.routing_mode, mode);
+        assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], mode);
+        assert_eq!(s.status().pid, pid, "mode change must not restart the core");
+    }
+    assert!(s.set_routing_mode("unsupported").is_err());
     s.api("PUT", "/proxies/proxy", Some(&json!({"name":"direct"})))
         .unwrap();
     let traffic = s.traffic().unwrap();
@@ -207,6 +238,65 @@ fn real_core_roundtrip() {
     }
     s.reload().unwrap();
     assert!(s.status().running);
+    // The core cache contains "direct", but the next startup must obey the
+    // app's mode selection made while it is stopped.
+    s.set_routing_mode("direct").unwrap();
+    s.stop().unwrap();
+    s.set_routing_mode("global").unwrap();
+    s.start()
+        .unwrap_or_else(|error| panic!("{error:#}\n{}", s.logs()));
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
+    s.set_routing_mode("rule").unwrap();
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "rule");
+    s.set_routing_mode("global").unwrap();
+
+    // If persistence fails after the API accepted the new mode, restore the
+    // previous live mode and preserve the last successfully saved settings.
+    let state_path = s.dir().join("state.json");
+    let backup_path = s.dir().join("state.saved");
+    fs::rename(&state_path, &backup_path).unwrap();
+    fs::create_dir(&state_path).unwrap();
+    let save_result = s.set_routing_mode("direct");
+    fs::remove_dir(&state_path).unwrap();
+    fs::rename(&backup_path, &state_path).unwrap();
+    assert!(save_result.is_err());
+    assert_eq!(s.snapshot().settings.routing_mode, "global");
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
+
+    let pid = s.status().pid;
+    let mut settings = s.snapshot().settings;
+    settings.theme = "dark".into();
+    s.apply_settings(settings.clone()).unwrap();
+    assert_eq!(
+        s.status().pid,
+        pid,
+        "appearance changes must not restart the core"
+    );
+    settings.core_path = "/no/such/sing-box".into();
+    assert!(s.apply_settings(settings).is_err());
+    assert_eq!(
+        s.status().pid,
+        pid,
+        "failed preflight must leave the current core running"
+    );
+    assert_eq!(s.snapshot().settings.theme, "dark");
+
+    // A valid executable which fails only at startup exercises rollback after
+    // the old core has been stopped, not just validation errors.
+    let failing_core = s.dir().join("fails-on-start");
+    fs::write(
+        &failing_core,
+        "#!/bin/sh\nif [ \"$1\" = check ]; then exit 0; fi\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&failing_core, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut settings = s.snapshot().settings;
+    let old_binary = settings.core_path.clone();
+    settings.core_path = failing_core.to_string_lossy().into_owned();
+    assert!(s.apply_settings(settings).is_err());
+    assert!(s.status().running);
+    assert_eq!(s.snapshot().settings.core_path, old_binary);
+    assert_eq!(s.api("GET", "/configs", None).unwrap()["mode"], "global");
     s.stop().unwrap();
 
     assert!(s.traffic().is_err());
@@ -232,6 +322,131 @@ fn real_core_roundtrip() {
     let suffix = &restored["rules"][0]["domain_suffix"];
     // sing-box normalizes single-element lists to their equivalent scalar form.
     assert!(suffix == "example.com" || suffix == &json!(["example.com"]));
+}
+
+#[test]
+fn offline_settings_save_without_an_installed_core() {
+    let (_dir, s) = service();
+    let settings = Settings {
+        core_path: "/not/installed/sing-box".into(),
+        theme: "dark".into(),
+        tun_enabled: true,
+        ..s.snapshot().settings
+    };
+    s.apply_settings(settings).unwrap();
+    assert_eq!(s.snapshot().settings.theme, "dark");
+    assert!(s.snapshot().settings.tun_enabled);
+    assert!(!s.status().running);
+    let mut invalid = s.snapshot().settings;
+    invalid.test_url = "file:///tmp/not-a-network-test".into();
+    assert!(s.apply_settings(invalid).is_err());
+}
+
+#[test]
+fn real_core_downloads_follow_runtime_mode_and_stopped_downloads_are_direct() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (_dir, service) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    drop(api);
+    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mixed_address = mixed.local_addr().unwrap();
+    drop(mixed);
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable_port = unavailable.local_addr().unwrap().port();
+    drop(unavailable);
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin_address = origin.local_addr().unwrap();
+    origin.set_nonblocking(true).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let worker_done = done.clone();
+    let worker_hits = hits.clone();
+    let worker = thread::spawn(move || {
+        let until = Instant::now() + Duration::from_secs(20);
+        while !worker_done.load(Ordering::Relaxed) && Instant::now() < until {
+            match origin.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    assert!(stream.read(&mut request).unwrap() > 0);
+                    let body = r#"{"outbounds":[{"type":"socks","tag":"downloaded-node","server":"127.0.0.1","server_port":1080}]}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    worker_hits.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("origin server: {error}"),
+            }
+        }
+    });
+    let subscription = Subscription {
+        source: format!("http://{origin_address}/subscription"),
+        ..Subscription::default()
+    };
+    let subscription_id = subscription.id.clone();
+    service.update(|state| {
+        state.settings.core_path = binary;
+        state.settings.bypass_lan = false;
+        state.settings.sniff = false;
+        state.settings.dns_hijack = false;
+        let config = &mut state.profiles[0].config;
+        config["inbounds"] = json!([{"type":"mixed","listen":"127.0.0.1","listen_port":mixed_address.port()}]);
+        config["experimental"]["clash_api"]["external_controller"] = json!(api_address.to_string());
+        config["route"]["final"] = json!("direct");
+        config["outbounds"] = json!([
+            {"type":"selector","tag":"proxy","outbounds":["unavailable"]},
+            {"type":"socks","tag":"unavailable","server":"127.0.0.1","server_port":unavailable_port},
+            {"type":"direct","tag":"direct"}
+        ]);
+        state.subscriptions.push(subscription);
+        Ok(())
+    }).unwrap();
+    service
+        .start()
+        .unwrap_or_else(|error| panic!("{error:#}\n{}", service.logs()));
+    service.set_routing_mode("direct").unwrap();
+    service.update_subscription(&subscription_id).unwrap();
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+    assert!(
+        service.traffic().unwrap().download > 0,
+        "download must traverse the running core"
+    );
+
+    service.set_routing_mode("global").unwrap();
+    assert!(
+        service.update_subscription(&subscription_id).is_err(),
+        "a failed outbound must not fall back to a direct download"
+    );
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+    service.set_routing_mode("rule").unwrap();
+    // Editing a profile without applying it must not change the app's live
+    // download listener; requests still use the running configuration.
+    service
+        .update(|state| {
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(1);
+            Ok(())
+        })
+        .unwrap();
+    service.update_subscription(&subscription_id).unwrap();
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+    service.stop().unwrap();
+    service.update_subscription(&subscription_id).unwrap();
+    assert_eq!(hits.load(Ordering::Relaxed), 3);
+    done.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
 }
 #[test]
 fn polling_does_not_race_startup_failure() {

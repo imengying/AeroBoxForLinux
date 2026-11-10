@@ -221,8 +221,6 @@ struct CommonFields {
     mixed: bool,
     host: String,
     port: u16,
-    tun: bool,
-    log: String,
     dns: String,
     final_outbound: String,
 }
@@ -242,8 +240,6 @@ impl CommonFields {
             port: mixed
                 .and_then(|v| v["listen_port"].as_u64())
                 .unwrap_or(2080) as u16,
-            tun: inbounds.is_some_and(|items| items.iter().any(|v| v["type"] == "tun")),
-            log: config["log"]["level"].as_str().unwrap_or("info").into(),
             dns: dns.and_then(|v| v["server"].as_str()).unwrap_or("").into(),
             final_outbound: config["route"]["final"].as_str().unwrap_or("").into(),
         }
@@ -260,9 +256,7 @@ fn object_child<'a>(value: &'a mut Value, key: &str) -> Result<&'a mut Value> {
 }
 fn apply_common(config: &mut Value, before: &CommonFields, after: &CommonFields) -> Result<()> {
     ensure!(config.is_object(), "配置必须是 JSON 对象");
-    if (before.mixed, &before.host, before.port, before.tun)
-        != (after.mixed, &after.host, after.port, after.tun)
-    {
+    if (before.mixed, &before.host, before.port) != (after.mixed, &after.host, after.port) {
         if config.get("inbounds").is_none() {
             config["inbounds"] = json!([]);
         }
@@ -290,16 +284,6 @@ fn apply_common(config: &mut Value, before: &CommonFields, after: &CommonFields)
                 inbounds.retain(|v| v["type"] != "mixed");
             }
         }
-        if before.tun != after.tun {
-            if after.tun && !inbounds.iter().any(|v| v["type"] == "tun") {
-                inbounds.push(json!({"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}));
-            } else if !after.tun {
-                inbounds.retain(|v| v["type"] != "tun");
-            }
-        }
-    }
-    if before.log != after.log {
-        object_child(config, "log")?["level"] = json!(after.log);
     }
     if before.final_outbound != after.final_outbound {
         object_child(config, "route")?["final"] = json!(after.final_outbound.trim());
@@ -329,44 +313,18 @@ pub fn profile(
     item: Profile,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑配置", "连接方式与分流策略");
+    let editor = EditorWindow::new(parent, "编辑配置", "");
     let stack = tabs(&editor.body);
     let (scroll, form) = form_page();
     let initial = CommonFields::from_config(&item.config);
 
-    let basic = group("配置", "为不同网络环境保存独立的连接设置。");
+    let basic = group("配置", "");
     let name = entry("名称", &item.name);
     basic.add(&name);
-    let log_levels = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
-    let mut available_logs = log_levels.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    if !available_logs.contains(&initial.log) {
-        available_logs.push(initial.log.clone());
-    }
-    let log_model = gtk::StringList::new(
-        &available_logs
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-    );
-    let log_level = adw::ComboRow::builder()
-        .title("日志级别")
-        .model(&log_model)
-        .selected(
-            available_logs
-                .iter()
-                .position(|s| s == &initial.log)
-                .unwrap_or(2) as u32,
-        )
-        .build();
-    basic.add(&log_level);
     form.append(&basic);
 
-    let inbound = group("本地代理", "HTTP 与 SOCKS 使用同一个监听端口。");
-    let mixed = switch(
-        "混合代理",
-        "为支持代理设置的应用提供本地入口",
-        initial.mixed,
-    );
+    let inbound = group("本地代理", "");
+    let mixed = switch("混合代理", "", initial.mixed);
     let host = entry("监听地址", &initial.host);
     let port = gtk::SpinButton::with_range(1.0, 65535.0, 1.0);
     port.set_value(initial.port as f64);
@@ -390,18 +348,9 @@ pub fn profile(
     inbound.add(&port_row);
     form.append(&inbound);
 
-    let routing = group(
-        "路由与 DNS",
-        "更多入站、DNS 服务器和分流规则可在「配置 JSON」中编辑。",
-    );
-    let tun = switch(
-        "TUN 模式",
-        "接管系统流量；sing-box 内核需要网络管理权限",
-        initial.tun,
-    );
+    let routing = group("路由与 DNS", "");
     let dns = entry("DNS 服务器", &initial.dns);
     let outbound = entry("默认出口", &initial.final_outbound);
-    routing.add(&tun);
     routing.add(&dns);
     routing.add(&outbound);
     form.append(&routing);
@@ -409,13 +358,13 @@ pub fn profile(
 
     let (resource_scroll, resources) = form_page();
     let state = service.snapshot();
-    let subscriptions = group("订阅", "选中订阅的节点会加入此配置的代理组。");
+    let subscriptions = group("订阅", "");
     let mut sub_controls = Vec::new();
     if state.subscriptions.is_empty() {
         subscriptions.add(
             &adw::ActionRow::builder()
                 .title("尚未添加订阅")
-                .subtitle("先在订阅页面添加一个来源，再回到这里选择。")
+                .subtitle("")
                 .build(),
         );
     }
@@ -429,13 +378,13 @@ pub fn profile(
         sub_controls.push((subscription.id.clone(), row));
     }
     resources.append(&subscriptions);
-    let rulesets = group("规则集", "将规则集加入配置后，可在路由规则中按标签引用。");
+    let rulesets = group("规则集", "");
     let mut rule_controls = Vec::new();
     if state.rulesets.is_empty() {
         rulesets.add(
             &adw::ActionRow::builder()
                 .title("尚未添加规则集")
-                .subtitle("可以在规则集页面导入或创建。 ")
+                .subtitle("")
                 .build(),
         );
     }
@@ -459,7 +408,7 @@ pub fn profile(
         &model::pretty(&item.config),
         "json",
         true,
-        "完整的 sing-box 配置。只在常用设置中修改过的字段会在保存时合并。",
+        "网络开关在应用设置中统一管理",
     );
     let config_tools = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let format = gtk::Button::with_label("格式化 JSON");
@@ -476,12 +425,7 @@ pub fn profile(
     config_tools.append(&format);
     config.root.prepend(&config_tools);
     stack.add_titled(&config.root, Some("config"), "配置 JSON");
-    let script = SourceEditor::new(
-        &item.script,
-        "js",
-        true,
-        "可选：定义 async function onGenerate(config)，返回处理后的配置。留空则直接使用配置。",
-    );
+    let script = SourceEditor::new(&item.script, "js", true, "onGenerate(config) → config");
     stack.add_titled(&script.root, Some("script"), "生成脚本");
 
     let read_draft: Rc<dyn Fn() -> Result<Profile>> = Rc::new(move || {
@@ -491,11 +435,6 @@ pub fn profile(
             mixed: mixed.is_active(),
             host: host.text().into(),
             port: port.value_as_int() as u16,
-            tun: tun.is_active(),
-            log: available_logs
-                .get(log_level.selected() as usize)
-                .context("请选择日志级别")?
-                .clone(),
             dns: dns.text().into(),
             final_outbound: outbound.text().into(),
         };
@@ -631,15 +570,13 @@ pub fn subscription(
     item: Subscription,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑订阅", "节点来源与筛选");
+    let editor = EditorWindow::new(parent, "编辑订阅", "");
     let stack = tabs(&editor.body);
     let (scroll, form) = form_page();
-    let source_group = group(
-        "订阅来源",
-        "支持 HTTP / HTTPS 地址、本地文件和手动维护的节点。",
-    );
+    let source_group = group("订阅来源", "");
     let name = entry("名称", &item.name);
     let source = entry("订阅地址或文件路径", &item.source);
+    source.set_tooltip_text(Some("留空可手动添加节点"));
     let choose = gtk::Button::from_icon_name("document-open-symbolic");
     choose.set_tooltip_text(Some("选择本地订阅文件"));
     choose.add_css_class("flat");
@@ -661,24 +598,16 @@ pub fn subscription(
     source_group.add(&name);
     source_group.add(&source);
     form.append(&source_group);
-    form.append(&explain(
-        "留空地址可手动维护节点。保存后，在订阅页面更新来源或编辑节点。",
-    ));
-    let filters = group("筛选节点", "包含与排除使用正则表达式；留空时不筛选。");
-    let include = entry("包含名称", &item.include);
-    let exclude = entry("排除名称", &item.exclude);
+    let filters = group("筛选节点", "");
+    let include = entry("包含名称（正则）", &item.include);
+    let exclude = entry("排除名称（正则）", &item.exclude);
     let prefix = entry("名称前缀", &item.prefix);
     filters.add(&include);
     filters.add(&exclude);
     filters.add(&prefix);
     form.append(&filters);
     stack.add_titled(&scroll, Some("source"), "订阅设置");
-    let script = SourceEditor::new(
-        &item.script,
-        "js",
-        true,
-        "可选：定义 async function onSubscribe(nodes)，返回节点数组。留空则保留筛选后的节点。",
-    );
+    let script = SourceEditor::new(&item.script, "js", true, "onSubscribe(nodes) → nodes");
     stack.add_titled(&script.root, Some("script"), "处理脚本");
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
@@ -734,10 +663,10 @@ pub fn ruleset(
     item: RuleSet,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑规则集", "分流规则与更新来源");
+    let editor = EditorWindow::new(parent, "编辑规则集", "");
     let stack = tabs(&editor.body);
     let (scroll, form) = form_page();
-    let basic = group("规则集", "在配置中启用规则集，再将它用于路由匹配。");
+    let basic = group("规则集", "");
     let name = entry("名称", &item.name);
     let source = entry("更新地址或文件路径", &item.source);
     let format_model = gtk::StringList::new(&["JSON 源文件", "SRS 二进制文件"]);
@@ -750,15 +679,12 @@ pub fn ruleset(
     basic.add(&source);
     basic.add(&format);
     form.append(&basic);
-    form.append(&explain(
-        "没有更新来源时，可以直接编写 JSON 规则。SRS 规则内容通过 sing-box 内核编译。",
-    ));
     stack.add_titled(&scroll, Some("general"), "基本信息");
     let content = SourceEditor::new(
         &model::pretty(&item.content),
         "json",
         true,
-        "sing-box 源规则集格式，包含 version 与 rules。远程更新会替换规则内容。",
+        "远程更新会替换规则内容",
     );
     stack.add_titled(&content.root, Some("content"), "规则内容");
     let content_for_format = content.root.clone();
@@ -785,6 +711,7 @@ pub fn ruleset(
                     .find(|r| r.id == item.id)
                     .cloned()
                     .unwrap_or_else(|| item.clone());
+                let previous_name = next.name.clone();
                 next.name = name.text().trim().into();
                 next.source = source.text().trim().into();
                 next.binary = binary;
@@ -795,6 +722,7 @@ pub fn ruleset(
                 {
                     next.content = value;
                 }
+                model::rename_rule_references(state, &next.id, &previous_name, &next.name);
                 if let Some(old) = state.rulesets.iter_mut().find(|r| r.id == next.id) {
                     *old = next;
                 } else {
@@ -1270,11 +1198,9 @@ mod tests {
         let before = CommonFields::from_config(&config);
         let mut after = before.clone();
         after.port = 1080;
-        after.tun = true;
         apply_common(&mut config, &before, &after).unwrap();
         assert_eq!(config["inbounds"][0]["listen_port"], 1080);
         assert_eq!(config["inbounds"][0]["users"][0]["password"], "p");
-        assert_eq!(config["inbounds"][1]["type"], "tun");
     }
     #[test]
     fn changed_host_preserves_port_edited_as_json() {
