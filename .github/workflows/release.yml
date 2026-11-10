@@ -34,7 +34,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config weston dbus-daemon fonts-noto-cjk
+          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config weston sway dbus-daemon fonts-noto-cjk
       - name: Check formatting and lint
         run: |
           cargo fmt --all --check
@@ -51,6 +51,11 @@ jobs:
         if: matrix.arch == 'amd64'
         env:
           AEROBOX_TEST_SCALE: "2"
+        run: timeout 90s scripts/test-wayland.sh
+      - name: Test fractional Wayland scale at 1.25x
+        if: matrix.arch == 'amd64'
+        env:
+          AEROBOX_TEST_SCALE: "1.25"
         run: timeout 90s scripts/test-wayland.sh
       - name: Package
         run: scripts/package.sh ${{ matrix.arch }}
@@ -84,10 +89,10 @@ jobs:
           body: |
             AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
 
-            完善规则、全局、直连的实际路由行为，切换时确认内核状态并清理旧连接。
-            设置中新增内核版本、状态、检查配置、启动/停止和重启操作。
-            使用系统字体与统一排版层级，支持文字大小调整和清晰文字渲染。
-            配置仅保存在 AeroBoxForLinux 用户配置目录，不再迁移旧版本数据。
+            修复订阅导入后没有用于配置、开启系统代理仍然直连的问题；导入可关联当前配置，已有订阅可点击「使用」。
+            GNOME 系统代理已通过隔离 Chromium 浏览器和真实 sing-box 节点的端到端验证。
+            四组内置规则改为在线来源，由内核自动更新并缓存；支持调整更新间隔。
+            参考 FlClash 调整首页、侧栏和统一样式，增加实际 1.25 倍 Wayland 缩放检查。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。

@@ -234,14 +234,14 @@ impl Ui {
         side_header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
         sidebar.append(&side_header);
         let brand = gtk::Box::new(gtk::Orientation::Horizontal, 11);
-        margin(&brand, 24, 24, 2, 28);
+        margin(&brand, 20, 18, 2, 24);
         brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
         let data = glib::Bytes::from_static(include_bytes!(
             "../../resources/io.github.imengying.AeroBoxForLinux.png"
         ));
         let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
         let mark = gtk::Image::from_paintable(Some(&texture));
-        mark.set_pixel_size(42);
+        mark.set_pixel_size(36);
         let name = label("AeroBox", "brand");
         name.set_valign(gtk::Align::Center);
         brand.append(&mark);
@@ -267,8 +267,8 @@ impl Ui {
         sidebar.append(&nav);
         let split = adw::OverlaySplitView::new();
         split.set_sidebar(Some(&sidebar));
-        split.set_min_sidebar_width(216.0);
-        split.set_max_sidebar_width(216.0);
+        split.set_min_sidebar_width(200.0);
+        split.set_max_sidebar_width(200.0);
         split.set_sidebar_width_fraction(0.2);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = adw::HeaderBar::new();
@@ -292,7 +292,7 @@ impl Ui {
         content.append(&header);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 24);
         body.add_css_class("page-content");
-        margin(&body, 30, 30, 18, 32);
+        margin(&body, 24, 24, 12, 24);
         let clamp = adw::Clamp::builder()
             .maximum_size(1030)
             .tightening_threshold(850)
@@ -719,7 +719,21 @@ impl Ui {
     }
 
     fn rules(self: &Rc<Self>, heading: &gtk::Box) {
-        self.preset_button(heading);
+        let online = gtk::Button::with_label("内置在线规则");
+        online.set_valign(gtk::Align::Center);
+        let weak = Rc::downgrade(self);
+        online.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                match ui.service.update(model::use_online_builtin_rules) {
+                    Ok(()) => {
+                        ui.notify("在线规则已就绪，下次启动或重载时生效");
+                        ui.refresh(Page::Rules);
+                    }
+                    Err(error) => ui.error("添加失败", error),
+                }
+            }
+        });
+        heading.append(&online);
         let add = primary("新建规则集", "list-add-symbolic");
         heading.append(&add);
         let weak = Rc::downgrade(self);
@@ -744,18 +758,14 @@ impl Ui {
         }
         let list = card(gtk::Orientation::Vertical, 0);
         for item in state.rulesets {
-            let meta = format!(
-                "{} · {}",
-                if item.source.is_empty() {
-                    "本地规则"
-                } else {
-                    "远程规则"
-                },
-                updated(item.updated)
-            );
+            let meta = if item.is_remote() {
+                format!("在线 · 每 {} 小时更新", item.update_interval_hours)
+            } else {
+                format!("本地 · {}", updated(item.updated))
+            };
             let row = resource_row("view-list-bullet-symbolic", &item.name, &meta);
             row.append(&pill(if item.binary { "SRS" } else { "JSON" }, ""));
-            let edit = gtk::Button::with_label("编辑");
+            let edit = gtk::Button::with_label("设置");
             edit.add_css_class("compact-action");
             let weak = Rc::downgrade(self);
             let rules = item.clone();
@@ -765,33 +775,45 @@ impl Ui {
                 }
             });
             row.append(&edit);
-            let content = icon_button("document-edit-symbolic", "编辑规则内容");
-            let weak = Rc::downgrade(self);
-            let rules = item.clone();
-            content.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    editors::rule_content(&ui.window, ui.service.clone(), rules.clone(), ui.saved())
+            if !item.is_remote() {
+                let content = icon_button("document-edit-symbolic", "编辑规则内容");
+                let weak = Rc::downgrade(self);
+                let rules = item.clone();
+                content.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        editors::rule_content(
+                            &ui.window,
+                            ui.service.clone(),
+                            rules.clone(),
+                            ui.saved(),
+                        )
+                    }
+                });
+                row.append(&content);
+                if !item.source.is_empty() {
+                    let refresh = icon_button("view-refresh-symbolic", "重新读取文件");
+                    let weak = Rc::downgrade(self);
+                    let id = item.id.clone();
+                    refresh.connect_clicked(move |button| {
+                        if let Some(ui) = weak.upgrade() {
+                            let id = id.clone();
+                            ui.button_task(
+                                button,
+                                "读取中…",
+                                move |s| s.update_ruleset(&id),
+                                |ui, result| match result {
+                                    Ok(()) => {
+                                        ui.notify("规则集已更新");
+                                        ui.refresh(Page::Rules);
+                                    }
+                                    Err(error) => ui.error("更新失败", format!("{error:#}")),
+                                },
+                            );
+                        }
+                    });
+                    row.append(&refresh);
                 }
-            });
-            row.append(&content);
-            let refresh = icon_button("view-refresh-symbolic", "更新规则集");
-            refresh.set_sensitive(!item.source.is_empty());
-            let weak = Rc::downgrade(self);
-            let id = item.id.clone();
-            refresh.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    let id = id.clone();
-                    ui.task(
-                        "更新规则集",
-                        move |s| s.update_ruleset(&id),
-                        |ui, ()| {
-                            ui.notify("规则集已更新");
-                            ui.refresh(Page::Rules)
-                        },
-                    )
-                }
-            });
-            row.append(&refresh);
+            }
             row.append(&self.delete_button("rulesets", &item.id, &item.name));
             list.append(&row);
         }
@@ -907,7 +929,7 @@ impl Ui {
         };
         let mut groups: Vec<_> = proxies
             .iter()
-            .filter(|(_, p)| p["all"].is_array())
+            .filter(|(name, p)| p["all"].is_array() && !name.starts_with("aerobox-rule-download"))
             .map(|(name, _)| name.clone())
             .collect();
         groups.sort();
@@ -1733,7 +1755,7 @@ fn seed_smoke(service: &Service) -> Result<()> {
         let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
         let mut primary=Profile::new("日常上网");primary.subscriptions.push(subscription.id.clone());primary.rulesets.push(rules.id.clone());
         let mut second=Profile::new("工作网络");second.subscriptions.push(subscription.id.clone());
-        state.settings.active_profile=primary.id.clone();state.profiles=vec![primary,second];state.subscriptions=vec![subscription];state.rulesets=vec![rules];Ok(())
+        state.settings.active_profile=primary.id.clone();state.profiles=vec![primary,second];state.subscriptions=vec![subscription];state.rulesets=vec![rules];state.rulesets.extend(model::builtin_resources().1);Ok(())
     })
 }
 
@@ -1744,6 +1766,17 @@ fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
     anyhow::ensure!(width > 0 && height > 0, "窗口尚未分配尺寸");
     let paintable = gtk::WidgetPaintable::new(Some(window));
     let snapshot = gtk::Snapshot::new();
+    let scale = window
+        .surface()
+        .map(|surface| {
+            if surface.find_property("scale").is_some() {
+                surface.property::<f64>("scale") as f32
+            } else {
+                window.scale_factor() as f32
+            }
+        })
+        .unwrap_or(1.0);
+    snapshot.scale(scale, scale);
     paintable.snapshot(&snapshot, width as f64, height as f64);
     let node = snapshot.to_node().context("窗口没有渲染内容")?;
     let renderer = window.renderer().context("Wayland 渲染器不可用")?;
@@ -1752,8 +1785,8 @@ fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
         Some(&gtk::graphene::Rect::new(
             0.0,
             0.0,
-            width as f32,
-            height as f32,
+            width as f32 * scale,
+            height as f32 * scale,
         )),
     );
     if let Some(parent) = path.parent() {
@@ -1804,17 +1837,27 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 .context("订阅导入未打开")
                 .and_then(|w| screenshot(&w, &parent.join("subscription-import.png"))),
             15 => screenshot(&ui.window, &parent.join("core-settings.png")),
+            16 => app
+                .active_window()
+                .context("在线规则编辑器未打开")
+                .and_then(|w| screenshot(&w, &parent.join("online-rules-editor.png"))),
             _ => Ok(()),
         }
         .and_then(|()| {
             if current == 0 {
                 let scale = std::env::var("AEROBOX_TEST_SCALE")
                     .ok()
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(1);
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(1.0);
+                let surface = ui.window.surface().context("窗口没有 Wayland surface")?;
+                let actual = if surface.find_property("scale").is_some() {
+                    surface.property::<f64>("scale")
+                } else {
+                    ui.window.scale_factor() as f64
+                };
                 anyhow::ensure!(
-                    ui.window.scale_factor() == scale,
-                    "显示缩放没有按测试设置生效"
+                    (actual - scale).abs() < 0.01,
+                    "显示缩放没有按测试设置生效: {actual}，预期 {scale}"
                 );
             }
             if current == 7 || current == 8 {
@@ -1964,11 +2007,27 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 select_core(ui.body.upcast_ref());
             }
             15 => {
+                let rule = ui
+                    .service
+                    .snapshot()
+                    .rulesets
+                    .into_iter()
+                    .find(|r| r.id == model::BUILTIN_DOMESTIC_ID)
+                    .unwrap();
+                editors::ruleset(&ui.window, ui.service.clone(), rule, ui.saved());
+            }
+            16 => {
+                if let Err(error) = editors::smoke_ruleset(&ui.window, ui.service.clone()) {
+                    eprintln!("Wayland smoke rules: {error:#}");
+                    failed.set(true);
+                    app.quit();
+                    return glib::ControlFlow::Break;
+                }
                 let clipboard = ui.window.clipboard();
                 clipboard.set_text("AeroBox Wayland 剪贴板测试");
                 let failed = failed.clone();
                 let app = app.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings, subscription import and clipboard passed")}app.quit();});
+                clipboard.read_text_async(None::<&gio::Cancellable>,move |result|{if !matches!(result,Ok(Some(ref text))if text=="AeroBox Wayland 剪贴板测试"){failed.set(true);eprintln!("Wayland smoke: clipboard roundtrip failed")}else{println!("Wayland smoke: home, theme, narrow window, collections, editor, settings, subscription import, online rules and clipboard passed")}app.quit();});
                 return glib::ControlFlow::Break;
             }
             _ => {

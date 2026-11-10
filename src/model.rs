@@ -194,6 +194,7 @@ pub struct RuleSet {
     pub binary: bool,
     pub content: Value,
     pub updated: u64,
+    pub update_interval_hours: u32,
 }
 impl Default for RuleSet {
     fn default() -> Self {
@@ -204,34 +205,56 @@ impl Default for RuleSet {
             binary: false,
             content: json!({"version":3,"rules":[]}),
             updated: 0,
+            update_interval_hours: 24,
         }
     }
+}
+
+impl RuleSet {
+    pub fn is_remote(&self) -> bool {
+        is_online_source(&self.source)
+    }
+}
+
+pub fn is_online_source(source: &str) -> bool {
+    url::Url::parse(source)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 pub const BUILTIN_LAN_ID: &str = "aeb00000-0000-4000-8000-000000000001";
 pub const BUILTIN_DOMESTIC_ID: &str = "aeb00000-0000-4000-8000-000000000002";
 pub const BUILTIN_ADS_ID: &str = "aeb00000-0000-4000-8000-000000000003";
+pub const BUILTIN_CHINA_IP_ID: &str = "aeb00000-0000-4000-8000-000000000004";
 
-/// Small, editable local lists. They do not claim to be a complete GeoIP or
-/// advertising database, and need no downloads before the first connection.
+/// Maintained online lists. Small initial rules let the first connection start
+/// before the core refreshes and caches the full online source.
 pub fn builtin_resources() -> (Vec<Profile>, Vec<RuleSet>) {
     let rulesets = vec![
         RuleSet {
             id: BUILTIN_LAN_ID.into(),
             name: "局域网".into(),
+            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.json".into(),
             content: json!({"version":3,"rules":[{"ip_cidr":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","169.254.0.0/16","100.64.0.0/10","::1/128","fc00::/7","fe80::/10"]},{"domain_suffix":["localhost","local","lan"]}]}),
             ..RuleSet::default()
         },
         RuleSet {
             id: BUILTIN_DOMESTIC_ID.into(),
-            name: "国内常用域名".into(),
+            name: "中国大陆域名".into(),
+            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json".into(),
             content: json!({"version":3,"rules":[{"domain_suffix":["baidu.com","qq.com","tencent.com","aliyun.com","alipay.com","taobao.com","tmall.com","jd.com","bilibili.com","163.com","126.com","sina.com.cn","weibo.com","zhihu.com","douban.com","mi.com"]}]}),
             ..RuleSet::default()
         },
         RuleSet {
             id: BUILTIN_ADS_ID.into(),
-            name: "常见广告".into(),
+            name: "广告拦截".into(),
+            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.json".into(),
             content: json!({"version":3,"rules":[{"domain_suffix":["doubleclick.net","googlesyndication.com","googleadservices.com","adservice.google.com","ad.qq.com","pos.baidu.com","cpro.baidu.com"]}]}),
+            ..RuleSet::default()
+        },
+        RuleSet {
+            id: BUILTIN_CHINA_IP_ID.into(),
+            name: "中国大陆 IP".into(),
+            source: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.json".into(),
             ..RuleSet::default()
         },
     ];
@@ -243,10 +266,10 @@ pub fn builtin_resources() -> (Vec<Profile>, Vec<RuleSet>) {
         profile.config["route"]["rules"] = json!([]);
         if index == 0 {
             profile.config["route"]["rules"] = json!([
-                {"rule_set":"国内常用域名","action":"route","outbound":"direct"}
+                {"rule_set":["中国大陆域名", "中国大陆 IP"],"action":"route","outbound":"direct"}
             ]);
             profile.config["dns"]["rules"] = json!([
-                {"rule_set":"国内常用域名","action":"route","server":"dns-local"}
+                {"rule_set":"中国大陆域名","action":"route","server":"dns-local"}
             ]);
         }
         if index == 2 {
@@ -304,6 +327,21 @@ pub fn add_builtin_resources(state: &mut State) -> Result<usize> {
     }
     state.validate()?;
     Ok(added)
+}
+
+/// Explicitly connect built-in lists to their maintained sources. Custom lists,
+/// names and contents are kept; the seed remains available for the first start.
+pub fn use_online_builtin_rules(state: &mut State) -> Result<()> {
+    for builtin in builtin_resources().1 {
+        if let Some(rule) = state.rulesets.iter_mut().find(|r| r.id == builtin.id) {
+            rule.source = builtin.source;
+            rule.binary = false;
+            rule.update_interval_hours = 24;
+        } else if !state.rulesets.iter().any(|r| r.name == builtin.name) {
+            state.rulesets.push(builtin);
+        }
+    }
+    state.validate()
 }
 
 fn replace_rule_tag(value: &mut Value, from: &str, to: &str) {
@@ -405,6 +443,19 @@ impl State {
                 "订阅更新间隔必须在 1 到 168 小时之间"
             );
             validate_nodes(&s.nodes)?;
+        }
+        for rule in &self.rulesets {
+            ensure!(
+                (1..=168).contains(&rule.update_interval_hours),
+                "规则集更新间隔须在 1 到 168 小时之间"
+            );
+            if rule.source.contains("://") {
+                let url = url::Url::parse(&rule.source).context("规则集地址无效")?;
+                ensure!(
+                    matches!(url.scheme(), "https" | "http") && url.host().is_some(),
+                    "规则集地址须为 HTTP 或 HTTPS"
+                );
+            }
         }
         Ok(())
     }
@@ -552,7 +603,7 @@ mod tests {
         rename_rule_references(
             &mut state,
             BUILTIN_DOMESTIC_ID,
-            "国内常用域名",
+            "中国大陆域名",
             "自定义国内域名",
         );
         state.rulesets[1].name = "自定义国内域名".into();
@@ -565,7 +616,7 @@ mod tests {
         assert_eq!(add_builtin_resources(&mut state).unwrap(), 3);
         assert_eq!(state.settings.active_profile, active);
         assert_eq!(
-            state.profiles[0].config["route"]["rules"][0]["rule_set"],
+            state.profiles[0].config["route"]["rules"][0]["rule_set"][0],
             "自定义国内域名"
         );
         assert_eq!(
@@ -573,6 +624,37 @@ mod tests {
             "example.cn"
         );
         state.validate().unwrap();
+    }
+    #[test]
+    fn online_builtin_rules_preserve_custom_lists_and_profile_selection() {
+        let mut state = State::default();
+        let profiles = pretty(&state.profiles);
+        let active = state.settings.active_profile.clone();
+        state.rulesets[0].source.clear();
+        state.rulesets[0].name = "我的局域网".into();
+        let seed = state.rulesets[0].content.clone();
+        let custom = RuleSet {
+            name: "私人规则".into(),
+            ..RuleSet::default()
+        };
+        let custom_id = custom.id.clone();
+        state.rulesets.push(custom);
+        use_online_builtin_rules(&mut state).unwrap();
+        assert!(state.rulesets[0].is_remote());
+        assert_eq!(state.rulesets[0].name, "我的局域网");
+        assert_eq!(state.rulesets[0].content, seed);
+        assert!(
+            !state
+                .rulesets
+                .iter()
+                .find(|r| r.id == custom_id)
+                .unwrap()
+                .is_remote()
+        );
+        assert_eq!(profiles, pretty(&state.profiles));
+        assert_eq!(active, state.settings.active_profile);
+        state.rulesets[0].update_interval_hours = 0;
+        assert!(state.validate().is_err());
     }
     #[test]
     fn failed_update_leaves_state_and_disk_unchanged() {

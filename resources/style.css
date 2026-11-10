@@ -1,52 +1,52 @@
 /* Font family and body size come from GTK and the application text scale.
  * GNOME heading/title classes provide the shared text hierarchy. */
-@define-color accent_bg_color #087f83;
+@define-color accent_bg_color #2878d7;
 @define-color accent_fg_color #ffffff;
-@define-color accent_color #087f83;
-.aerobox-window { background: #f7f9fb; color: #263442; }
-.aerobox-window.dark { background: #161d24; color: #e3eaf0; }
-.app-sidebar { background: #eef2f5; border-right: 1px solid alpha(#728292, .13); }
-.dark .app-sidebar { background: #111920; }
+@define-color accent_color #2878d7;
+.aerobox-window { background: #f4f5f8; color: #272d36; }
+.aerobox-window.dark { background: #181b21; color: #e8eaf0; }
+.app-sidebar { background: #eaeef4; border-right: 1px solid alpha(#728292, .13); }
+.dark .app-sidebar { background: #14171c; }
 
 .nav-list { background: transparent; }
-.nav-list row { border-radius: 10px; margin: 3px 0; padding: 0; color: alpha(@window_fg_color, .82); }
-.nav-list row:selected { background: #d8edeb; color: #067b79; }
+.nav-list row { border-radius: 10px; margin: 2px 0; padding: 0; color: alpha(@window_fg_color, .82); }
+.nav-list row:selected { background: #dde9fc; color: #2268bc; }
 
-.dark .nav-list row:selected { background: #183d40; color: #73d8cc; }
-.nav-list row:hover { background: alpha(#087f83, .07); }
-.nav-item { min-height: 46px; font-weight: normal; }
-.nav-list row:selected .nav-item { font-weight: 700; }
+.dark .nav-list row:selected { background: #26364e; color: #a4c8ff; }
+.nav-list row:hover { background: alpha(#2878d7, .07); }
+.nav-item { min-height: 44px; font-weight: normal; }
+.nav-list row:selected .nav-item { font-weight: 600; }
 
 
 .muted { color: alpha(@window_fg_color, .78); }
 
 .small { font-size: 0.95em; }
-.surface-card { border-radius: 16px; background: #ffffff; border: 1px solid #e4eaf0; box-shadow: 0 2px 3px alpha(#213b53,.025); }
-.dark .surface-card { background: #1d2832; border-color: #2b3945; box-shadow: none; }
+.surface-card { border-radius: 18px; background: #ffffff; border: 1px solid #e5e8ee; box-shadow: 0 2px 3px alpha(#213b53,.025); }
+.dark .surface-card { background: #242830; border-color: #363c47; box-shadow: none; }
 .metric-value { font-size: 1.5em; font-feature-settings: "tnum"; font-weight: normal; }
-.metric-icon { color: #6e9ca0; }
+.metric-icon { color: #6888b4; }
 .pill { border-radius: 20px; padding: 4px 10px; background: #edf2f5; color: alpha(@window_fg_color, .78); font-size: 0.95em; font-weight: normal; }
-.dark .pill { background: #2b3945; color: alpha(@window_fg_color, .78); }
+.dark .pill { background: #363c47; color: alpha(@window_fg_color, .78); }
 .pill.active { background: #e1f3eb; color: #288263; }
 .dark .pill.active { background: #1f433b; color: #7bd3b1; }
-.pill.accent { background: #e3f2f1; color: #087f83; }
-.dark .pill.accent { background: #214548; color: #77dad1; }
-.primary-action { border-radius: 9px; padding: 10px 18px; font-weight: 700; }
+.pill.accent { background: #e5eeff; color: #2878d7; }
+.dark .pill.accent { background: #263c5c; color: #a4c8ff; }
+.primary-action { border-radius: 12px; padding: 10px 18px; font-weight: 600; }
 .compact-action { border-radius: 8px; min-height: 30px; }
-.row-icon { background: #edf5f5; color: #538e92; border-radius: 11px; min-width: 42px; min-height: 42px; }
-.dark .row-icon { background: #263b45; color: #8fbfc4; }
+.row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; min-width: 42px; min-height: 42px; }
+.dark .row-icon { background: #29364c; color: #a4bfe4; }
 
 .resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.95em; }
 
-.resource-row { padding: 14px 20px; }
+.resource-row { padding: 14px 18px; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
-.empty-icon { color: #86abaa; background: alpha(#087f83,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
+.empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
 
 .empty-description { color: alpha(@window_fg_color, .78); }
 .search { border-radius: 10px; min-height: 36px; }
 .node-card { padding: 14px 16px; min-width: 186px; }
-.node-card.selected { border-color: #1b9d98; background: #effaf7; }
-.dark .node-card.selected { border-color: #51a9a4; background: #203d3d; }
+.node-card.selected { border-color: #4389de; background: #eff5ff; }
+.dark .node-card.selected { border-color: #6aa8ef; background: #253550; }
 .node-card button { padding: 4px; }
 .log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
 .editor-root { background: @window_bg_color; }
@@ -60,35 +60,38 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 
 .metrics > flowboxchild { padding: 0; }
 .stat-card { padding: 16px 18px; min-width: 200px; }
-.download { color: #087f83; }
-.upload { color: #506ed4; }
-.dark .download { color: #61d6c2; }
-.dark .upload { color: #8cadff; }
+.download { color: #2878d7; }
+.upload { color: #62708a; }
+.dark .download { color: #8cbaff; }
+.dark .upload { color: #b3bcd5; }
 .aerobox-window preferencesgroup .title, .editor-root preferencesgroup .title { font-size: 1em; }
 .aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
 .aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
 
 .settings-page entry { font-size: 1em; }
+.editor-tabs { border-radius: 12px; background: alpha(@window_fg_color, .06); padding: 4px; }
+.editor-tabs button { border: none; border-radius: 9px; box-shadow: none; background: transparent; padding: 8px 16px; }
+.editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 56px; }
 
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .78); }
 
-.home-top > flowboxchild { padding: 0; }
-.home-network { padding: 20px; min-width: 278px; }
-.home-network .exit-ip { font-size: 1.5em; font-weight: normal; }
-.speed-card { padding: 18px; min-width: 112px; }
-.speed-value { font-size: 2em; font-weight: normal; font-feature-settings: "tnum"; }
-.home-mode { padding: 12px 20px; }
-.mode-selector { border-radius: 12px; background: #eef2f5; padding: 4px; }
-.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 8px 22px; font-weight: normal; }
-.mode-selector button:checked { background: #ffffff; color: #087f83; box-shadow: 0 1px 3px alpha(#213b53,.12); }
-.dark .mode-selector { background: #15212b; }
-.dark .mode-selector button:checked { background: #30424f; color: #77dad1; }
-.home-switch { padding: 18px 20px; min-height: 30px; }
-.home-stat { padding: 18px 20px; }
-.home-stat + .home-stat { border-left: 1px solid alpha(#728292,.18); }
-.home-stat-value { font-size: 1.5em; font-weight: normal; font-feature-settings: "tnum"; }
-.home-start { border-radius: 18px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
+.dashboard-grid > flowboxchild { padding: 0; }
+.home-network { padding: 18px; min-width: 260px; }
+.home-network .exit-ip { font-size: 1.5em; font-weight: 600; }
+.speed-card { padding: 18px 16px; min-width: 124px; }
+.speed-value { font-size: 1.85em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 18px; min-width: 260px; }
+.mode-selector { border-radius: 12px; background: #edf0f6; padding: 4px; }
+.mode-selector button { border-radius: 9px; border: none; box-shadow: none; background: transparent; padding: 8px 12px; font-weight: 500; }
+.mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
+.dark .mode-selector { background: #1b2029; }
+.home-takeover { padding: 4px 18px; min-width: 260px; }
+.home-switch { min-height: 54px; }
+.home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
+.home-stat { padding: 18px; min-width: 132px; }
+.home-stat-value { font-size: 1.45em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-start { border-radius: 20px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
 .home-start image { -gtk-icon-size: 22px; }

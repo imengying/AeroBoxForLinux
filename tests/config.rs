@@ -4,11 +4,201 @@ use aerobox_for_linux::{
 };
 use serde_json::json;
 use std::{
+    io::{Read, Write},
     net::{TcpListener, UdpSocket},
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
+
+#[test]
+fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    let rules = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source = format!("http://{}/rules.json", rules.local_addr().unwrap());
+    rules.set_nonblocking(true).unwrap();
+    let allow_response = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let response_gate = allow_response.clone();
+    let worker_done = done.clone();
+    let worker_hits = hits.clone();
+    let worker = thread::spawn(move || {
+        let until = Instant::now() + Duration::from_secs(12);
+        while !worker_done.load(Ordering::Relaxed) && Instant::now() < until {
+            match rules.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let _ = stream.read(&mut [0; 4096]);
+                    worker_hits.fetch_add(1, Ordering::Relaxed);
+                    while !response_gate.load(Ordering::Relaxed)
+                        && !worker_done.load(Ordering::Relaxed)
+                        && Instant::now() < until
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    let body = r#"{"version":3,"rules":[{"domain_suffix":"ads.example"}]}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+    });
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_address = mixed.local_addr().unwrap();
+    drop((api, mixed));
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.settings.block_ads = true;
+            state.settings.bypass_lan = false;
+            state.settings.sniff = false;
+            for rule in &mut state.rulesets {
+                rule.source.clear();
+            }
+            let ads = state
+                .rulesets
+                .iter_mut()
+                .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
+                .unwrap();
+            ads.source = source;
+            ads.content = json!({"version":3,"rules":[]});
+            ads.update_interval_hours = 6;
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(proxy_address.port());
+            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+                json!(api_address.to_string());
+        state.profiles[0].config["dns"]["servers"] = json!([{"type":"hosts","tag":"test-hosts","predefined":{"ads.example":"127.0.0.1"}}]);
+        state.profiles[0].config["dns"]["final"] = json!("test-hosts");
+        state.profiles[0].config["route"]["default_domain_resolver"] = json!("test-hosts");
+            Ok(())
+        })
+        .unwrap();
+    let generated = service
+        .generate(&service.snapshot().settings.active_profile)
+        .unwrap();
+    let remote = generated["route"]["rule_set"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["type"] == "remote")
+        .unwrap();
+    assert_eq!(remote["update_interval"], "6h");
+    assert!(std::path::Path::new(remote["initial_path"].as_str().unwrap()).is_file());
+    service.check(&generated).unwrap();
+    let started = Instant::now();
+    service.start().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "startup waited for rule download"
+    );
+    let until = Instant::now() + Duration::from_secs(3);
+    while hits.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(10));
+    }
+    // The initial empty seed permits TCP to a bound listener. A deliberately
+    // incomplete HTTP server times out, whereas the updated ad rule rejects
+    // before connecting and returns a proxy HTTP error immediately.
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    origin.set_nonblocking(true).unwrap();
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::http(format!("http://{proxy_address}")).unwrap())
+        .timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let url = format!(
+        "http://ads.example:{}/policy",
+        origin.local_addr().unwrap().port()
+    );
+    let _ = client.get(&url).send();
+    assert!(
+        origin.accept().is_ok(),
+        "empty seed unexpectedly rejected loopback request"
+    );
+    allow_response.store(true, Ordering::Relaxed);
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        if client
+            .get(&url)
+            .send()
+            .is_ok_and(|r| r.status().is_server_error())
+        {
+            break;
+        }
+        while origin.accept().is_ok() {}
+        assert!(
+            Instant::now() < until,
+            "background rule update did not change routing: {}",
+            service.logs()
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    service.set_routing_mode("direct").unwrap();
+    assert_eq!(
+        service
+            .api("GET", "/proxies/aerobox-rule-download", None)
+            .unwrap()["now"],
+        "direct"
+    );
+    service.set_routing_mode("rule").unwrap();
+    assert_eq!(
+        service
+            .api("GET", "/proxies/aerobox-rule-download", None)
+            .unwrap()["now"],
+        "proxy"
+    );
+    service.stop().unwrap();
+    done.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+    let requests = hits.load(Ordering::Relaxed);
+    // Source is now offline. Re-generating the seed must not replace the
+    // downloaded cache, and startup must not wait for that offline source.
+    service.set_routing_mode("direct").unwrap();
+    let started = Instant::now();
+    service.start().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(service.runtime_mode().unwrap(), "direct");
+    assert_eq!(
+        service
+            .api("GET", "/proxies/aerobox-rule-download", None)
+            .unwrap()["now"],
+        "direct"
+    );
+    service.set_routing_mode("rule").unwrap();
+    assert!(client.get(&url).send().unwrap().status().is_server_error());
+    assert_eq!(hits.load(Ordering::Relaxed), requests);
+    assert_eq!(
+        service
+            .snapshot()
+            .rulesets
+            .iter()
+            .find(|r| r.id == aerobox_for_linux::model::BUILTIN_ADS_ID)
+            .unwrap()
+            .updated,
+        0
+    );
+    service.stop().unwrap();
+}
 
 #[test]
 fn builtins_generate_with_editable_rules_and_leave_source_intact() {
@@ -43,7 +233,7 @@ fn builtins_generate_with_editable_rules_and_leave_source_intact() {
         .unwrap()
         .iter()
         .find(|r| r["tag"] == "自定义广告")
-        .unwrap()["path"]
+        .unwrap()["initial_path"]
         .as_str()
         .unwrap();
     let content: serde_json::Value =
@@ -128,6 +318,9 @@ fn real_core_dns_modes_override_ads_and_flush_cached_answers() {
     let mut state = service.snapshot();
     state.settings.block_ads = true;
     state.settings.ipv6 = false;
+    for rule in &mut state.rulesets {
+        rule.source.clear();
+    }
     state
         .rulesets
         .iter_mut()

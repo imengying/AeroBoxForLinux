@@ -38,7 +38,7 @@ impl Ui {
             },
         );
         appearance.add(&theme);
-        let text_scale = adw::SpinRow::with_range(100.0, 150.0, 10.0);
+        let text_scale = adw::SpinRow::with_range(100.0, 150.0, 5.0);
         text_scale.set_title("文字大小（%）");
         text_scale.set_value(settings.text_scale as f64);
         appearance.add(&text_scale);
@@ -101,7 +101,7 @@ impl Ui {
         let cache = switch_row("DNS 缓存", "", settings.dns_cache);
         dns.add(&cache);
         let ads = switch_row("广告拦截", "", settings.block_ads);
-        ads.set_tooltip_text(Some("拦截内置基础广告列表中的域名"));
+        ads.set_tooltip_text(Some("使用自动更新的广告规则集"));
         routing.add(&ads);
         network_page.append(&routing);
         network_page.append(&dns);

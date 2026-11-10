@@ -24,11 +24,11 @@ cd AeroBoxForLinux-linux-amd64
 ## 使用
 
 1. 在设置中下载 sing-box 1.14 或更新的内核，或指定已有内核路径。内置安装器从 sing-box 官方 GitHub Release 下载并校验 SHA256。
-2. 通过链接、剪贴板或本地文件导入订阅；导入时自动解析，成功后入库。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS / HTTP 节点链接。
-3. 选择内置的「智能分流」「代理优先」或「直连网络」，编辑配置并勾选要关联的订阅。也可导入原始 sing-box JSON。
+2. 通过链接、剪贴板或本地文件导入订阅；导入默认开启「用于当前配置」，解析和关联一起完成。已有订阅可点击「使用」。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS / HTTP 节点链接。
+3. 配置页提供「智能分流」「代理优先」和「直连网络」，可选择、编辑及调整关联的订阅，也可导入原始 sing-box JSON。
 4. 预览并检查配置后启动内核。通过节点页切换节点和测试延迟，通过连接页查看、筛选和断开连接，通过日志页排查错误。
 
-系统代理支持 GNOME 和 KDE Plasma，停止代理时恢复本次修改前的设置。Sway / Hyprland 等窗口管理器可使用 TUN，或在各应用中填写本地 HTTP / SOCKS 代理。关闭主窗口会停止本程序启动的内核并恢复代理。
+系统代理支持 GNOME 和 KDE Plasma，停止代理时恢复本次修改前的设置。Brave / Chromium 使用系统设置时无需另填代理地址；浏览器扩展或启动参数若指定了代理，会覆盖桌面设置。Sway / Hyprland 等窗口管理器可使用 TUN，或在各应用中填写本地 HTTP / SOCKS 代理。关闭主窗口会停止本程序启动的内核并恢复代理。
 
 网络设置统一控制 IPv6、局域网访问、私网绕行、流量嗅探、DNS 劫持、DNS 缓存与广告拦截；设置作用于生成配置，保留原始 JSON。运行中修改设置会先检查配置，启动失败时尝试恢复原连接。出站模式可直接切换，无需重启内核。规则模式使用配置中的分流规则；全局模式使用配置的代理出口；直连模式全部直连。全局与直连优先于局域网绕行、广告拦截和普通分流规则，IPv6 禁用等网络限制仍生效。切换模式与节点时会确认内核实际状态，并断开旧连接，让新连接使用新出口。
 
@@ -40,7 +40,7 @@ cd AeroBoxForLinux-linux-amd64
 
 首页内存汇总 AeroBox 与正在运行的内核，优先使用按比例分摊共享页的 PSS；权限受限时统一回退 RSS，口径显示在提示中。它表示应用整体占用，不是整机内存使用量。
 
-内置局域网、国内常用域名和常见广告三组可编辑基础规则，随程序提供，不需要先下载。国内与广告列表是小型基础列表，可按需要扩展或导入其他规则集；可从配置页或规则集页点击「添加内置」恢复这些资源。
+内置局域网、中国大陆域名、中国大陆 IP 和广告拦截四组在线规则，来源为 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat/tree/sing)。sing-box 启动后下载并缓存，默认每 24 小时自动更新；断网时使用缓存，首次启动有基础规则可用。规则页可修改 URL、JSON / SRS 格式与 1–168 小时更新间隔；「内置在线规则」可添加或将内置列表接到在线来源。自建本地规则仍支持编辑。
 
 订阅、规则集和内核下载在连接时自动使用当前内核的代理入口，停止时直连，不读取独立下载代理设置。出口检测也使用同一路径，分别显示 IPv4 和 IPv6；无法连接相应检测服务时显示不可用。
 
@@ -60,9 +60,9 @@ sudo setcap cap_net_admin,cap_net_bind_service=+ep /实际路径/sing-box
 
 订阅支持普通 HTTP / HTTPS 地址、Hiddify / sing-box / Clash 导入链接，以及本地 JSON、YAML、Base64 或节点链接内容。文件导入后保存解析结果，无需保留原文件；远程订阅默认每 24 小时自动更新，可在订阅设置中关闭或调整为 1–168 小时。列表显示节点数量、更新时间、流量额度和有效期；流量与有效期以服务端提供的信息为准。
 
-自动更新仅在应用运行时执行，失败后保留原节点并延后重试；更新正在使用的订阅时，会先校验生成配置，再重载，失败则恢复原连接。导入不会自动切换配置，可在配置页关联订阅。设置按常规、网络、虚拟网卡和内核分组，修改后使用右上角「保存」。
+自动更新仅在应用运行时执行，失败后保留原节点并延后重试；更新正在使用的订阅时，会先校验生成配置，再重载，失败则恢复原连接。导入不会切换配置；「用于当前配置」控制是否关联，已有订阅也可点击「使用」。运行中应用订阅会先检查配置再重载，失败保留原连接。设置按常规、网络、虚拟网卡和内核分组，修改后使用右上角「保存」。
 
-订阅导入流程、更新信息和设置分组参考 [Hiddify](https://github.com/hiddify/hiddify-app)。规则集支持直接填写域名、IP 网段、进程名或端口生成匹配条件，复杂规则仍可用 JSON 编辑。
+首页的卡片密度、分组和导航参考 [FlClash](https://github.com/chen08209/FlClash)，保持统一颜色、间距和文字层级，支持 Wayland 的 1.25 倍显示缩放。订阅导入流程、更新信息和设置分组参考 [Hiddify](https://github.com/hiddify/hiddify-app)。规则集支持直接填写域名、IP 网段、进程名或端口生成匹配条件，复杂规则仍可用 JSON 编辑。
 
 ## 从源码构建
 
@@ -85,7 +85,7 @@ make clean    # 清理 target/ 中的构建、打包和测试产物
 
 已有 sing-box 内核时，可运行 `SINGBOX_TEST_CORE=/内核路径/sing-box cargo test`，额外验证三种出站模式、IPv6 与 TUN 配置组合、启动与恢复、Clash API 和 SRS 规则集编译 / 反编译。测试使用隔离目录和临时端口，不启动 TUN 或修改主机路由。
 
-`make wayland` 还需要 Weston 和 `dbus-run-session`，Arch Linux 可安装 `weston dbus`。界面测试使用隔离的 XDG 目录和 D-Bus 会话，截图及日志保存在 `target/wayland/`。`AEROBOX_TEST_SCALE=2 make wayland` 可检查 2 倍显示缩放，截图保存到 `target/wayland/scale-2/`。可用 `CARGO_TARGET_DIR=/其他目录 make package` 或 `make wayland` 将所有生成文件放到仓库外。
+`make wayland` 还需要 Weston 和 `dbus-run-session`，Arch Linux 可安装 `weston dbus`。界面测试使用隔离的 XDG 目录和 D-Bus 会话，截图及日志保存在 `target/wayland/`。`AEROBOX_TEST_SCALE=2 make wayland` 可检查 2 倍显示缩放。额外安装 `sway` 后，`AEROBOX_TEST_SCALE=1.25 make wayland` 在独立的 headless Sway 中验证真实的 1.25 倍 Wayland surface，检查首页、窄窗口、设置和弹窗布局。截图按实际缩放保存到 `target/wayland/scale-2/` 或 `scale-1.25/`。可用 `CARGO_TARGET_DIR=/其他目录 make package` 或 `make wayland` 将所有生成文件放到仓库外。
 
 GitHub Actions 在 Linux amd64 / arm64 分别测试、编译和打包；分支构建产物位于 Actions，推送 `v*` 标签后自动发布到 Releases。每个架构发布一个包含程序、安装器和运行说明的 `.tar.gz`。
 

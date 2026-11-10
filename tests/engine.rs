@@ -22,7 +22,16 @@ use std::{
 
 fn service() -> (tempfile::TempDir, Arc<Service>) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(Some(dir.path().to_owned())).unwrap();
+    let mut store = Store::open(Some(dir.path().to_owned())).unwrap();
+    // Engine tests use loopback fixtures, never fetch the public builtin lists.
+    store
+        .update(|state| {
+            for rule in &mut state.rulesets {
+                rule.source.clear();
+            }
+            Ok(())
+        })
+        .unwrap();
     (dir, Service::new(store))
 }
 #[test]
@@ -303,6 +312,54 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
             .is_err()
     );
     assert_eq!(service.snapshot().subscriptions.len(), 1);
+}
+
+#[test]
+fn importing_can_atomically_link_the_chosen_profile_without_selecting_another() {
+    let (_dir, service) = service();
+    let active = service.snapshot().settings.active_profile;
+    let other = service.snapshot().profiles[1].id.clone();
+    let sub = Subscription {
+        nodes: vec![
+            json!({"type":"direct","tag":"helper"}),
+            json!({"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080}),
+        ],
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    service
+        .update(|state| {
+            state.profiles[1].config["outbounds"][0]["default"] = json!("direct");
+            Ok(())
+        })
+        .unwrap();
+    service
+        .import_subscription_for_profile(sub, Some(&other))
+        .unwrap();
+    let state = service.snapshot();
+    assert_eq!(state.settings.active_profile, active);
+    assert!(!state.profiles[0].subscriptions.contains(&id));
+    assert!(state.profiles[1].subscriptions.contains(&id));
+    let config = service.generate(&other).unwrap();
+    assert_eq!(config["outbounds"][0]["outbounds"], json!(["node"]));
+    assert!(config["outbounds"][0].get("default").is_none());
+    service
+        .update(|state| {
+            state.profiles[0].config["outbounds"] = json!([{"type":"direct","tag":"direct"}]);
+            Ok(())
+        })
+        .unwrap();
+    let before = serde_json::to_value(service.snapshot()).unwrap();
+    let sub = Subscription {
+        nodes: vec![json!({"type":"direct","tag":"direct"})],
+        ..Subscription::default()
+    };
+    assert!(
+        service
+            .import_subscription_for_profile(sub, Some(&active))
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), before);
 }
 #[test]
 fn process_stops_and_is_reaped() {
@@ -600,6 +657,81 @@ fn real_core_survives_the_starting_worker_thread() {
 }
 
 #[test]
+fn real_core_subscription_association_and_import_apply_transactionally() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let (_dir, service) = service();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mixed_address = mixed.local_addr().unwrap();
+    drop((api, mixed));
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.profiles[0].config["inbounds"][0]["listen_port"] = json!(mixed_address.port());
+            state.profiles[0].config["experimental"]["clash_api"]["external_controller"] =
+                json!(api_address.to_string());
+            Ok(())
+        })
+        .unwrap();
+    let profile = service.snapshot().settings.active_profile;
+    let sub = Subscription {
+        nodes: vec![json!({"type":"socks","tag":"node-a","server":"127.0.0.1","server_port":9})],
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    service.import_subscription(sub).unwrap();
+    service.start().unwrap();
+    let before_pid = service.status().pid;
+    service
+        .associate_subscription_with_profile(&id, &profile)
+        .unwrap();
+    assert_ne!(service.status().pid, before_pid);
+    assert_eq!(
+        service.api("GET", "/proxies/proxy", None).unwrap()["all"],
+        json!(["node-a"])
+    );
+    let unchanged = serde_json::to_value(service.snapshot()).unwrap();
+    let pid = service.status().pid;
+    let invalid = Subscription {
+        nodes: vec![json!({"type":"unknown-protocol","tag":"bad"})],
+        ..Subscription::default()
+    };
+    assert!(
+        service
+            .import_subscription_for_profile(invalid, Some(&profile))
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), unchanged);
+    assert_eq!(service.status().pid, pid);
+    let valid = Subscription {
+        nodes: vec![json!({"type":"socks","tag":"node-b","server":"127.0.0.1","server_port":9})],
+        ..Subscription::default()
+    };
+    let state_file = service.dir().join("state.json");
+    let backup = service.dir().join("state.backup");
+    fs::rename(&state_file, &backup).unwrap();
+    fs::create_dir(&state_file).unwrap();
+    let result = service.import_subscription_for_profile(valid.clone(), Some(&profile));
+    fs::remove_dir(&state_file).unwrap();
+    fs::rename(&backup, &state_file).unwrap();
+    assert!(result.is_err());
+    assert_eq!(service.status().pid, pid);
+    assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), unchanged);
+    service
+        .import_subscription_for_profile(valid, Some(&profile))
+        .unwrap();
+    assert_ne!(service.status().pid, pid);
+    assert_eq!(
+        service.api("GET", "/proxies/proxy", None).unwrap()["all"],
+        json!(["node-a", "node-b"])
+    );
+    service.stop().unwrap();
+}
+
+#[test]
 fn core_crash_test_helper() {
     let Ok(directory) = std::env::var("AEROBOX_TEST_CRASH_DIRECTORY") else {
         return;
@@ -837,6 +969,192 @@ fn stopped_system_proxy_preference_is_saved_without_changing_the_desktop() {
     service.set_system_proxy_enabled(false).unwrap();
     assert!(!service.snapshot().settings.system_proxy);
     assert!(!service.status().proxy);
+}
+
+#[test]
+fn isolated_gnome_proxy_browser_helper() {
+    let Ok(root) = std::env::var("AEROBOX_TEST_GNOME_DIRECTORY") else {
+        return;
+    };
+    let binary = std::env::var("SINGBOX_TEST_CORE").unwrap();
+    let root = std::path::PathBuf::from(root);
+    let (_remote_dir, remote) = service();
+    let (_app_dir, app) = service();
+    let port = || {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let remote_port = port();
+    let app_port = port();
+    let remote_api = port();
+    let app_api = port();
+    remote.update(|state| {
+        state.settings.core_path=binary.clone();
+        state.settings.routing_mode="direct".into();
+        let config=&mut state.profiles[0].config;
+        config["inbounds"][0]["listen_port"]=json!(remote_port);
+        config["experimental"]["clash_api"]["external_controller"]=json!(format!("127.0.0.1:{remote_api}"));
+        config["dns"]["servers"]=json!([{"type":"hosts","tag":"test-hosts","predefined":{"aerobox.proxy.test":"127.0.0.2"}}]);
+        config["dns"]["final"]=json!("test-hosts");
+        config["route"]["default_domain_resolver"]=json!("test-hosts");
+        Ok(())
+    }).unwrap();
+    remote.start().unwrap();
+    app.update(|state| {
+        state.settings.core_path = binary;
+        state.settings.routing_mode = "global".into();
+        let config = &mut state.profiles[0].config;
+        config["inbounds"][0]["listen_port"] = json!(app_port);
+        config["experimental"]["clash_api"]["external_controller"] =
+            json!(format!("127.0.0.1:{app_api}"));
+        Ok(())
+    })
+    .unwrap();
+    let profile = app.snapshot().settings.active_profile;
+    let sub = Subscription {
+        nodes: vec![
+            json!({"type":"socks","tag":"controlled-node","server":"127.0.0.1","server_port":remote_port}),
+        ],
+        ..Subscription::default()
+    };
+    app.import_subscription_for_profile(sub, Some(&profile))
+        .unwrap();
+    app.start().unwrap();
+    let get = |schema: &str, key: &str| -> String {
+        let output = Command::new("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let before = get("org.gnome.system.proxy", "mode");
+    app.set_system_proxy_enabled(true).unwrap();
+    assert_eq!(get("org.gnome.system.proxy", "mode"), "'manual'");
+    for kind in ["http", "https", "socks"] {
+        assert_eq!(
+            get(&format!("org.gnome.system.proxy.{kind}"), "host"),
+            "'127.0.0.1'"
+        );
+        assert_eq!(
+            get(&format!("org.gnome.system.proxy.{kind}"), "port"),
+            app_port.to_string()
+        );
+    }
+    let origin = TcpListener::bind("127.0.0.2:0").unwrap();
+    origin.set_nonblocking(true).unwrap();
+    let origin_port = origin.local_addr().unwrap().port();
+    let done = Arc::new(AtomicBool::new(false));
+    let server_done = done.clone();
+    let worker = thread::spawn(move || {
+        let until = Instant::now() + Duration::from_secs(30);
+        let mut count = 0;
+        while !server_done.load(Ordering::Relaxed) && Instant::now() < until {
+            match origin.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let _ = stream.read(&mut [0; 4096]);
+                    let body = "<html><body>AEROBOX_GNOME_PROXY_CHAIN_OK</body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    count += 1;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        count
+    });
+    let mut browser = Command::new("chromium");
+    browser
+        .args([
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-quic",
+            "--dump-dom",
+        ])
+        .arg(format!(
+            "--user-data-dir={}",
+            root.join("browser").display()
+        ))
+        .arg(format!(
+            "http://aerobox.proxy.test:{origin_port}/through-system-proxy"
+        ));
+    let output = aerobox_for_linux::engine::run_command(browser, Duration::from_secs(25));
+    done.store(true, Ordering::Relaxed);
+    let hits = worker.join().unwrap();
+    app.set_system_proxy_enabled(false).unwrap();
+    assert_eq!(get("org.gnome.system.proxy", "mode"), before);
+    let app_traffic = app.traffic().unwrap();
+    let remote_traffic = remote.traffic().unwrap();
+    app.stop().unwrap();
+    remote.stop().unwrap();
+    assert!(output.unwrap().contains("AEROBOX_GNOME_PROXY_CHAIN_OK"));
+    assert!(hits > 0 && app_traffic.download > 0 && remote_traffic.download > 0);
+    println!(
+        "GNOME readback: mode=manual, HTTP/HTTPS/SOCKS=loopback; Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded; previous mode restored"
+    );
+}
+
+#[test]
+fn gnome_system_proxy_reaches_a_node_from_chromium_and_restores_the_session() {
+    if std::env::var("SINGBOX_TEST_CORE").is_err() {
+        return;
+    }
+    for program in ["dbus-run-session", "gsettings", "chromium"] {
+        if !Command::new("which")
+            .arg(program)
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new("dbus-run-session");
+    command
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "isolated_gnome_proxy_browser_helper",
+            "--nocapture",
+        ])
+        .env("AEROBOX_TEST_GNOME_DIRECTORY", dir.path())
+        .env("XDG_CURRENT_DESKTOP", "GNOME")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_CACHE_HOME", dir.path().join("cache"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("GSETTINGS_BACKEND", "dconf");
+    for key in [
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ] {
+        command.env_remove(key);
+    }
+    let output = aerobox_for_linux::engine::run_command(command, Duration::from_secs(45)).unwrap();
+    assert!(output.contains("Chromium system proxy -> AeroBox -> SOCKS node -> origin succeeded"));
 }
 
 #[test]

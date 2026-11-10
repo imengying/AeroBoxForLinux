@@ -701,10 +701,15 @@ pub fn ruleset(
 ) {
     let editor = EditorWindow::new(parent, "编辑规则集", "");
     let stack = tabs(&editor.body);
+    stack.set_widget_name("ruleset-tabs");
     let (scroll, form) = form_page();
     let basic = group("规则集", "");
     let name = entry("名称", &item.name);
-    let source = entry("更新地址或文件路径", &item.source);
+    let source = entry("在线地址或本地文件", &item.source);
+    let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
+    interval.set_title("自动更新间隔（小时）");
+    interval.set_value(item.update_interval_hours as f64);
+    interval.set_visible(item.is_remote());
     let format_model = gtk::StringList::new(&["JSON 源文件", "SRS 二进制文件"]);
     let format = adw::ComboRow::builder()
         .title("文件格式")
@@ -714,14 +719,10 @@ pub fn ruleset(
     basic.add(&name);
     basic.add(&source);
     basic.add(&format);
+    basic.add(&interval);
     form.append(&basic);
     stack.add_titled(&scroll, Some("general"), "基本信息");
-    let content = SourceEditor::new(
-        &model::pretty(&item.content),
-        "json",
-        true,
-        "远程更新会替换规则内容",
-    );
+    let content = SourceEditor::new(&model::pretty(&item.content), "json", true, "");
     let rules = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let quick = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     quick.set_margin_start(24);
@@ -752,7 +753,20 @@ pub fn ruleset(
     quick.append(&add_rule);
     rules.append(&quick);
     rules.append(&content.root);
-    stack.add_titled(&rules, Some("content"), "规则内容");
+    let content_page = stack.add_titled(&rules, Some("content"), "规则内容");
+    content_page.set_visible(!item.is_remote());
+    let switcher = stack.prev_sibling().expect("editor tabs");
+    switcher.set_visible(!item.is_remote());
+    let switcher = switcher.downgrade();
+    let remote_interval = interval.clone();
+    source.connect_changed(move |source| {
+        let online = model::is_online_source(source.text().trim());
+        remote_interval.set_visible(online);
+        content_page.set_visible(!online);
+        if let Some(switcher) = switcher.upgrade() {
+            switcher.set_visible(!online);
+        }
+    });
     let content_for_format = rules.clone();
     content_for_format.set_sensitive(!item.binary);
     format
@@ -783,7 +797,9 @@ pub fn ruleset(
         let result = (|| -> Result<()> {
             ensure!(!name.text().trim().is_empty(), "请填写规则集名称");
             let binary = format.selected() == 1;
-            let value = if !binary {
+            let source_text = source.text().trim().to_owned();
+            let online = model::is_online_source(&source_text);
+            let value = if !binary && !online {
                 let value = parse_json_buffer(&content.buffer)?;
                 validate_rules(&value)?;
                 Some(value)
@@ -799,7 +815,8 @@ pub fn ruleset(
                     .unwrap_or_else(|| item.clone());
                 let previous_name = next.name.clone();
                 next.name = name.text().trim().into();
-                next.source = source.text().trim().into();
+                next.source = source_text;
+                next.update_interval_hours = interval.value() as u32;
                 next.binary = binary;
                 // A completed background update stays intact when only metadata
                 // was edited. Explicit content edits remain authoritative.
@@ -1158,6 +1175,82 @@ fn validate_rules(value: &Value) -> Result<()> {
     ensure!(
         value["version"].as_u64().is_some(),
         "规则集需要填写 version"
+    );
+    Ok(())
+}
+
+pub(super) fn smoke_ruleset(parent: &adw::ApplicationWindow, service: Arc<Service>) -> Result<()> {
+    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut result = Vec::new();
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            result.extend(descendants(&widget));
+            result.push(widget);
+        }
+        result
+    }
+    let window = parent
+        .application()
+        .context("缺少应用")?
+        .active_window()
+        .context("规则编辑器未打开")?;
+    ensure!(
+        window.title().as_deref() == Some("编辑规则集"),
+        "规则编辑器未打开"
+    );
+    let widgets = descendants(&window);
+    let stack = widgets
+        .iter()
+        .find(|w| w.widget_name() == "ruleset-tabs")
+        .context("缺少规则页签")?
+        .clone()
+        .downcast::<gtk::Stack>()
+        .unwrap();
+    let content = stack.child_by_name("content").context("缺少规则内容页")?;
+    let interval = widgets
+        .iter()
+        .filter_map(|w| w.downcast_ref::<adw::SpinRow>())
+        .find(|r| r.title() == "自动更新间隔（小时）")
+        .context("缺少规则更新间隔")?;
+    let source = widgets
+        .iter()
+        .filter_map(|w| w.downcast_ref::<adw::EntryRow>())
+        .find(|r| r.title() == "在线地址或本地文件")
+        .context("缺少规则来源")?;
+    ensure!(
+        interval.is_visible() && !stack.page(&content).is_visible(),
+        "在线规则显示了无效的本地编辑器"
+    );
+    let original_source = source.text();
+    source.set_text("");
+    ensure!(
+        !interval.is_visible() && stack.page(&content).is_visible(),
+        "本地规则编辑不可用"
+    );
+    source.set_text(&original_source);
+    interval.set_value(12.0);
+    let before = service
+        .snapshot()
+        .rulesets
+        .into_iter()
+        .find(|r| r.id == model::BUILTIN_DOMESTIC_ID)
+        .context("缺少测试规则")?;
+    let save = widgets
+        .iter()
+        .filter_map(|w| w.downcast_ref::<gtk::Button>())
+        .find(|b| b.label().as_deref() == Some("保存"))
+        .context("缺少保存按钮")?;
+    save.emit_clicked();
+    let saved = service
+        .snapshot()
+        .rulesets
+        .into_iter()
+        .find(|r| r.id == before.id)
+        .context("规则保存失败")?;
+    ensure!(
+        saved.is_remote() && saved.update_interval_hours == 12 && saved.content == before.content,
+        "在线规则更新设置没有正确保存"
     );
     Ok(())
 }

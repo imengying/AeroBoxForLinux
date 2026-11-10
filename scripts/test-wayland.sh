@@ -2,13 +2,16 @@
 set -eu
 target_dir=${CARGO_TARGET_DIR:-target}
 test_scale=${AEROBOX_TEST_SCALE:-1}
-case "$test_scale" in 1|2) ;; *) printf '%s\n' 'AEROBOX_TEST_SCALE must be 1 or 2' >&2; exit 1 ;; esac
+case "$test_scale" in 1|1.25|2) ;; *) printf '%s\n' 'AEROBOX_TEST_SCALE must be 1, 1.25 or 2' >&2; exit 1 ;; esac
 binary=${1:-"$target_dir/release/AeroBox"}
 binary=$(realpath "$binary")
 output_path="$target_dir/wayland"
 if [ "$test_scale" != 1 ]; then output_path="$output_path/scale-$test_scale"; fi
 mkdir -p "$output_path"
 output_dir=$(realpath "$output_path")
+if [ "$test_scale" = 1.25 ]; then
+  exec "$(dirname "$0")/test-wayland-fractional.sh" "$binary" "$output_dir"
+fi
 test_dir=$(mktemp -d)
 cleanup() {
   if [ -n "${weston_pid:-}" ]; then

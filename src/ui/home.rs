@@ -27,7 +27,7 @@ pub(super) struct Dashboard {
 impl Ui {
     pub(super) fn home(self: &Rc<Self>) {
         self.body.add_css_class("home-page");
-        self.body.set_spacing(20);
+        self.body.set_spacing(14);
         self.body.set_margin_bottom(32);
         self.scroll.set_margin_bottom(100);
         let state = self.service.snapshot();
@@ -93,6 +93,7 @@ impl Ui {
         let network = card(gtk::Orientation::Vertical, 12);
         network.add_css_class("home-network");
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        header.append(&gtk::Image::from_icon_name("network-wireless-symbolic"));
         let title = label("出口 IP", "section-title");
         title.set_hexpand(true);
         header.append(&title);
@@ -109,7 +110,7 @@ impl Ui {
         }
         top.insert(&network, -1);
 
-        let speeds = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let speeds = gtk::Box::new(gtk::Orientation::Horizontal, 14);
         speeds.set_homogeneous(true);
         let (down, download, download_unit, download_total) =
             speed_card("go-down-symbolic", "下载", "download");
@@ -120,14 +121,15 @@ impl Ui {
         top.insert(&speeds, -1);
         self.body.append(&top);
 
-        let controls = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        let controls = gtk::Box::new(gtk::Orientation::Vertical, 0);
         controls.set_sensitive(self.jobs.get() == 0);
-        let mode_row = card(gtk::Orientation::Horizontal, 16);
+        let control_grid = flow(1, 2);
+        let mode_row = card(gtk::Orientation::Vertical, 12);
         mode_row.add_css_class("home-mode");
         let title = label("出站模式", "section-title");
-        title.set_hexpand(true);
         mode_row.append(&title);
         let modes = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        modes.set_homogeneous(true);
         modes.add_css_class("mode-selector");
         let mut first: Option<gtk::ToggleButton> = None;
         let mut mode_buttons = Vec::new();
@@ -166,10 +168,10 @@ impl Ui {
             mode_buttons.push((value, button));
         }
         mode_row.append(&modes);
-        controls.append(&mode_row);
+        control_grid.insert(&mode_row, -1);
 
-        let switches = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-        switches.set_homogeneous(true);
+        let switches = card(gtk::Orientation::Vertical, 0);
+        switches.add_css_class("home-takeover");
         for (title, system, active, icon) in [
             (
                 "系统代理",
@@ -188,7 +190,7 @@ impl Ui {
                 "network-wired-symbolic",
             ),
         ] {
-            let row = card(gtk::Orientation::Horizontal, 12);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             row.add_css_class("home-switch");
             let image = gtk::Image::from_icon_name(icon);
             image.add_css_class("muted");
@@ -231,18 +233,22 @@ impl Ui {
             row.append(&switch);
             switches.append(&row);
         }
-        controls.append(&switches);
+        control_grid.insert(&switches, -1);
+        controls.append(&control_grid);
         self.body.append(&controls);
 
-        let stats = card(gtk::Orientation::Horizontal, 0);
+        let stats = flow(1, 3);
         stats.add_css_class("home-stats");
-        stats.set_homogeneous(true);
-        let (connection_box, connections) = stat("连接数", "—");
-        let (uptime_box, uptime) = stat("运行时间", &duration(status.uptime));
-        let (memory_box, memory) = stat("内存占用", "—");
-        stats.append(&connection_box);
-        stats.append(&uptime_box);
-        stats.append(&memory_box);
+        let (connection_box, connections) = stat("network-workgroup-symbolic", "连接数", "—");
+        let (uptime_box, uptime) = stat(
+            "preferences-system-time-symbolic",
+            "运行时间",
+            &duration(status.uptime),
+        );
+        let (memory_box, memory) = stat("computer-symbolic", "内存占用", "—");
+        stats.insert(&connection_box, -1);
+        stats.insert(&uptime_box, -1);
+        stats.insert(&memory_box, -1);
         self.body.append(&stats);
 
         let dashboard = Rc::new(Dashboard {
@@ -462,8 +468,9 @@ fn flow(min: u32, max: u32) -> gtk::FlowBox {
     flow.set_homogeneous(true);
     flow.set_min_children_per_line(min);
     flow.set_max_children_per_line(max);
-    flow.set_column_spacing(16);
-    flow.set_row_spacing(16);
+    flow.set_column_spacing(14);
+    flow.set_row_spacing(14);
+    flow.add_css_class("dashboard-grid");
     flow
 }
 fn speed_card(
@@ -471,7 +478,7 @@ fn speed_card(
     title: &str,
     accent: &str,
 ) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label) {
-    let card = card(gtk::Orientation::Vertical, 12);
+    let card = card(gtk::Orientation::Vertical, 14);
     card.add_css_class("speed-card");
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     heading.add_css_class(accent);
@@ -479,11 +486,16 @@ fn speed_card(
     heading.append(&label(title, "section-title"));
     card.append(&heading);
     let value = label("—", "speed-value");
-    card.append(&value);
+    let reading = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    reading.set_valign(gtk::Align::Center);
+    reading.set_vexpand(true);
+    reading.append(&value);
     let unit = label("B/s", "muted small");
-    card.append(&unit);
+    unit.set_valign(gtk::Align::End);
+    unit.set_margin_bottom(5);
+    reading.append(&unit);
+    card.append(&reading);
     let total = label("累计 —", "muted small");
-    total.set_vexpand(true);
     total.set_valign(gtk::Align::End);
     total.set_ellipsize(gtk::pango::EllipsizeMode::End);
     card.append(&total);
@@ -500,10 +512,13 @@ fn set_speed(value: &gtk::Label, unit: &gtk::Label, count: Option<u64>) {
         unit.set_text("B/s");
     }
 }
-fn stat(title: &str, value: &str) -> (gtk::Box, gtk::Label) {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
+fn stat(icon: &str, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
+    let box_ = card(gtk::Orientation::Vertical, 16);
     box_.add_css_class("home-stat");
-    box_.append(&label(title, "muted"));
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    heading.append(&gtk::Image::from_icon_name(icon));
+    heading.append(&label(title, "section-title"));
+    box_.append(&heading);
     let value = label(value, "home-stat-value");
     box_.append(&value);
     (box_, value)

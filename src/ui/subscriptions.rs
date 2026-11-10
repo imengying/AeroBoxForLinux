@@ -54,6 +54,11 @@ impl Ui {
             }
         });
         let state = self.service.snapshot();
+        let active_profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.settings.active_profile)
+            .cloned();
         if state.subscriptions.is_empty() {
             self.body
                 .append(&empty("folder-download-symbolic", "暂无订阅", ""));
@@ -157,6 +162,38 @@ impl Ui {
             label.add_css_class("dim-label");
             details.append(&label);
             footer.append(&details);
+            if let Some(profile) = active_profile.as_ref() {
+                let linked = profile.subscriptions.contains(&item.id);
+                let use_subscription =
+                    gtk::Button::with_label(if linked { "已使用" } else { "使用" });
+                use_subscription.set_valign(gtk::Align::Center);
+                use_subscription.set_sensitive(!linked);
+                use_subscription.set_tooltip_text(Some(&format!("用于配置「{}」", profile.name)));
+                let weak = Rc::downgrade(self);
+                let subscription_id = item.id.clone();
+                let profile_id = profile.id.clone();
+                use_subscription.connect_clicked(move |button| {
+                    if let Some(ui) = weak.upgrade() {
+                        let subscription_id = subscription_id.clone();
+                        let profile_id = profile_id.clone();
+                        ui.button_task(
+                            button,
+                            "应用中…",
+                            move |s| {
+                                s.associate_subscription_with_profile(&subscription_id, &profile_id)
+                            },
+                            |ui, result| match result {
+                                Ok(()) => {
+                                    ui.notify("已用于当前配置");
+                                    ui.refresh(Page::Subscriptions);
+                                }
+                                Err(error) => ui.error("应用订阅失败", format!("{error:#}")),
+                            },
+                        );
+                    }
+                });
+                footer.append(&use_subscription);
+            }
             let nodes = gtk::Button::with_label("节点");
             nodes.set_valign(gtk::Align::Center);
             nodes.add_css_class("flat");
@@ -177,8 +214,8 @@ impl Ui {
             .title("导入订阅")
             .transient_for(&self.window)
             .modal(true)
-            .default_width(580)
-            .default_height(540)
+            .default_width(600)
+            .default_height(640)
             .build();
         if let Some(app) = self.window.application() {
             window.set_application(Some(&app));
@@ -232,6 +269,22 @@ impl Ui {
         auto_update
             .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
         let updates = adw::PreferencesGroup::new();
+        let state = self.service.snapshot();
+        let active_profile = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.settings.active_profile);
+        let use_current = switch_row(
+            "用于当前配置",
+            active_profile
+                .map(|p| p.name.as_str())
+                .unwrap_or("未选择配置"),
+            active_profile.is_some(),
+        );
+        use_current.set_sensitive(active_profile.is_some());
+        use_current.set_widget_name("subscription-import-use-current");
+        let profile_id = active_profile.map(|p| p.id.clone());
+        updates.add(&use_current);
         updates.add(&auto_update);
         updates.add(&interval);
         form.append(&updates);
@@ -244,7 +297,12 @@ impl Ui {
         error.set_widget_name("subscription-import-error");
         error.add_css_class("error");
         form.append(&error);
-        root.append(&form);
+        let form_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&form)
+            .build();
+        root.append(&form_scroll);
         window.set_content(Some(&root));
         let buffer = source.buffer();
         let clipboard = window.clipboard();
@@ -343,6 +401,7 @@ impl Ui {
             let name = name.text().trim().to_owned();
             let auto_update = auto_update.is_active();
             let interval = interval.value() as u32;
+            let profile_id = profile_id.clone().filter(|_| use_current.is_active());
             let window = weak_window.clone();
             let error = error.clone();
             let busy = busy.clone();
@@ -358,7 +417,7 @@ impl Ui {
                     }
                     sub.auto_update = auto_update && !sub.source.is_empty();
                     sub.update_interval_hours = interval;
-                    s.import_subscription(sub)
+                    s.import_subscription_for_profile(sub, profile_id.as_deref())
                 },
                 move |ui, result| {
                     busy.set(false);
@@ -406,6 +465,8 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
             sub.source.is_empty() && !sub.auto_update && sub.nodes.len() == 1,
             "本地导入状态无效"
         );
+        ensure!(state.profiles.iter().any(|p| p.id == state.settings.active_profile && p.subscriptions.contains(&sub.id)),
+            "导入的订阅没有用于当前配置");
         return Ok(());
     }
     let window = ui
