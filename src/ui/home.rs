@@ -27,7 +27,7 @@ pub(super) struct Dashboard {
 impl Ui {
     pub(super) fn home(self: &Rc<Self>) {
         self.body.add_css_class("home-page");
-        self.body.set_spacing(14);
+        self.body.set_spacing(16);
         self.body.set_margin_bottom(32);
         self.scroll.set_margin_bottom(100);
         let state = self.service.snapshot();

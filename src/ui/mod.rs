@@ -283,7 +283,7 @@ impl Ui {
             }
         });
         content.append(&header);
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 20);
         body.add_css_class("page-content");
         margin(&body, 24, 24, 12, 24);
         let clamp = adw::Clamp::builder()
@@ -491,7 +491,7 @@ impl Ui {
         self.node_panel.replace(None);
         self.body.remove_css_class("settings-page");
         self.body.remove_css_class("home-page");
-        self.body.set_spacing(24);
+        self.body.set_spacing(20);
         self.body.set_margin_bottom(32);
         self.scroll.vadjustment().set_value(0.0);
         self.scroll.set_margin_bottom(0);
@@ -1103,9 +1103,9 @@ fn seed_smoke(service: &Service) -> Result<()> {
             json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080}),
             json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
             json!({"type":"urltest","tag":"自动选择","outbounds":["香港 · 01"]}),
-            json!({"type":"direct","tag":"默认"})],updated:model::now()-1200,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
+            json!({"type":"direct","tag":"默认"})],updated:model::now()-1200,expires:model::now()+30*86400,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
         let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
-        let backup = Subscription { name: "备用订阅".into(), selected_node:Some("香港 · 01".into()), nodes: vec![
+        let backup = Subscription { name: "备用订阅".into(), expires:model::now()+60*86400,updated:model::now()-7200,total:100*1024*1024*1024,download:62*1024*1024*1024, selected_node:Some("香港 · 01".into()), nodes: vec![
             json!({"type":"socks","tag":"香港 · 01","server":"127.0.0.1","server_port":1081}),
             json!({"type":"socks","tag":"备用 · 02","server":"127.0.0.1","server_port":1082}),
             json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
@@ -1190,6 +1190,10 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 16 => "subscription-import.png",
                 19 => "core-settings.png",
                 20 => "nodes-imported.png",
+                21 => "subscriptions-large-text.png",
+                22 => "subscriptions-menu.png",
+                23 => "subscriptions-narrow.png",
+                24 => "nodes-narrow.png",
                 _ => "",
             };
             if !name.is_empty() {
@@ -1268,9 +1272,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 }
                 6 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
+                    nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
                 7 => {
+                    nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     apply_theme("light");
                     ui.navigate(Page::Home);
                     ui.window.set_default_size(790, 800);
@@ -1344,6 +1350,26 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 20 => {
                     nodes::smoke_nodes(&ui, "导入检查", 1, None, None)?;
                     startup::smoke_recovery()?;
+                    ui.navigate(Page::Subscriptions);
+                }
+                21 => {
+                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    subscriptions::smoke_menu(&ui, true)?;
+                }
+                22 => {
+                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    subscriptions::smoke_menu(&ui, false)?;
+                    ui.window.set_default_size(600, 720);
+                }
+                23 => {
+                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    let id = ui.service.snapshot().subscriptions[0].id.clone();
+                    ui.service.select_subscription(&id)?;
+                    ui.navigate(Page::Nodes);
+                }
+                24 => {
+                    nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
+                    nodes::smoke_test_node(&ui, 0)?;
                 }
                 _ => {}
             }
@@ -1359,7 +1385,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 20 {
+        if current == 24 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

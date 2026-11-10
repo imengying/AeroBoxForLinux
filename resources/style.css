@@ -3,9 +3,9 @@
 @define-color accent_bg_color #2878d7;
 @define-color accent_fg_color #ffffff;
 @define-color accent_color #2878d7;
-.aerobox-window { background: #f4f5f8; color: #272d36; }
-.aerobox-window.dark { background: #181b21; color: #e8eaf0; }
-.app-sidebar { background: #eaeef4; border-right: 1px solid alpha(#728292, .13); }
+.aerobox-window { background: #f5f6f9; color: #272d36; }
+.aerobox-window.dark { background: #191c22; color: #e8eaf0; }
+.app-sidebar { background: #eef1f6; border-right: 1px solid alpha(#728292, .13); }
 .dark .app-sidebar { background: #14171c; }
 
 .nav-list { background: transparent; }
@@ -14,18 +14,21 @@
 
 .dark .nav-list row:selected { background: #26364e; color: #a4c8ff; }
 .nav-list row:hover { background: alpha(#2878d7, .07); }
-.nav-item { min-height: 44px; font-weight: normal; }
+.nav-item { min-height: 42px; font-weight: normal; }
 .nav-list row:selected .nav-item { font-weight: 600; }
 
 
 .muted { color: alpha(@window_fg_color, .78); }
 
 .small { font-size: 0.95em; }
-.surface-card { border-radius: 18px; background: #ffffff; border: 1px solid #e5e8ee; box-shadow: 0 2px 3px alpha(#213b53,.025); }
-.dark .surface-card { background: #242830; border-color: #363c47; box-shadow: none; }
+.page-title { font-size: 1.45em; font-weight: 600; }
+.brand { font-size: 1.5em; font-weight: 600; }
+.section-title, .resource-name { font-weight: 600; }
+.surface-card { border-radius: 14px; background: #ffffff; border: 1px solid #e2e6ed; box-shadow: none; }
+.dark .surface-card { background: #24282f; border-color: #363c47; box-shadow: none; }
 .metric-value { font-size: 1.5em; font-feature-settings: "tnum"; font-weight: normal; }
 .metric-icon { color: #6888b4; }
-.primary-action { border-radius: 12px; padding: 10px 18px; font-weight: 600; }
+.primary-action { border-radius: 10px; padding: 9px 16px; font-weight: 600; }
 .compact-action { border-radius: 8px; min-height: 30px; }
 .row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; min-width: 42px; min-height: 42px; }
 .dark .row-icon { background: #29364c; color: #a4bfe4; }
@@ -38,20 +41,34 @@
 
 .empty-description { color: alpha(@window_fg_color, .78); }
 .search { border-radius: 10px; min-height: 36px; }
-/* One flat subscription list; focus and the chosen outbound are distinct. */
-.nodes-list { background: @view_bg_color; border-radius: 14px; border: 1px solid alpha(@window_fg_color, .1); padding: 4px; }
-.nodes-list row { border-radius: 9px; padding: 0; margin: 2px 0; border: 1px solid transparent; }
-.nodes-list row:hover { background: alpha(@accent_bg_color, .06); }
-.nodes-list row.node-selected { background: #e5efff; border-color: #7da9e3; }
-.dark .nodes-list row.node-selected { background: #263b58; border-color: #527faf; }
-.node-line { padding: 12px 16px; min-height: 28px; }
-.node-check { color: @accent_color; }
-.node-delay { font-feature-settings: "tnum"; }
-.subscriptions-list { background: transparent; }
-.subscriptions-list row { padding: 0; margin: 0 0 12px; border-radius: 16px; background: @view_bg_color; border: 1px solid alpha(@window_fg_color, .12); }
-.subscriptions-list row:hover { background: mix(@view_bg_color, @accent_bg_color, .04); }
-.subscriptions-list row.subscription-selected { background: #e5efff; border-color: #7da9e3; }
-.dark .subscriptions-list row.subscription-selected { background: #263b58; border-color: #527faf; }
+/* Shared card surfaces, selection and focus for nodes and subscriptions. */
+.nodes-grid, .subscriptions-grid { background: transparent; }
+.node-card, .subscription-card { padding: 0; border-radius: 14px; background: #ffffff; border: 1px solid #e2e6ed; }
+.dark .node-card, .dark .subscription-card { background: #24282f; border-color: #363c47; }
+.node-card:hover, .subscription-card:hover { background: #f0f4fb; border-color: #b9cce6; }
+.dark .node-card:hover, .dark .subscription-card:hover { background: #2a3342; border-color: #52647e; }
+.node-card.node-selected, .subscription-card.subscription-selected { background: #e7efff; border-color: #76a3e0; }
+.dark .node-card.node-selected, .dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
+.node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
+.node-card-content { padding: 16px; }
+.node-name, .subscription-name { font-weight: 600; }
+.node-protocol, .node-delay { font-size: 0.95em; }
+.node-protocol { color: alpha(@window_fg_color, .72); }
+.node-check, .selection-check { color: @accent_color; }
+.node-delay, .subscription-usage { font-feature-settings: "tnum"; }
+.node-card-footer { margin-top: 14px; }
+.node-test-button { padding: 5px; min-width: 22px; min-height: 22px; border-radius: 8px; }
+.node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; }
+.subscription-card-content { padding: 16px 18px 18px; min-width: 300px; }
+.subscription-card-header { min-height: 30px; }
+.subscription-expiry { font-feature-settings: "tnum"; }
+.subscription-expiry.error { color: @error_color; }
+.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 4px; min-height: 6px; }
+.subscription-progress progress { background: @accent_bg_color; border-radius: 4px; min-height: 6px; }
+.subscription-usage { font-size: 0.95em; font-weight: 500; }
+.card-menu > button { padding: 4px; min-width: 20px; min-height: 22px; border-radius: 8px; }
+.subscription-actions { padding: 4px; }
+.subscription-actions button { padding: 8px 16px; }
 
 .log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
 .editor-root { background: @window_bg_color; }
@@ -79,7 +96,9 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
-.settings-page row { min-height: 56px; }
+.settings-page row { min-height: 54px; }
+.aerobox-window .boxed-list { border-radius: 14px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
+.aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
 
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .78); }
 
@@ -98,5 +117,5 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
 .home-stat { padding: 18px; min-width: 132px; }
 .home-stat-value { font-size: 1.45em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-start { border-radius: 20px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
+.home-start { border-radius: 16px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
 .home-start image { -gtk-icon-size: 22px; }

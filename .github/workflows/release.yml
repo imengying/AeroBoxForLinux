@@ -89,11 +89,10 @@ jobs:
           body: |
             AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
 
-            删除配置页；导入订阅后直接使用，点击订阅卡片切换，点击节点整行选择并高亮。
-            节点页只显示当前订阅的节点，不显示代理组、搜索或路由模式。规则、全局和直连只在首页切换。
-            内置与 AeroBoxForAndroid 相同来源的三个 SagerNet 规则集，附带本地初始数据并在线自动更新。
-            新增连接诊断，检查本地端口、系统代理和实际 HTTP / HTTPS 请求；修复 Clash Shadowsocks 插件参数导入。
-            数据结构重新整理，不迁移旧版数据。旧数据可在启动提示中备份并重置后重新导入订阅。
+            节点恢复方框卡片，点击卡片选中并高亮，底部图标独立测速；测速不会改变当前节点。
+            订阅采用两列卡片：名称与有效期在上方，流量进度条居中，已用 / 总量与更新时间在下方。
+            首页、节点、订阅及设置统一卡片边框、圆角、间距、字体和选中样式，支持窄窗口及 1.25 倍缩放。
+            节点页仍只展示当前订阅的实际节点；规则、全局与直连只在首页切换。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。

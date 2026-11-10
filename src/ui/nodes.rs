@@ -1,23 +1,28 @@
 use super::*;
 use aerobox_for_linux::engine::SubscriptionNode;
+use std::collections::HashSet;
 
 pub(super) struct NodesPanel {
     subscription_id: String,
-    list: gtk::ListBox,
+    grid: gtk::FlowBox,
     empty: gtk::Widget,
     test: gtk::Button,
     data: RefCell<Vec<SubscriptionNode>>,
-    rows: RefCell<Vec<NodeRow>>,
+    cards: RefCell<Vec<NodeCard>>,
     selecting: Cell<bool>,
     testing: Cell<bool>,
+    pending: RefCell<HashSet<String>>,
     revision: Cell<u64>,
 }
 
-struct NodeRow {
-    row: gtk::ListBoxRow,
+struct NodeCard {
+    child: gtk::FlowBoxChild,
     indicator: gtk::Stack,
     spinner: gtk::Spinner,
     delay: gtk::Label,
+    test: gtk::Button,
+    test_indicator: gtk::Stack,
+    test_spinner: gtk::Spinner,
 }
 
 impl Ui {
@@ -51,33 +56,40 @@ impl Ui {
         test.set_widget_name("nodes-test");
         test.set_tooltip_text(Some("测试此订阅的节点延迟"));
         heading.append(&test);
-        let list = gtk::ListBox::new();
-        list.add_css_class("nodes-list");
-        list.set_widget_name("subscription-nodes");
-        // Highlight only a successfully applied choice, never the row that was
-        // merely clicked or focused while a core operation is still pending.
-        list.set_selection_mode(gtk::SelectionMode::None);
-        list.set_activate_on_single_click(true);
-        list.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
-        self.body.append(&list);
+        let grid = gtk::FlowBox::new();
+        grid.add_css_class("nodes-grid");
+        grid.set_widget_name("subscription-nodes");
+        grid.set_selection_mode(gtk::SelectionMode::None);
+        grid.set_activate_on_single_click(true);
+        grid.set_homogeneous(true);
+        grid.set_min_children_per_line(1);
+        grid.set_max_children_per_line(3);
+        grid.set_column_spacing(12);
+        grid.set_row_spacing(12);
+        grid.set_valign(gtk::Align::Start);
+        grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
+        self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
         self.body.append(&empty);
         let panel = Rc::new(NodesPanel {
             subscription_id,
-            list: list.clone(),
+            grid: grid.clone(),
             empty: empty.upcast(),
             test: test.clone(),
             data: RefCell::new(vec![]),
-            rows: RefCell::new(vec![]),
+            cards: RefCell::new(vec![]),
             selecting: Cell::new(false),
             testing: Cell::new(false),
+            pending: RefCell::new(HashSet::new()),
             revision: Cell::new(0),
         });
         let weak = Rc::downgrade(self);
         let weak_panel = Rc::downgrade(&panel);
-        list.connect_row_activated(move |_, row| {
+        // FlowBoxChild supplies native pointer and keyboard activation. Its
+        // descendant test button consumes its own activation independently.
+        grid.connect_child_activated(move |_, child| {
             if let (Some(ui), Some(panel)) = (weak.upgrade(), weak_panel.upgrade()) {
-                panel.select(&ui, row.index() as usize);
+                panel.select(&ui, child.index() as usize);
             }
         });
         let weak = Rc::downgrade(self);
@@ -94,37 +106,51 @@ impl Ui {
 }
 
 impl NodesPanel {
-    fn reload_local(&self, ui: &Ui) {
+    fn reload_local(self: &Rc<Self>, ui: &Rc<Ui>) {
         match ui.service.subscription_nodes(&self.subscription_id) {
-            Ok(nodes) => self.display(nodes),
+            Ok(nodes) => self.display(ui, nodes),
             Err(error) => ui.error("读取节点失败", error),
         }
     }
 
-    fn display(&self, nodes: Vec<SubscriptionNode>) {
-        self.list.set_tooltip_text(None);
+    fn display(self: &Rc<Self>, ui: &Rc<Ui>, mut nodes: Vec<SubscriptionNode>) {
+        self.grid.set_tooltip_text(None);
         let changed = self
             .data
             .borrow()
             .iter()
-            .map(|n| &n.node_tag)
-            .ne(nodes.iter().map(|n| &n.node_tag));
+            .map(|n| (&n.node_tag, &n.protocol))
+            .ne(nodes.iter().map(|n| (&n.node_tag, &n.protocol)));
         if changed {
-            self.rows.borrow_mut().clear();
-            while let Some(child) = self.list.first_child() {
-                self.list.remove(&child);
+            self.cards.borrow_mut().clear();
+            while let Some(child) = self.grid.first_child() {
+                self.grid.remove(&child);
             }
             for node in &nodes {
-                let row = gtk::ListBoxRow::new();
-                row.set_selectable(false);
-                row.set_activatable(true);
-                row.set_widget_name("subscription-node");
-                row.update_property(&[gtk::accessible::Property::Label(&node.name)]);
-                let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-                line.add_css_class("node-line");
+                let child = gtk::FlowBoxChild::new();
+                child.add_css_class("node-card");
+                child.set_widget_name("subscription-node");
+                child.set_focusable(true);
+                child.set_size_request(220, -1);
+                child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                content.add_css_class("node-card-content");
+                let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                title.set_vexpand(true);
+                let name = label(&node.name, "node-name");
+                name.set_hexpand(true);
+                name.set_valign(gtk::Align::Start);
+                name.set_wrap(true);
+                name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                name.set_lines(2);
+                name.set_width_chars(1);
+                name.set_max_width_chars(22);
+                name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                name.set_tooltip_text(Some(&node.name));
+                title.append(&name);
                 let indicator = gtk::Stack::new();
                 indicator.set_size_request(20, 20);
-                indicator.set_valign(gtk::Align::Center);
+                indicator.set_valign(gtk::Align::Start);
                 let check = gtk::Image::from_icon_name("object-select-symbolic");
                 check.add_css_class("node-check");
                 indicator.add_named(&check, Some("chosen"));
@@ -134,54 +160,126 @@ impl NodesPanel {
                 );
                 let spinner = gtk::Spinner::new();
                 indicator.add_named(&spinner, Some("busy"));
-                line.append(&indicator);
-                let name = label(&node.name, "node-name");
-                name.set_hexpand(true);
-                name.set_width_chars(1);
-                name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                name.set_tooltip_text(Some(&node.name));
-                line.append(&name);
+                title.append(&indicator);
+                content.append(&title);
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                footer.add_css_class("node-card-footer");
+                let protocol = label(&node.protocol.to_uppercase(), "muted node-protocol");
+                protocol.set_hexpand(true);
+                protocol.set_width_chars(1);
+                protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                footer.append(&protocol);
                 let delay = label("—", "muted node-delay");
-                delay.set_width_chars(8);
                 delay.set_xalign(1.0);
-                line.append(&delay);
-                row.set_child(Some(&line));
-                self.list.append(&row);
-                self.rows.borrow_mut().push(NodeRow {
-                    row,
+                footer.append(&delay);
+                let test = gtk::Button::new();
+                test.add_css_class("flat");
+                test.add_css_class("node-test-button");
+                test.set_widget_name("node-test");
+                test.set_valign(gtk::Align::Center);
+                test.set_tooltip_text(Some("测试此节点延迟"));
+                test.update_property(&[gtk::accessible::Property::Label(&format!(
+                    "测试 {} 延迟",
+                    node.name
+                ))]);
+                let test_indicator = gtk::Stack::new();
+                test_indicator.set_size_request(18, 18);
+                test_indicator.add_named(
+                    &gtk::Image::from_icon_name("network-transmit-receive-symbolic"),
+                    Some("icon"),
+                );
+                let test_spinner = gtk::Spinner::new();
+                test_indicator.add_named(&test_spinner, Some("busy"));
+                test.set_child(Some(&test_indicator));
+                let weak = Rc::downgrade(ui);
+                let weak_panel = Rc::downgrade(self);
+                let tag = node.node_tag.clone();
+                test.connect_clicked(move |_| {
+                    if let (Some(ui), Some(panel)) = (weak.upgrade(), weak_panel.upgrade()) {
+                        panel.measure_one(&ui, &tag);
+                    }
+                });
+                // GTK skips insensitive widgets during pointer picking. Keep
+                // their hit area from falling through to card activation.
+                let test_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                test_slot.append(&test);
+                let guard = gtk::GestureClick::new();
+                guard.set_propagation_phase(gtk::PropagationPhase::Capture);
+                let weak_button = test.downgrade();
+                guard.connect_pressed(move |gesture, _, _, _| {
+                    if weak_button
+                        .upgrade()
+                        .is_some_and(|button| !button.is_sensitive())
+                    {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                    }
+                });
+                test_slot.add_controller(guard);
+                footer.append(&test_slot);
+                content.append(&footer);
+                child.set_child(Some(&content));
+                self.grid.insert(&child, -1);
+                self.cards.borrow_mut().push(NodeCard {
+                    child,
                     indicator,
                     spinner,
                     delay,
+                    test,
+                    test_indicator,
+                    test_spinner,
                 });
             }
         }
-        for (node, row) in nodes.iter().zip(self.rows.borrow().iter()) {
-            row.spinner.stop();
-            row.indicator
+        let previous = self.data.borrow();
+        for (node, card) in nodes.iter_mut().zip(self.cards.borrow().iter()) {
+            card.spinner.stop();
+            card.indicator
                 .set_visible_child_name(if node.selected { "chosen" } else { "empty" });
             if node.selected {
-                row.row.add_css_class("node-selected");
+                card.child.add_css_class("node-selected");
             } else {
-                row.row.remove_css_class("node-selected");
+                card.child.remove_css_class("node-selected");
             }
-            row.row
+            card.child
                 .update_state(&[gtk::accessible::State::Selected(Some(node.selected))]);
-            row.delay.set_text(&delay_text(node.delay_ms));
-            row.delay.set_tooltip_text(None);
+            if node.delay_ms.is_none() {
+                node.delay_ms = previous
+                    .iter()
+                    .find(|old| old.node_tag == node.node_tag)
+                    .and_then(|old| old.delay_ms);
+            }
+            card.delay.set_text(&delay_text(node.delay_ms));
         }
-        self.list.set_visible(!nodes.is_empty());
+        drop(previous);
+        self.grid.set_visible(!nodes.is_empty());
         self.empty.set_visible(nodes.is_empty());
         self.data.replace(nodes);
         self.controls();
     }
 
     fn controls(&self) {
-        self.list.set_sensitive(!self.selecting.get());
+        self.grid.set_sensitive(!self.selecting.get());
+        let pending = self.pending.borrow();
         self.test.set_sensitive(
             !self.selecting.get()
                 && !self.testing.get()
+                && pending.is_empty()
                 && self.data.borrow().iter().any(|n| n.available),
         );
+        for (node, card) in self.data.borrow().iter().zip(self.cards.borrow().iter()) {
+            let busy = pending.contains(&node.node_tag);
+            card.test.set_sensitive(
+                node.available && !self.selecting.get() && !self.testing.get() && !busy,
+            );
+            card.test.set_tooltip_text(Some(if node.available {
+                "测试此节点延迟"
+            } else {
+                "启动内核后测速"
+            }));
+            card.test_spinner.set_spinning(busy);
+            card.test_indicator
+                .set_visible_child_name(if busy { "busy" } else { "icon" });
+        }
     }
 
     fn read_runtime(self: &Rc<Self>, ui: &Rc<Ui>) {
@@ -198,11 +296,12 @@ impl NodesPanel {
                 if let Some(panel) = weak.upgrade()
                     && panel.revision.get() == revision
                     && !panel.selecting.get()
+                    && panel.pending.borrow().is_empty()
                     && ui.service.status().pid == pid
                 {
                     match result {
-                        Ok(nodes) => panel.display(nodes),
-                        Err(error) => panel.list.set_tooltip_text(Some(&format!("{error:#}"))),
+                        Ok(nodes) => panel.display(ui, nodes),
+                        Err(error) => panel.grid.set_tooltip_text(Some(&format!("{error:#}"))),
                     }
                 }
             },
@@ -219,16 +318,14 @@ impl NodesPanel {
         self.selecting.set(true);
         self.revision.set(self.revision.get() + 1);
         self.controls();
-        if let Some(row) = self.rows.borrow().get(index) {
-            row.indicator.set_visible_child_name("busy");
-            row.spinner.start();
+        if let Some(card) = self.cards.borrow().get(index) {
+            card.indicator.set_visible_child_name("busy");
+            card.spinner.start();
         }
         let weak = Rc::downgrade(self);
         ui.task_result(
             move |s| s.select_subscription_node(&node.subscription_id, &node.node_tag),
             move |ui, result| {
-                // Keep focus and scroll position when this selection updates the
-                // profile. Subscription refreshes still rebuild the page normally.
                 ui.subscription_revision
                     .set(ui.service.subscription_revision());
                 if let Some(panel) = weak.upgrade() {
@@ -243,8 +340,70 @@ impl NodesPanel {
         );
     }
 
+    fn measure_one(self: &Rc<Self>, ui: &Rc<Ui>, tag: &str) {
+        if self.selecting.get() || self.testing.get() || self.pending.borrow().contains(tag) {
+            return;
+        }
+        let Some(node) = self
+            .data
+            .borrow()
+            .iter()
+            .find(|n| n.node_tag == tag)
+            .cloned()
+        else {
+            return;
+        };
+        if !node.available {
+            return;
+        }
+        self.pending.borrow_mut().insert(tag.into());
+        self.revision.set(self.revision.get() + 1);
+        self.controls();
+        let pid = ui.service.status().pid;
+        let tag = tag.to_owned();
+        let weak = Rc::downgrade(self);
+        ui.task_result(
+            move |service| service.test_subscription_node(&node.subscription_id, &node.node_tag),
+            move |ui, result| {
+                let Some(panel) = weak.upgrade() else {
+                    return;
+                };
+                panel.pending.borrow_mut().remove(&tag);
+                panel.controls();
+                if ui.service.status().pid != pid {
+                    panel.reload_local(ui);
+                    return;
+                }
+                panel.show_delay(&tag, result, pid.is_none());
+            },
+        );
+    }
+
+    fn show_delay(&self, tag: &str, result: Result<u64>, stopped: bool) {
+        let mut data = self.data.borrow_mut();
+        let cards = self.cards.borrow();
+        if let Some((node, card)) = data
+            .iter_mut()
+            .zip(cards.iter())
+            .find(|(n, _)| n.node_tag == tag)
+        {
+            match result {
+                Ok(delay) => {
+                    node.delay_ms = Some(delay);
+                    card.delay.set_text(&delay_text(Some(delay)));
+                    card.delay.set_tooltip_text(None);
+                }
+                Err(error) => {
+                    node.delay_ms = None;
+                    card.delay.set_text(if stopped { "未启动" } else { "失败" });
+                    card.delay.set_tooltip_text(Some(&format!("{error:#}")));
+                }
+            }
+        }
+    }
+
     fn measure(self: &Rc<Self>, ui: &Rc<Ui>) {
-        if self.testing.get() || self.selecting.get() {
+        if self.testing.get() || self.selecting.get() || !self.pending.borrow().is_empty() {
             return;
         }
         let nodes: Vec<_> = self
@@ -258,6 +417,11 @@ impl NodesPanel {
             return;
         }
         self.testing.set(true);
+        self.revision.set(self.revision.get() + 1);
+        self.pending
+            .borrow_mut()
+            .extend(nodes.iter().map(|(_, tag)| tag.clone()));
+        self.controls();
         let pid = ui.service.status().pid;
         let weak = Rc::downgrade(self);
         ui.button_task(
@@ -293,6 +457,7 @@ impl NodesPanel {
                     return;
                 };
                 panel.testing.set(false);
+                panel.pending.borrow_mut().clear();
                 panel.controls();
                 if ui.service.status().pid != pid {
                     panel.reload_local(ui);
@@ -300,27 +465,8 @@ impl NodesPanel {
                 }
                 match result {
                     Ok(results) => {
-                        let mut data = panel.data.borrow_mut();
-                        let rows = panel.rows.borrow();
                         for (tag, result) in results {
-                            if let Some((node, row)) = data
-                                .iter_mut()
-                                .zip(rows.iter())
-                                .find(|(n, _)| n.node_tag == tag)
-                            {
-                                match result {
-                                    Ok(delay) => {
-                                        node.delay_ms = Some(delay);
-                                        row.delay.set_text(&delay_text(Some(delay)));
-                                        row.delay.set_tooltip_text(None);
-                                    }
-                                    Err(error) => {
-                                        node.delay_ms = Some(0);
-                                        row.delay.set_text("失败");
-                                        row.delay.set_tooltip_text(Some(&format!("{error:#}")));
-                                    }
-                                }
-                            }
+                            panel.show_delay(&tag, result, false);
                         }
                     }
                     Err(error) => ui.error("测速失败", error),
@@ -360,18 +506,47 @@ pub(super) fn smoke_nodes(
     );
     ensure!(
         panel.data.borrow().len() == count,
-        "列表混入其他订阅或代理组"
+        "卡片混入其他订阅或代理组"
     );
     let highlighted: Vec<_> = panel
         .data
         .borrow()
         .iter()
-        .zip(panel.rows.borrow().iter())
-        .filter(|(_, row)| row.row.has_css_class("node-selected"))
+        .zip(panel.cards.borrow().iter())
+        .filter(|(_, card)| card.child.has_css_class("node-selected"))
         .map(|(n, _)| n.node_tag.clone())
         .collect();
     if let Some(selected) = selected {
         ensure!(highlighted == vec![selected], "所选节点没有高亮");
+    }
+    for card in panel.cards.borrow().iter() {
+        let bounds = card
+            .child
+            .compute_bounds(&panel.grid)
+            .context("节点卡片没有位置")?;
+        ensure!(
+            bounds.width() > 0.0
+                && bounds.x() >= -1.0
+                && bounds.x() + bounds.width() <= panel.grid.width() as f32 + 1.0,
+            "节点卡片超出网格边界"
+        );
+        let test = card
+            .test
+            .compute_bounds(&card.child)
+            .context("测速按钮没有位置")?;
+        ensure!(
+            test.width() > 0.0
+                && test.height() > 0.0
+                && test.x() >= 0.0
+                && test.y() > 0.0
+                && test.x() + test.width() <= card.child.width() as f32 + 1.0
+                && test.y() + test.height() <= card.child.height() as f32 + 1.0,
+            "测速按钮不在卡片内"
+        );
+        ensure!(
+            card.child.is_focusable() && card.test.is_focusable(),
+            "卡片或测速按钮无法键盘操作"
+        );
     }
     fn inspect(widget: &gtk::Widget) -> Result<()> {
         ensure!(
@@ -406,17 +581,87 @@ pub(super) fn smoke_nodes(
     }
     inspect(ui.body.upcast_ref())?;
     if let Some(index) = click {
-        let row = panel.rows.borrow()[index].row.clone();
-        panel.list.emit_by_name::<()>("row-activated", &[&row]);
-        let highlighted_after: Vec<_> = panel
+        let child = panel
+            .cards
+            .borrow()
+            .get(index)
+            .context("节点索引无效")?
+            .child
+            .clone();
+        panel.grid.emit_by_name::<()>("child-activated", &[&child]);
+        let after: Vec<_> = panel
             .data
             .borrow()
             .iter()
-            .zip(panel.rows.borrow().iter())
-            .filter(|(_, row)| row.row.has_css_class("node-selected"))
+            .zip(panel.cards.borrow().iter())
+            .filter(|(_, card)| card.child.has_css_class("node-selected"))
             .map(|(n, _)| n.node_tag.clone())
             .collect();
-        ensure!(highlighted_after == highlighted, "选用成功前提前高亮了节点");
+        ensure!(after == highlighted, "选用成功前提前高亮了节点");
     }
+    Ok(())
+}
+
+/// Exercise the actual icon handler, including its disabled stopped-core guard.
+/// The next smoke step checks the selected node after any async work finishes.
+pub(super) fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
+    use anyhow::ensure;
+    ensure!(ui.jobs.get() == 0, "节点任务未完成");
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let before = ui.service.snapshot();
+    let node = panel
+        .data
+        .borrow()
+        .get(index)
+        .context("节点索引无效")?
+        .clone();
+    let button = panel
+        .cards
+        .borrow()
+        .get(index)
+        .context("缺少节点卡片")?
+        .test
+        .clone();
+    ensure!(
+        button.is_sensitive() == node.available,
+        "独立测速按钮状态错误"
+    );
+    button.emit_clicked();
+    ensure!(!panel.selecting.get(), "测速图标误触节点选择");
+    if node.available {
+        ensure!(
+            panel.pending.borrow().contains(&node.node_tag),
+            "独立测速没有开始"
+        );
+        ensure!(
+            panel.cards.borrow()[index].test_spinner.is_spinning(),
+            "独立测速缺少忙状态"
+        );
+    } else {
+        ensure!(
+            !panel.pending.borrow().contains(&node.node_tag),
+            "未启动内核仍发起了测速"
+        );
+        ensure!(
+            button
+                .tooltip_text()
+                .is_some_and(|text| text.contains("启动内核")),
+            "未说明测速需要启动内核"
+        );
+    }
+    let after = ui.service.snapshot();
+    ensure!(
+        before.settings.active_subscription == after.settings.active_subscription
+            && before.settings.routing_mode == after.settings.routing_mode
+            && before
+                .subscriptions
+                .iter()
+                .map(|s| (&s.id, &s.selected_node))
+                .eq(after
+                    .subscriptions
+                    .iter()
+                    .map(|s| (&s.id, &s.selected_node))),
+        "测速改变了所选节点或模式"
+    );
     Ok(())
 }
