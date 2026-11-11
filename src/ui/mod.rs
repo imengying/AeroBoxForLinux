@@ -206,7 +206,7 @@ impl Ui {
     fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
         let settings = service.snapshot().settings;
         apply_theme(&settings.theme);
-        let typography = typography::Typography::new(settings.text_scale, settings.crisp_text);
+        let typography = typography::Typography::new(settings.font_size, settings.crisp_text);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("AeroBox")
@@ -246,7 +246,7 @@ impl Ui {
         ));
         let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
         let mark = gtk::Image::from_paintable(Some(&texture));
-        mark.set_pixel_size(36);
+        mark.add_css_class("brand-mark");
         let name = label("AeroBox", "brand");
         name.set_valign(gtk::Align::Center);
         brand.append(&mark);
@@ -262,7 +262,7 @@ impl Ui {
             item.add_css_class("nav-item");
             margin(&item, 15, 12, 0, 0);
             let image = gtk::Image::from_icon_name(page.icon());
-            image.set_pixel_size(18);
+            image.add_css_class("nav-icon");
             item.append(&image);
             item.append(&label(page.title(), ""));
             row.set_child(Some(&item));
@@ -272,8 +272,9 @@ impl Ui {
         sidebar.append(&nav);
         let split = adw::OverlaySplitView::new();
         split.set_sidebar(Some(&sidebar));
-        split.set_min_sidebar_width(200.0);
-        split.set_max_sidebar_width(200.0);
+        let sidebar_width = sidebar_width(settings.font_size);
+        split.set_min_sidebar_width(sidebar_width);
+        split.set_max_sidebar_width(sidebar_width);
         split.set_sidebar_width_fraction(0.2);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = adw::HeaderBar::new();
@@ -504,11 +505,18 @@ impl Ui {
             }
         })
     }
+    /// Apply a font size to the window and the pieces whose width is measured
+    /// in pixels rather than em, so a live preview stays internally consistent.
+    fn apply_font_size(&self, font_size: u32, crisp: bool) {
+        self.typography.apply(font_size, crisp);
+        let width = sidebar_width(font_size);
+        self.split.set_min_sidebar_width(width);
+        self.split.set_max_sidebar_width(width);
+    }
     fn show(self: &Rc<Self>, page: Page) {
         if self.page.get() == Page::Settings && page != Page::Settings {
             let settings = self.service.snapshot().settings;
-            self.typography
-                .apply(settings.text_scale, settings.crisp_text);
+            self.apply_font_size(settings.font_size, settings.crisp_text);
         }
         self.page.set(page);
         self.dashboard.replace(None);
@@ -1047,7 +1055,6 @@ fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     row.add_css_class("resource-row");
     let image = gtk::Image::from_icon_name(icon);
-    image.set_pixel_size(20);
     image.add_css_class("row-icon");
     row.append(&image);
     let text = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -1070,7 +1077,6 @@ fn empty(icon: &str, title: &str, description: &str) -> gtk::Box {
     margin(&root, 24, 24, 54, 54);
     root.set_halign(gtk::Align::Center);
     let image = gtk::Image::from_icon_name(icon);
-    image.set_pixel_size(34);
     image.add_css_class("empty-icon");
     image.set_halign(gtk::Align::Center);
     root.append(&image);
@@ -1095,6 +1101,11 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 /// FlowBox only spreads leftover space across children already on a row, so
 /// the column count has to follow the available width. Watching the width from
 /// a frame-clock tick is the only signal a FlowBox reliably offers.
+/// Sidebar width follows the font so the brand and nav labels keep their
+/// margins instead of clipping against a fixed track.
+fn sidebar_width(font_size: u32) -> f64 {
+    200.0 * (font_size as f64 / 11.0).clamp(0.9, 1.6)
+}
 fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_columns: u32) {
     let last_width = std::rc::Rc::new(Cell::new(-1));
     let grid_weak = grid.downgrade();
@@ -1105,11 +1116,32 @@ fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_colu
         let width = grid.width();
         if width != last_width.get() {
             last_width.set(width);
-            if width > 0 {
-                let columns =
-                    ((width + spacing) / (min_card_width + spacing)).clamp(1, max_columns as i32);
+            // Thresholds are authored for the default font. A larger font makes
+            // the grid's own allocation smaller (the sidebar and padding grow
+            // with it), which is already accounted for here; scaling the
+            // threshold again would drop a column on a window that still fits.
+            let scale = grid
+                .pango_context()
+                .font_description()
+                .map(|font| {
+                    let points = font.size() as f32 / gtk::pango::SCALE as f32;
+                    // Square-root damping keeps large text from collapsing the
+                    // grid while still giving it a little extra breathing room.
+                    (points / 11.0).sqrt().clamp(0.85, 1.4)
+                })
+                .unwrap_or(1.0);
+            let card = (min_card_width as f32 * scale).round() as i32;
+            let gap = (spacing as f32 * scale).round() as i32;
+            if width > 0 && card > 0 {
+                let columns = ((width + gap) / (card + gap)).clamp(1, max_columns as i32);
                 if grid.max_children_per_line() != columns as u32 {
                     grid.set_max_children_per_line(columns as u32);
+                }
+                // Pin the minimum as well: a FlowBox left at min=1 happily gives
+                // a single card the whole row instead of using the columns it
+                // was told it may use.
+                if grid.min_children_per_line() != columns as u32 {
+                    grid.set_min_children_per_line(columns as u32);
                 }
             }
         }
@@ -1265,6 +1297,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let step = Cell::new(0);
     let floating_y = Cell::new(None::<f32>);
     let font_size = Cell::new(None);
+    let row_height = Cell::new(None);
     let parent = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1421,6 +1454,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                             .font_description()
                             .map(|f| f.size()),
                     );
+                    row_height.set(settings::smoke_row_height(&ui));
                     settings::smoke_settings(&ui, false)?;
                 }
                 15 => {
@@ -1432,7 +1466,16 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         .map(|f| f.size());
                     anyhow::ensure!(
                         matches!((font_size.get(),larger),(Some(before),Some(after)) if after>before),
-                        "文字大小没有实时生效"
+                        "字体大小没有实时生效"
+                    );
+                    // Text alone is not enough: rows and controls must grow with
+                    // it, otherwise larger type just gets cramped in place.
+                    let after_row = settings::smoke_row_height(&ui);
+                    anyhow::ensure!(
+                        matches!((row_height.get(),after_row),(Some(before),Some(after)) if after > before),
+                        "字体变大后行高没有跟随: {:?} -> {:?}",
+                        row_height.get(),
+                        after_row
                     );
                     ui.navigate(Page::Subscriptions);
                     ui.import_subscription();

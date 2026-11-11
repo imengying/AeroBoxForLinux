@@ -1,14 +1,19 @@
 use super::*;
 
-/// One scale for every window, including dialogs, popovers and source editors.
-/// Keep the desktop font and valid DPI, with GTK's default for an unset DPI.
+/// Applies the user's base font size and text rendering preference to every
+/// window, dialog, popover and source editor.
+///
+/// The size is expressed in points and becomes the root font size; every
+/// spacing and control metric in `style.css` is written in `em`, so changing
+/// the font also changes row heights and paddings. Scaling only the glyph size
+/// would leave text cramped inside fixed-height rows.
 pub(super) struct Typography {
     provider: gtk::CssProvider,
     system_rendering: Vec<(&'static str, glib::Value)>,
 }
 
 impl Typography {
-    pub(super) fn new(scale: u32, crisp: bool) -> Self {
+    pub(super) fn new(font_size: u32, crisp: bool) -> Self {
         let provider = gtk::CssProvider::new();
         gtk::style_context_add_provider_for_display(
             &gtk::gdk::Display::default().expect("Wayland display"),
@@ -37,15 +42,16 @@ impl Typography {
             provider,
             system_rendering,
         };
-        result.apply(scale, crisp);
+        result.apply(font_size, crisp);
         result
     }
 
-    pub(super) fn apply(&self, scale: u32, crisp: bool) {
-        self.provider.load_from_data(&format!(
-            "window {{ font-size: {}%; }}",
-            scale.clamp(100, 150)
-        ));
+    pub(super) fn apply(&self, font_size: u32, crisp: bool) {
+        let size = font_size.clamp(model::FONT_SIZE_MIN, model::FONT_SIZE_MAX);
+        // Applied to `window` so dialogs, popovers and editors inherit the same
+        // base size; leftover desktop defaults made different surfaces drift.
+        self.provider
+            .load_from_data(&format!("window {{ font-size: {size}pt; }}"));
         let settings = gtk::Settings::default().expect("GTK settings");
         if crisp {
             // GTK >= 4.16 otherwise ignores the hinting preference in automatic

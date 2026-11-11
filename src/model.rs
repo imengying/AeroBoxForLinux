@@ -23,11 +23,18 @@ pub fn pretty(value: &impl Serialize) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
+/// Bounds for the configurable base font size, in points. The range keeps
+/// labels readable while still fitting the smallest supported window.
+pub const FONT_SIZE_MIN: u32 = 9;
+pub const FONT_SIZE_MAX: u32 = 18;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
-    pub text_scale: u32,
+    /// Base UI font size in points. Row heights and paddings derive from it,
+    /// so text and layout scale together instead of only the glyphs.
+    pub font_size: u32,
     pub crisp_text: bool,
     pub hardware_acceleration: bool,
     pub core_path: String,
@@ -60,7 +67,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "system".into(),
-            text_scale: 120,
+            font_size: 11,
             crisp_text: true,
             hardware_acceleration: false,
             core_path: String::new(),
@@ -99,8 +106,8 @@ impl Settings {
             "本地代理与控制端口须为不同的非零端口"
         );
         ensure!(
-            (100..=150).contains(&self.text_scale),
-            "文字大小须在 100% 到 150% 之间"
+            (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
+            "字体大小须在 {FONT_SIZE_MIN} 到 {FONT_SIZE_MAX} 之间"
         );
         ensure!(
             matches!(self.routing_mode.as_str(), "rule" | "global" | "direct"),
@@ -561,6 +568,14 @@ impl Store {
             ensure!(
                 value["schema"] == 2 && value.get("profiles").is_none(),
                 "不支持旧版数据结构；请使用新的数据目录，原文件未更改"
+            );
+            // The percentage text scale was replaced by an absolute font size.
+            // Silently defaulting it would leave every existing install at a
+            // size the user never picked, so say so instead of guessing.
+            ensure!(
+                value["settings"].get("text_scale").is_none(),
+                "旧版的「文字大小（%）」设置已改为「字体大小」；请删除 {} 后重新打开，原文件未更改",
+                path.display()
             );
             serde_json::from_value::<State>(value).context("无法读取 AeroBox 数据；原文件未更改")?
         } else {

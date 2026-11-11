@@ -38,25 +38,39 @@ impl Ui {
             },
         );
         appearance.add(&theme);
-        let text_scale = adw::SpinRow::with_range(100.0, 150.0, 5.0);
-        text_scale.set_title("文字大小（%）");
-        text_scale.set_value(settings.text_scale as f64);
-        appearance.add(&text_scale);
+        // Discrete sizes keep the preview predictable: each step is a whole
+        // point, matching how FlClash offers a short list instead of a slider.
+        let sizes: Vec<String> = (model::FONT_SIZE_MIN..=model::FONT_SIZE_MAX)
+            .map(|size| format!("{size} pt"))
+            .collect();
+        let font_size = adw::ComboRow::builder()
+            .title("字体大小")
+            .model(&gtk::StringList::new(
+                &sizes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ))
+            .selected(
+                settings
+                    .font_size
+                    .clamp(model::FONT_SIZE_MIN, model::FONT_SIZE_MAX)
+                    - model::FONT_SIZE_MIN,
+            )
+            .build();
+        appearance.add(&font_size);
         let crisp_text = switch_row("清晰文字", "", settings.crisp_text);
         crisp_text.set_tooltip_text(Some("将字形对齐到像素；关闭后跟随系统文字渲染"));
         appearance.add(&crisp_text);
         let weak = Rc::downgrade(self);
         let crisp = crisp_text.downgrade();
-        text_scale.connect_value_notify(move |row| {
+        font_size.connect_selected_notify(move |row| {
             if let (Some(ui), Some(crisp)) = (weak.upgrade(), crisp.upgrade()) {
-                ui.typography.apply(row.value() as u32, crisp.is_active());
+                ui.apply_font_size(model::FONT_SIZE_MIN + row.selected(), crisp.is_active());
             }
         });
         let weak = Rc::downgrade(self);
-        let scale = text_scale.downgrade();
+        let size = font_size.downgrade();
         crisp_text.connect_active_notify(move |row| {
-            if let (Some(ui), Some(scale)) = (weak.upgrade(), scale.upgrade()) {
-                ui.typography.apply(scale.value() as u32, row.is_active());
+            if let (Some(ui), Some(size)) = (weak.upgrade(), size.upgrade()) {
+                ui.apply_font_size(model::FONT_SIZE_MIN + size.selected(), row.is_active());
             }
         });
         theme.connect_selected_notify(|row| {
@@ -245,7 +259,7 @@ impl Ui {
                 return;
             };
             let mut next = ui.service.snapshot().settings;
-            next.text_scale = text_scale.value() as u32;
+            next.font_size = model::FONT_SIZE_MIN + font_size.selected();
             next.crisp_text = crisp_text.is_active();
             next.theme = match theme.selected() {
                 1 => "light",
@@ -332,6 +346,29 @@ fn combo(title: &str, choices: &[&str], selected: u32) -> adw::ComboRow {
         .build()
 }
 
+/// Height of the first settings row, used to prove that a font change moves
+/// layout and not just glyph size.
+pub(super) fn smoke_row_height(ui: &Rc<Ui>) -> Option<i32> {
+    fn tallest(widget: &gtk::Widget) -> Option<adw::ActionRow> {
+        if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
+            return Some(row.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if let Some(found) = tallest(&widget) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let row = tallest(ui.body.upcast_ref())?;
+    // Measure rather than read `height()`: allocation happens on the next
+    // frame, so the cached height still belongs to the previous font size.
+    let (_, natural, _, _) = row.measure(gtk::Orientation::Vertical, -1);
+    Some(natural)
+}
+
 pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     use anyhow::ensure;
     let widgets = descendants(&ui.body);
@@ -347,7 +384,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ensure!(ui.jobs.get() == 0, "设置保存尚未完成");
         ensure!(
             !settings.ipv6
-                && settings.text_scale == 150
+                && settings.font_size == model::FONT_SIZE_MAX
                 && settings.crisp_text
                 && settings.allow_lan
                 && !settings.dns_cache
@@ -407,10 +444,10 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .set_value(1400.0);
     widgets
         .iter()
-        .filter_map(|w| w.clone().downcast::<adw::SpinRow>().ok())
-        .find(|row| row.title() == "文字大小（%）")
-        .context("缺少文字大小控件")?
-        .set_value(150.0);
+        .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
+        .find(|row| row.title() == "字体大小")
+        .context("缺少字体大小控件")?
+        .set_selected(model::FONT_SIZE_MAX - model::FONT_SIZE_MIN);
     save.emit_clicked();
     ensure!(!save.is_sensitive(), "保存期间没有禁用按钮");
     ensure!(

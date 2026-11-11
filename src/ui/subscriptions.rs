@@ -84,13 +84,19 @@ impl Ui {
         list.add_css_class("subscriptions-grid");
         list.set_selection_mode(gtk::SelectionMode::None);
         list.set_activate_on_single_click(true);
+        // Homogeneous keeps cards equal width; without a fixed minimum the
+        // FlowBox lets one card fill the row, so the minimum is dropped and the
+        // column count alone decides the layout.
         list.set_homogeneous(true);
-        list.set_min_children_per_line(1);
+        list.set_min_children_per_line(2);
         list.set_max_children_per_line(2);
         list.set_column_spacing(16);
         list.set_row_spacing(16);
         list.set_valign(gtk::Align::Start);
-        follow_width(&list, 320, 16, 3);
+        // Subscription cards stay at two columns at most: they carry a name,
+        // expiry, progress bar and usage figures that a third column would
+        // squeeze below a readable width.
+        follow_width(&list, 280, 16, 2);
         let ids: Vec<_> = state
             .subscriptions
             .iter()
@@ -116,8 +122,10 @@ impl Ui {
             title.set_widget_name("subscription-name");
             title.set_hexpand(true);
             title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            // Only cap the natural width; leaving it at one character made the
+            // name collapse to an ellipsis as soon as the font grew.
             title.set_width_chars(1);
-            title.set_max_width_chars(1);
+            title.set_max_width_chars(12);
             title.set_tooltip_text(Some(&item.name));
             header.append(&title);
             let indicator = gtk::Stack::new();
@@ -150,6 +158,9 @@ impl Ui {
             };
             let expiration = label(&expiry, "subscription-expiry muted small");
             expiration.set_widget_name("subscription-expiry");
+            // Let the expiry text shrink so a large font cannot force the card
+            // wider than half the grid.
+            expiration.set_ellipsize(gtk::pango::EllipsizeMode::End);
             if item.expires > 0 && item.expires <= model::now() {
                 expiration.add_css_class("error");
             }
@@ -650,7 +661,18 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
                 if ui.window.width() >= 1100 {
                     ensure!(
                         (bounds.y() - first.y()).abs() < 1.0 && bounds.x() > first.x(),
-                        "常规窗口没有一行两个订阅"
+                        "常规窗口没有一行两个订阅: window={} list={} first=({},{} {}x{}) second=({},{} {}x{}) max_cols={}",
+                        ui.window.width(),
+                        list.width(),
+                        first.x(),
+                        first.y(),
+                        first.width(),
+                        first.height(),
+                        bounds.x(),
+                        bounds.y(),
+                        bounds.width(),
+                        bounds.height(),
+                        list.max_children_per_line()
                     );
                 } else if ui.window.width() <= 620 {
                     ensure!(

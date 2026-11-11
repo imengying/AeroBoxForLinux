@@ -556,3 +556,21 @@ fn real_core_accepts_converted_shadowsocks_sip003_plugins() {
         service.check_current().unwrap();
     }
 }
+
+#[test]
+fn legacy_percentage_text_scale_is_rejected_instead_of_silently_defaulted() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("state.json"),
+        br#"{"schema":2,"settings":{"text_scale":120},"subscriptions":[],"rulesets":[]}"#,
+    )
+    .unwrap();
+    let error = match aerobox_for_linux::model::Store::open(Some(dir.path().to_path_buf())) {
+        Ok(_) => panic!("旧版的百分比字号设置应当被拒绝"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("文字大小"),
+        "unexpected error: {error:#}"
+    );
+}

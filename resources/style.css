@@ -9,12 +9,16 @@
 .dark .app-sidebar { background: #14171c; }
 
 .nav-list { background: transparent; }
-.nav-list row { border-radius: 10px; margin: 2px 0; padding: 0; color: alpha(@window_fg_color, .82); }
+.nav-list row { border-radius: 10px; margin: 0.18em 0; padding: 0; color: alpha(@window_fg_color, .82); }
 .nav-list row:selected { background: #dde9fc; color: #2268bc; }
 
 .dark .nav-list row:selected { background: #26364e; color: #a4c8ff; }
 .nav-list row:hover { background: alpha(#2878d7, .07); }
-.nav-item { min-height: 42px; font-weight: normal; }
+.nav-item { min-height: 3.82em; font-weight: normal; }
+/* Icon sizes follow the font too, so a larger font keeps icons proportional
+ * instead of leaving tiny glyphs next to oversized labels. */
+.brand-mark { -gtk-icon-size: 3.27em; }
+.nav-icon { -gtk-icon-size: 1.64em; }
 .nav-list row:selected .nav-item { font-weight: 600; }
 
 
@@ -32,28 +36,28 @@
 .dark .surface-card { background: #24282f; border-color: #363c47; box-shadow: none; }
 .metric-value { font-size: 1.4em; font-feature-settings: "tnum"; font-weight: 600; }
 .metric-icon { color: #6888b4; }
-.primary-action { border-radius: 10px; padding: 9px 16px; font-weight: 600; }
-.compact-action { border-radius: 8px; min-height: 30px; }
-.row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; min-width: 42px; min-height: 42px; }
+.primary-action { border-radius: 10px; padding: 0.82em 1.46em; font-weight: 600; }
+.compact-action { border-radius: 8px; min-height: 2.73em; }
+.row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; -gtk-icon-size: 1.82em; min-width: 3.82em; min-height: 3.82em; }
 .dark .row-icon { background: #29364c; color: #a4bfe4; }
 
 .resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.92em; }
 
-.resource-row { padding: 12px 18px; }
+.resource-row { padding: 1.09em 1.64em; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
 /* Fixed slot for trailing row controls: rows with fewer actions keep the same
  * right edge instead of drifting outward. */
-.row-actions { min-width: 168px; }
+.row-actions { min-width: 15.27em; }
 .row-actions > button, .row-actions > switch { margin-left: 0; }
-.empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
+.empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 24px; -gtk-icon-size: 3.09em; min-height: 6.91em; min-width: 6.91em; }
 
 .empty-description { color: alpha(@window_fg_color, .78); }
-.search { border-radius: 10px; min-height: 36px; }
+.search { border-radius: 10px; min-height: 3.27em; }
 /* Fixed-caption inputs: the caption never moves into the field, so entering
  * text cannot shift the layout the way a floating entry label does. */
-.labeled-entry { margin-top: 2px; margin-bottom: 2px; }
+.labeled-entry { margin-top: 0.18em; margin-bottom: 0.18em; }
 .labeled-entry-title { font-size: 0.88em; font-weight: 600; color: alpha(@window_fg_color, 0.72); }
-.labeled-entry-input { min-height: 38px; border-radius: 9px; }
+.labeled-entry-input { min-height: 3.46em; border-radius: 9px; }
 .labeled-entry-input:focus { border-color: @accent_color; }
 
 /* Shared card surfaces, selection and focus for nodes and subscriptions. */
@@ -69,40 +73,44 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content, .subscription-card-content { padding: 14px 16px; }
+.node-card-content, .subscription-card-content { padding: 1.27em 1.46em; }
 .node-name, .subscription-name { font-weight: 600; }
 .node-protocol, .node-delay { font-size: 0.9em; }
 .node-protocol { color: alpha(@window_fg_color, .72); letter-spacing: .02em; }
 .node-check, .selection-check { color: @accent_color; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
-.node-card-footer { margin-top: 10px; }
-.node-test-button { padding: 4px; min-width: 24px; min-height: 24px; border-radius: 7px; }
+.node-card-footer { margin-top: 0.91em; }
+.node-test-button { padding: 0.36em; min-width: 2.18em; min-height: 2.18em; border-radius: 7px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
+/* Cards must be allowed to shrink to half the grid width; a progress bar or
+ * long usage string that refuses to compress forces a single column. */
 .subscription-card-content { min-width: 0; }
-.subscription-card-header { min-height: 26px; }
+.subscription-card, .subscription-card-content, .subscription-progress { min-width: 0; }
+.subscription-progress trough, .subscription-progress progress { min-width: 0; }
+.subscription-card-header { min-height: 2.36em; }
 .subscription-expiry { font-feature-settings: "tnum"; }
 .subscription-expiry.error { color: @error_color; }
-.subscription-progress { margin-top: 12px; margin-bottom: 10px; }
-.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 6px; }
-.subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 6px; }
+.subscription-progress { margin-top: 1.09em; margin-bottom: 0.91em; }
+.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 0.55em; }
+.subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 0.55em; }
 .subscription-usage { font-size: 0.92em; font-weight: 500; }
-.card-menu > button { padding: 4px; min-width: 20px; min-height: 22px; border-radius: 8px; }
-.subscription-actions { padding: 4px; }
-.subscription-actions button { padding: 8px 16px; }
+.card-menu > button { padding: 0.36em; min-width: 1.82em; min-height: 2em; border-radius: 8px; }
+.subscription-actions { padding: 0.36em; }
+.subscription-actions button { padding: 0.73em 1.46em; }
 
 .log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
 .editor-root { background: @window_bg_color; }
-.editor-toolbar { padding: 8px 16px; border-bottom: 1px solid alpha(@borders,.5); }
-.settings-group { margin-bottom: 4px; }
-.page-content > preferencesgroup { margin-top: 4px; }
+.editor-toolbar { padding: 0.73em 1.46em; border-bottom: 1px solid alpha(@borders,.5); }
+.settings-group { margin-bottom: 0.36em; }
+.page-content > preferencesgroup { margin-top: 0.36em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
-separator { background: alpha(#728292,.13); min-height: 1px; }
+separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
-.padded-card { padding: 18px 20px; }
+.padded-card { padding: 1.64em 1.82em; }
 
 .metrics > flowboxchild { padding: 0; }
-.stat-card { padding: 16px 18px; min-width: 200px; }
+.stat-card { padding: 1.46em 1.64em; min-width: 18.18em; }
 .download { color: #2878d7; }
 .upload { color: #62708a; }
 .dark .download { color: #8cbaff; }
@@ -112,12 +120,12 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
 
 .settings-page entry { font-size: 1em; }
-.editor-tabs { border-radius: 12px; background: alpha(@window_fg_color, .06); padding: 4px; }
-.editor-tabs button { border: none; border-radius: 9px; box-shadow: none; background: transparent; padding: 8px 16px; }
+.editor-tabs { border-radius: 12px; background: alpha(@window_fg_color, .06); padding: 0.36em; }
+.editor-tabs button { border: none; border-radius: 9px; box-shadow: none; background: transparent; padding: 0.73em 1.46em; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
-.settings-page row { min-height: 54px; }
+.settings-page row { min-height: 4.91em; }
 .aerobox-window .boxed-list { border-radius: 14px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
 .aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
 
@@ -127,19 +135,19 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 /* Cards in the same row stretch to the tallest one so their bottom edges line
  * up; inner spacing stays on the card class, not on the flow child. */
 .dashboard-grid > flowboxchild > .surface-card { margin: 0; }
-.home-network { padding: 16px 18px; min-width: 240px; }
+.home-network { padding: 1.46em 1.64em; min-width: 15.5em; }
 .home-network .exit-ip { font-size: 1.4em; font-weight: 600; }
-.speed-card { padding: 16px 16px; min-width: 112px; }
+.speed-card { padding: 1.46em 1.46em; min-width: 7.2em; }
 .speed-value { font-size: 1.85em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-mode { padding: 16px 18px; min-width: 240px; }
-.mode-selector { border-radius: 12px; background: #edf0f6; padding: 4px; }
-.mode-selector button { border-radius: 9px; border: none; box-shadow: none; background: transparent; padding: 8px 12px; font-weight: 500; }
+.home-mode { padding: 1.46em 1.64em; min-width: 15.5em; }
+.mode-selector { border-radius: 12px; background: #edf0f6; padding: 0.36em; }
+.mode-selector button { border-radius: 9px; border: none; box-shadow: none; background: transparent; padding: 0.73em 1.09em; font-weight: 500; }
 .mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .dark .mode-selector { background: #1b2029; }
-.home-takeover { padding: 4px 18px; min-width: 240px; }
-.home-switch { min-height: 52px; }
+.home-takeover { padding: 0.36em 1.64em; min-width: 21.82em; }
+.home-switch { min-height: 4.73em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
-.home-stat { padding: 16px 18px; min-width: 120px; }
+.home-stat { padding: 1.46em 1.64em; min-width: 7.7em; }
 .home-stat-value { font-size: 1.45em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-start { border-radius: 16px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
+.home-start { border-radius: 16px; padding: 1.46em 2.18em; min-height: 2.18em; box-shadow: 0 4px 14px alpha(#183b50,.18); }
 .home-start image { -gtk-icon-size: 22px; }
