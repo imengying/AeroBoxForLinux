@@ -66,11 +66,7 @@ impl Ui {
                             executable,
                             report
                         );
-                        let dialog = adw::MessageDialog::new(
-                            Some(&ui.window),
-                            Some("连接诊断"),
-                            Some(&text),
-                        );
+                        let dialog = adw::AlertDialog::new(Some("连接诊断"), Some(&text));
                         dialog.add_response("copy", "复制结果");
                         dialog.add_response("close", "关闭");
                         dialog.set_default_response(Some("close"));
@@ -79,7 +75,7 @@ impl Ui {
                         dialog.connect_response(Some("copy"), move |_, _| {
                             clipboard.set_text(&text);
                         });
-                        dialog.present();
+                        dialog.present(Some(&ui.window));
                     },
                 );
             }

@@ -412,13 +412,13 @@ impl Service {
             };
             // Immutable snapshots keep edits from changing the rollback config.
             let path = if let Some(bytes) = bytes {
-                let digest = Sha256::digest(&bytes);
+                let digest = hex_digest(&bytes);
                 let path = source_path
                     .parent()
                     .unwrap()
                     .join("generated")
                     .join(format!(
-                        "{}-{:x}.{}",
+                        "{}-{}.{}",
                         r.id,
                         digest,
                         if r.binary { "srs" } else { "json" }
@@ -2137,10 +2137,7 @@ impl Service {
                     .context("下载链接缺失")?,
             )?
             .0;
-        ensure!(
-            format!("{:x}", Sha256::digest(&bytes)) == digest,
-            "内核 SHA256 校验失败"
-        );
+        ensure!(hex_digest(&bytes) == digest, "内核 SHA256 校验失败");
         let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
         for entry in tar.entries()? {
             let mut entry = entry?;
@@ -2165,6 +2162,18 @@ impl Service {
         }
         bail!("归档内未找到 sing-box")
     }
+}
+
+/// sha2 0.11 no longer implements `LowerHex` for digests, so hex printing is
+/// explicit here instead of relying on the old formatting impl.
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn copy_subscription_data(target: &mut model::Subscription, source: &model::Subscription) {
