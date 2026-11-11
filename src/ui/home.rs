@@ -88,6 +88,7 @@ impl Ui {
         self.home_action.replace(Some(toggle));
 
         let top = flow(1, 2);
+        follow_width(&top, 232, 14, 2);
         top.set_vexpand(false);
         top.add_css_class("home-top");
         let network = card(gtk::Orientation::Vertical, 12);
@@ -124,6 +125,7 @@ impl Ui {
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 0);
         controls.set_sensitive(self.jobs.get() == 0);
         let control_grid = flow(1, 2);
+        follow_width(&control_grid, 232, 14, 2);
         let mode_row = card(gtk::Orientation::Vertical, 12);
         mode_row.add_css_class("home-mode");
         let title = label("出站模式", "section-title");
@@ -238,6 +240,9 @@ impl Ui {
         self.body.append(&controls);
 
         let stats = flow(1, 3);
+        // Three equal cards only while they stay readable; narrow windows drop
+        // to two or one instead of squeezing the labels.
+        follow_width(&stats, 168, 14, 3);
         stats.add_css_class("home-stats");
         let (connection_box, connections) = stat("network-workgroup-symbolic", "连接数", "—");
         let (uptime_box, uptime) = stat(
@@ -487,8 +492,9 @@ fn speed_card(
     card.append(&heading);
     let value = label("—", "speed-value");
     let reading = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    // Centre the reading without letting it absorb spare height: expanding
+    // here made these two cards taller than the card beside them.
     reading.set_valign(gtk::Align::Center);
-    reading.set_vexpand(true);
     reading.append(&value);
     let unit = label("B/s", "muted small");
     unit.set_valign(gtk::Align::End);

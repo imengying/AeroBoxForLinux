@@ -90,6 +90,7 @@ impl Ui {
         list.set_column_spacing(16);
         list.set_row_spacing(16);
         list.set_valign(gtk::Align::Start);
+        follow_width(&list, 320, 16, 3);
         let ids: Vec<_> = state
             .subscriptions
             .iter()
@@ -324,10 +325,8 @@ impl Ui {
         sources.append(&paste);
         sources.append(&file);
         form.append(&sources);
-        let name = adw::EntryRow::builder().title("名称（可选）").build();
-        let group = adw::PreferencesGroup::new();
-        group.add(&name);
-        form.append(&group);
+        let name = LabeledEntry::new("名称（可选）", "");
+        form.append(&name.root);
         let source_title = gtk::Label::new(Some("订阅链接或节点内容"));
         source_title.set_xalign(0.0);
         form.append(&source_title);
@@ -347,6 +346,17 @@ impl Ui {
             .build();
         scroll.add_css_class("card");
         form.append(&scroll);
+        // Live feedback under the source box: the import button used to be the
+        // only place that reported problems, after the user had committed.
+        let hint = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        hint.set_widget_name("subscription-import-hint");
+        hint.add_css_class("muted");
+        hint.add_css_class("small");
+        form.append(&hint);
         let auto_update = switch_row("自动更新", "", true);
         let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
         interval.set_title("更新间隔（小时）");
@@ -375,6 +385,45 @@ impl Ui {
         root.append(&form_scroll);
         window.set_content(Some(&root));
         let buffer = source.buffer();
+        {
+            // Validate as the text changes so the button state and the hint
+            // always agree with what the user typed or pasted.
+            let hint = hint.clone();
+            let error = error.clone();
+            let import = import.clone();
+            import.set_sensitive(false);
+            let refresh = std::rc::Rc::new(move |buffer: &gtk::TextBuffer| {
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string();
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    hint.set_visible(false);
+                    import.set_sensitive(false);
+                    return;
+                }
+                match subscription::import_input(trimmed) {
+                    Ok(sub) => {
+                        import.set_sensitive(true);
+                        error.set_visible(false);
+                        hint.set_text(if sub.source.is_empty() {
+                            "已识别为节点内容，将保存为本地订阅"
+                        } else {
+                            "已识别为订阅链接"
+                        });
+                        hint.set_visible(true);
+                    }
+                    Err(failure) => {
+                        import.set_sensitive(false);
+                        error.set_visible(false);
+                        hint.set_text(&format!("无法识别：{failure}"));
+                        hint.set_visible(true);
+                    }
+                }
+            });
+            let refresh = refresh.clone();
+            buffer.connect_changed(move |buffer| refresh(buffer));
+        }
         let clipboard = window.clipboard();
         let paste_error = error.clone();
         paste.connect_clicked(move |_| {

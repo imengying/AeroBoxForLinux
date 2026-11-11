@@ -20,53 +20,73 @@
 
 .muted { color: alpha(@window_fg_color, .78); }
 
-.small { font-size: 0.95em; }
-.page-title { font-size: 1.45em; font-weight: 600; }
-.brand { font-size: 1.5em; font-weight: 600; }
-.section-title, .resource-name { font-weight: 600; }
+/* One type scale for the whole app. Steps stay close together so the page
+ * title, card titles and body text stop competing with each other:
+ * brand 1.28 > page title 1.14 > card/item 1.02 > body 1.00 > small 0.92. */
+.brand { font-size: 1.28em; font-weight: 700; letter-spacing: .01em; }
+.page-title { font-size: 1.14em; font-weight: 700; }
+.section-title, .resource-name { font-size: 1.02em; font-weight: 600; }
+.empty-title { font-size: 1.06em; font-weight: 600; }
+.small { font-size: 0.92em; }
 .surface-card { border-radius: 14px; background: #ffffff; border: 1px solid #e2e6ed; box-shadow: none; }
 .dark .surface-card { background: #24282f; border-color: #363c47; box-shadow: none; }
-.metric-value { font-size: 1.5em; font-feature-settings: "tnum"; font-weight: normal; }
+.metric-value { font-size: 1.4em; font-feature-settings: "tnum"; font-weight: 600; }
 .metric-icon { color: #6888b4; }
 .primary-action { border-radius: 10px; padding: 9px 16px; font-weight: 600; }
 .compact-action { border-radius: 8px; min-height: 30px; }
 .row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; min-width: 42px; min-height: 42px; }
 .dark .row-icon { background: #29364c; color: #a4bfe4; }
 
-.resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.95em; }
+.resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.92em; }
 
-.resource-row { padding: 14px 18px; }
+.resource-row { padding: 12px 18px; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
+/* Fixed slot for trailing row controls: rows with fewer actions keep the same
+ * right edge instead of drifting outward. */
+.row-actions { min-width: 168px; }
+.row-actions > button, .row-actions > switch { margin-left: 0; }
 .empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 24px; min-height: 76px; min-width: 76px; }
 
 .empty-description { color: alpha(@window_fg_color, .78); }
 .search { border-radius: 10px; min-height: 36px; }
+/* Fixed-caption inputs: the caption never moves into the field, so entering
+ * text cannot shift the layout the way a floating entry label does. */
+.labeled-entry { margin-top: 2px; margin-bottom: 2px; }
+.labeled-entry-title { font-size: 0.88em; font-weight: 600; color: alpha(@window_fg_color, 0.72); }
+.labeled-entry-input { min-height: 38px; border-radius: 9px; }
+.labeled-entry-input:focus { border-color: @accent_color; }
+
 /* Shared card surfaces, selection and focus for nodes and subscriptions. */
 .nodes-grid, .subscriptions-grid { background: transparent; }
-.node-card, .subscription-card { padding: 0; border-radius: 14px; background: #ffffff; border: 1px solid #e2e6ed; }
+/* Longhand borders everywhere: a `border-color` only override keeps the box
+ * metrics identical between the default and selected states. */
+.node-card, .subscription-card { padding: 0; border-radius: 14px; background: #ffffff; border-width: 1px; border-style: solid; border-color: #e2e6ed; }
 .dark .node-card, .dark .subscription-card { background: #24282f; border-color: #363c47; }
 .node-card:hover, .subscription-card:hover { background: #f0f4fb; border-color: #b9cce6; }
 .dark .node-card:hover, .dark .subscription-card:hover { background: #2a3342; border-color: #52647e; }
 .node-card.node-selected, .subscription-card.subscription-selected { background: #e7efff; border-color: #76a3e0; }
 .dark .node-card.node-selected, .dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
-.node-card-content { padding: 16px; }
+/* Card innards share one padding so selected and unselected cards stay the
+ * same height; the selected state only swaps colours, never box metrics. */
+.node-card-content, .subscription-card-content { padding: 14px 16px; }
 .node-name, .subscription-name { font-weight: 600; }
-.node-protocol, .node-delay { font-size: 0.95em; }
-.node-protocol { color: alpha(@window_fg_color, .72); }
+.node-protocol, .node-delay { font-size: 0.9em; }
+.node-protocol { color: alpha(@window_fg_color, .72); letter-spacing: .02em; }
 .node-check, .selection-check { color: @accent_color; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
-.node-card-footer { margin-top: 14px; }
-.node-test-button { padding: 5px; min-width: 22px; min-height: 22px; border-radius: 8px; }
+.node-card-footer { margin-top: 10px; }
+.node-test-button { padding: 4px; min-width: 24px; min-height: 24px; border-radius: 7px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
-.subscription-card-content { padding: 16px 18px 18px; min-width: 300px; }
-.subscription-card-header { min-height: 30px; }
+.subscription-card-content { min-width: 0; }
+.subscription-card-header { min-height: 26px; }
 .subscription-expiry { font-feature-settings: "tnum"; }
 .subscription-expiry.error { color: @error_color; }
-.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 4px; min-height: 6px; }
-.subscription-progress progress { background: @accent_bg_color; border-radius: 4px; min-height: 6px; }
-.subscription-usage { font-size: 0.95em; font-weight: 500; }
+.subscription-progress { margin-top: 12px; margin-bottom: 10px; }
+.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 6px; }
+.subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 6px; }
+.subscription-usage { font-size: 0.92em; font-weight: 500; }
 .card-menu > button { padding: 4px; min-width: 20px; min-height: 22px; border-radius: 8px; }
 .subscription-actions { padding: 4px; }
 .subscription-actions button { padding: 8px 16px; }
@@ -104,19 +124,22 @@ separator { background: alpha(#728292,.13); min-height: 1px; }
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .78); }
 
 .dashboard-grid > flowboxchild { padding: 0; }
-.home-network { padding: 18px; min-width: 260px; }
-.home-network .exit-ip { font-size: 1.5em; font-weight: 600; }
-.speed-card { padding: 18px 16px; min-width: 124px; }
+/* Cards in the same row stretch to the tallest one so their bottom edges line
+ * up; inner spacing stays on the card class, not on the flow child. */
+.dashboard-grid > flowboxchild > .surface-card { margin: 0; }
+.home-network { padding: 16px 18px; min-width: 240px; }
+.home-network .exit-ip { font-size: 1.4em; font-weight: 600; }
+.speed-card { padding: 16px 16px; min-width: 112px; }
 .speed-value { font-size: 1.85em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-mode { padding: 18px; min-width: 260px; }
+.home-mode { padding: 16px 18px; min-width: 240px; }
 .mode-selector { border-radius: 12px; background: #edf0f6; padding: 4px; }
 .mode-selector button { border-radius: 9px; border: none; box-shadow: none; background: transparent; padding: 8px 12px; font-weight: 500; }
 .mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .dark .mode-selector { background: #1b2029; }
-.home-takeover { padding: 4px 18px; min-width: 260px; }
-.home-switch { min-height: 54px; }
+.home-takeover { padding: 4px 18px; min-width: 240px; }
+.home-switch { min-height: 52px; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
-.home-stat { padding: 18px; min-width: 132px; }
+.home-stat { padding: 16px 18px; min-width: 120px; }
 .home-stat-value { font-size: 1.45em; font-weight: 600; font-feature-settings: "tnum"; }
 .home-start { border-radius: 16px; padding: 16px 24px; min-height: 24px; box-shadow: 0 4px 14px alpha(#183b50,.18); }
 .home-start image { -gtk-icon-size: 22px; }

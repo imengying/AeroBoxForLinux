@@ -168,14 +168,11 @@ impl Ui {
 
         self.core_panel(&core_page);
         let core = group("内核设置");
-        let core_path = adw::EntryRow::builder()
-            .title("内核路径（留空自动检测）")
-            .text(&settings.core_path)
-            .build();
+        let core_path = LabeledEntry::new("内核路径（留空自动检测）", &settings.core_path);
         let browse = icon_button("folder-open-symbolic", "选择 sing-box 内核");
-        core_path.add_suffix(&browse);
+        core_path.with_suffix(&browse);
         let parent = self.window.clone();
-        let path_entry = core_path.clone();
+        let path_entry = core_path.entry.clone();
         browse.connect_clicked(move |_| {
             let entry = path_entry.clone();
             gtk::FileDialog::builder().title("选择内核").build().open(
@@ -190,7 +187,7 @@ impl Ui {
                 },
             );
         });
-        core.add(&core_path);
+        core.add(&core_path.root);
         let levels = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
         let log = combo(
             "日志级别",
@@ -204,11 +201,8 @@ impl Ui {
         core_page.append(&core);
 
         let testing = group("测速");
-        let test_url = adw::EntryRow::builder()
-            .title("测试地址")
-            .text(&settings.test_url)
-            .build();
-        testing.add(&test_url);
+        let test_url = LabeledEntry::new("测试地址", &settings.test_url);
+        testing.add(&test_url.root);
         let timeout = adw::SpinRow::with_range(500.0, 30000.0, 500.0);
         timeout.set_title("超时（毫秒）");
         timeout.set_value(settings.test_timeout as f64);
@@ -318,7 +312,6 @@ impl Ui {
                                 }
                             });
                         }
-                        ui.notify("设置已保存");
                     }
                     Err(e) => ui.error("保存失败", format!("{e:#}")),
                 },

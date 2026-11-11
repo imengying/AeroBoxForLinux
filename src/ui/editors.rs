@@ -1,5 +1,6 @@
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
+use super::LabeledEntry;
 use adw::prelude::*;
 use anyhow::{Context, Result, ensure};
 use gtk::glib;
@@ -61,6 +62,9 @@ impl EditorWindow {
         let save = gtk::Button::with_label("保存");
         save.add_css_class("suggested-action");
         save.add_css_class("primary-action");
+        // Enter inside any entry finishes the dialog instead of silently doing
+        // nothing; Ctrl+Enter in the source view still inserts a newline.
+        window.set_default_widget(Some(&save));
         header.pack_start(&cancel);
         header.pack_end(&save);
         root.append(&header);
@@ -123,11 +127,6 @@ fn group(title: &str, description: &str) -> adw::PreferencesGroup {
         .title(title)
         .description(description)
         .build()
-}
-fn entry(title: &str, text: &str) -> adw::EntryRow {
-    let row = adw::EntryRow::builder().title(title).build();
-    row.set_text(text);
-    row
 }
 fn switch(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
     adw::SwitchRow::builder()
@@ -225,13 +224,15 @@ pub fn subscription(
     let editor = EditorWindow::new(parent, "编辑订阅", "");
     let (scroll, form) = form_page();
     let source_group = group("订阅来源", "");
-    let name = entry("名称", &item.name);
-    let source = entry("订阅地址或文件路径", &item.source);
-    source.set_tooltip_text(Some("留空可手动添加节点"));
+    let name = LabeledEntry::new("名称", &item.name);
+    let source = LabeledEntry::new("订阅地址或文件路径", &item.source);
+    source.entry.set_tooltip_text(Some("留空可手动添加节点"));
     let choose = gtk::Button::from_icon_name("document-open-symbolic");
     choose.set_tooltip_text(Some("选择本地订阅文件"));
     choose.add_css_class("flat");
-    source.add_suffix(&choose);
+    source.with_suffix(&choose);
+    let name_row = name.root.clone();
+    let source_row = source.root.clone();
     let source_for_file = source.clone();
     let weak = editor.window.downgrade();
     choose.connect_clicked(move |_| {
@@ -246,8 +247,8 @@ pub fn subscription(
             });
         }
     });
-    source_group.add(&name);
-    source_group.add(&source);
+    source_group.add(&name_row);
+    source_group.add(&source_row);
     form.append(&source_group);
     let updates = group("更新", "");
     let auto_update = switch("自动更新", "", item.auto_update);
@@ -382,8 +383,10 @@ pub fn ruleset(
     stack.set_widget_name("ruleset-tabs");
     let (scroll, form) = form_page();
     let basic = group("规则集", "");
-    let name = entry("名称", &item.name);
-    let source = entry("在线地址或本地文件", &item.source);
+    let name = LabeledEntry::new("名称", &item.name);
+    let source = LabeledEntry::new("在线地址或本地文件", &item.source);
+    let name_row = name.root.clone();
+    let source_row = source.root.clone();
     let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
     interval.set_title("自动更新间隔（小时）");
     interval.set_value(item.update_interval_hours as f64);
@@ -394,8 +397,8 @@ pub fn ruleset(
         .model(&format_model)
         .selected(u32::from(item.binary))
         .build();
-    basic.add(&name);
-    basic.add(&source);
+    basic.add(&name_row);
+    basic.add(&source_row);
     basic.add(&format);
     basic.add(&interval);
     let actions = ["direct", "proxy", "reject"];
@@ -451,7 +454,7 @@ pub fn ruleset(
     switcher.set_visible(!item.is_remote());
     let switcher = switcher.downgrade();
     let remote_interval = interval.clone();
-    source.connect_changed(move |source| {
+    source.entry.connect_changed(move |source| {
         let online = model::is_online_source(source.text().trim());
         remote_interval.set_visible(online);
         content_page.set_visible(!online);
@@ -1004,8 +1007,8 @@ pub(super) fn smoke_ruleset(
         .context("缺少规则更新间隔")?;
     let source = widgets
         .iter()
-        .filter_map(|w| w.downcast_ref::<adw::EntryRow>())
-        .find(|r| r.title() == "在线地址或本地文件")
+        .filter_map(|w| w.downcast_ref::<gtk::Entry>())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("在线地址或本地文件"))
         .context("缺少规则来源")?;
     ensure!(
         interval.is_visible() && !stack.page(&content).is_visible(),

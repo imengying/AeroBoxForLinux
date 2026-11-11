@@ -64,10 +64,11 @@ impl Ui {
         grid.set_activate_on_single_click(true);
         grid.set_homogeneous(true);
         grid.set_min_children_per_line(1);
-        grid.set_max_children_per_line(3);
+        grid.set_max_children_per_line(4);
         grid.set_column_spacing(12);
         grid.set_row_spacing(12);
         grid.set_valign(gtk::Align::Start);
+        follow_width(&grid, 232, 12, 4);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -132,7 +133,9 @@ impl NodesPanel {
                 child.add_css_class("node-card");
                 child.set_widget_name("subscription-node");
                 child.set_focusable(true);
-                child.set_size_request(220, -1);
+                // Cards share the row width instead of a fixed 220px, so the
+                // grid fills wide windows and reflows evenly in narrow ones.
+                child.set_hexpand(true);
                 child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 content.add_css_class("node-card-content");
@@ -165,7 +168,7 @@ impl NodesPanel {
                 content.append(&title);
                 let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 footer.add_css_class("node-card-footer");
-                let protocol = label(&node.protocol.to_uppercase(), "muted node-protocol");
+                let protocol = label(&node.protocol, "muted node-protocol");
                 protocol.set_hexpand(true);
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);

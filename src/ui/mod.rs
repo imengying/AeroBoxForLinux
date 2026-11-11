@@ -182,6 +182,9 @@ struct Ui {
     window: adw::ApplicationWindow,
     service: Arc<Service>,
     toast: adw::ToastOverlay,
+    /// The toast currently on screen, so a new notification can replace it
+    /// instead of stacking a second one underneath and clipping both.
+    active_toast: RefCell<Option<adw::Toast>>,
     body: gtk::Box,
     scroll: gtk::ScrolledWindow,
     floating: gtk::Overlay,
@@ -325,6 +328,7 @@ impl Ui {
             window,
             service,
             toast,
+            active_toast: RefCell::new(None),
             body,
             scroll,
             floating,
@@ -402,14 +406,24 @@ impl Ui {
     }
 
     fn notify(&self, message: &str) {
-        self.toast.add_toast(adw::Toast::new(message));
+        // Only one toast at a time: stacked toasts overlapped and cut their
+        // text off, and a stale "已保存" hides the result that matters.
+        if let Some(previous) = self.active_toast.borrow_mut().take() {
+            self.toast.dismiss_all();
+            drop(previous);
+        }
+        let toast = adw::Toast::new(message);
+        toast.set_timeout(3);
+        toast.set_priority(adw::ToastPriority::High);
+        self.active_toast.replace(Some(toast.clone()));
+        self.toast.add_toast(toast);
     }
     fn error(&self, title: &str, error: impl std::fmt::Display) {
-        let dialog =
-            adw::MessageDialog::new(Some(&self.window), Some(title), Some(&error.to_string()));
+        let dialog = adw::AlertDialog::new(Some(title), Some(&error.to_string()));
         dialog.add_response("close", "知道了");
         dialog.set_default_response(Some("close"));
-        dialog.present();
+        dialog.set_close_response("close");
+        dialog.present(Some(&self.window));
     }
     fn task<T: Send + 'static>(
         self: &Rc<Self>,
@@ -514,6 +528,7 @@ impl Ui {
             self.body.remove(&child)
         }
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        heading.set_valign(gtk::Align::Center);
         let titles = gtk::Box::new(gtk::Orientation::Vertical, 7);
         titles.set_hexpand(true);
         titles.append(&label(page.title(), "page-title"));
@@ -568,6 +583,12 @@ impl Ui {
                 format!("{action} · 本地 · {}", updated(item.updated))
             };
             let row = resource_row("view-list-bullet-symbolic", &item.name, &meta);
+            // Trailing controls live in one fixed-width slot so the switch,
+            // the "设置" button and the icon buttons line up across rows that
+            // have different numbers of actions.
+            let trailing = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            trailing.set_valign(gtk::Align::Center);
+            trailing.add_css_class("row-actions");
             let enabled = gtk::Switch::new();
             enabled.set_active(item.enabled);
             enabled.set_valign(gtk::Align::Center);
@@ -597,7 +618,7 @@ impl Ui {
                 }
                 glib::Propagation::Stop
             });
-            row.append(&enabled);
+            trailing.append(&enabled);
             let edit = gtk::Button::with_label("设置");
             edit.add_css_class("compact-action");
             let weak = Rc::downgrade(self);
@@ -607,7 +628,7 @@ impl Ui {
                     editors::ruleset(&ui.window, ui.service.clone(), rules.clone(), ui.saved())
                 }
             });
-            row.append(&edit);
+            trailing.append(&edit);
             if !item.is_remote() {
                 let content = icon_button("document-edit-symbolic", "编辑规则内容");
                 let weak = Rc::downgrade(self);
@@ -622,7 +643,7 @@ impl Ui {
                         )
                     }
                 });
-                row.append(&content);
+                trailing.append(&content);
                 if !item.source.is_empty() {
                     let refresh = icon_button("view-refresh-symbolic", "重新读取文件");
                     let weak = Rc::downgrade(self);
@@ -644,10 +665,11 @@ impl Ui {
                             );
                         }
                     });
-                    row.append(&refresh);
+                    trailing.append(&refresh);
                 }
             }
-            row.append(&self.delete_button("rulesets", &item.id, &item.name));
+            trailing.append(&self.delete_button("rulesets", &item.id, &item.name));
+            row.append(&trailing);
             list.append(&row);
         }
         self.body.append(&list);
@@ -661,8 +683,7 @@ impl Ui {
         let name = name.to_string();
         button.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                let dialog = adw::MessageDialog::new(
-                    Some(&ui.window),
+                let dialog = adw::AlertDialog::new(
                     Some(&format!("删除「{name}」？")),
                     Some("此操作无法撤销。"),
                 );
@@ -690,7 +711,7 @@ impl Ui {
                         );
                     }
                 });
-                dialog.present();
+                dialog.present(Some(&ui.window));
             }
         });
         button
@@ -730,6 +751,21 @@ impl Ui {
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("搜索域名、地址或进程"));
         search.add_css_class("search");
+        search.set_widget_name("connections-search");
+        search.set_key_capture_widget(Some(&self.window));
+        // Esc clears an active filter before it closes anything else, and the
+        // box keeps focus after a refresh so typing is not interrupted.
+        let clear_search = search.clone();
+        let escape = gtk::EventControllerKey::new();
+        escape.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                clear_search.set_text("");
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        search.add_controller(escape);
         self.body.append(&search);
         let area = gtk::Box::new(gtk::Orientation::Vertical, 16);
         self.body.append(&area);
@@ -951,14 +987,11 @@ fn apply_theme(theme: &str) {
 }
 fn label(text: &str, classes: &str) -> gtk::Label {
     let label = gtk::Label::builder().label(text).xalign(0.0).build();
+    // The hierarchy is defined once in style.css. Adding libadwaita title or
+    // heading classes here as well made sizes fight each other, so plain
+    // app-level classes are all this needs.
     for class in classes.split_whitespace() {
         label.add_css_class(class);
-        match class {
-            "page-title" | "brand" => label.add_css_class("title-2"),
-            "section-title" | "resource-name" => label.add_css_class("heading"),
-            "empty-title" => label.add_css_class("title-3"),
-            _ => {}
-        }
     }
     label
 }
@@ -1058,6 +1091,71 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
         .subtitle(subtitle)
         .active(active)
         .build()
+}
+/// FlowBox only spreads leftover space across children already on a row, so
+/// the column count has to follow the available width. Watching the width from
+/// a frame-clock tick is the only signal a FlowBox reliably offers.
+fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_columns: u32) {
+    let last_width = std::rc::Rc::new(Cell::new(-1));
+    let grid_weak = grid.downgrade();
+    grid.add_tick_callback(move |_, _| {
+        let Some(grid) = grid_weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let width = grid.width();
+        if width != last_width.get() {
+            last_width.set(width);
+            if width > 0 {
+                let columns =
+                    ((width + spacing) / (min_card_width + spacing)).clamp(1, max_columns as i32);
+                if grid.max_children_per_line() != columns as u32 {
+                    grid.set_max_children_per_line(columns as u32);
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+/// Label above a plain entry. `AdwEntryRow` reflows its label into the corner as
+/// soon as there is text, which reads as a cramped, shifting layout; a fixed
+/// caption plus a placeholder stays put no matter what the field contains.
+#[derive(Clone)]
+pub(super) struct LabeledEntry {
+    pub(super) root: gtk::Box,
+    pub(super) entry: gtk::Entry,
+}
+
+impl LabeledEntry {
+    pub(super) fn new(title: &str, text: &str) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.add_css_class("labeled-entry");
+        let caption = gtk::Label::builder().label(title).xalign(0.0).build();
+        caption.add_css_class("labeled-entry-title");
+        let entry = gtk::Entry::builder()
+            .placeholder_text(title)
+            .text(text)
+            .hexpand(true)
+            .build();
+        entry.add_css_class("labeled-entry-input");
+        root.append(&caption);
+        root.append(&entry);
+        Self { root, entry }
+    }
+    /// Place a button beside the entry and return the wrapper to append into.
+    pub(super) fn with_suffix(&self, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        self.root.remove(&self.entry);
+        self.root.append(&row);
+        row.append(&self.entry);
+        row.append(widget);
+        row
+    }
+    pub(super) fn text(&self) -> String {
+        self.entry.text().to_string()
+    }
+    pub(super) fn set_text(&self, text: &str) {
+        self.entry.set_text(text);
+    }
 }
 fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
