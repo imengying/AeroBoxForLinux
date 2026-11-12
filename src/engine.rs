@@ -60,16 +60,6 @@ struct GeneratedNode {
     source: Value,
 }
 
-/// Whether a node materializes as an outbound or as an endpoint. sing-box 1.13+
-/// moved WireGuard (and a few similar links) out of `outbounds`, but both kinds
-/// are addressable through the selector and Clash API.
-fn is_endpoint_node(node: &Value) -> bool {
-    matches!(
-        node["type"].as_str(),
-        Some("wireguard" | "tailscale" | "openvpn-client" | "openvpn-server" | "openconnect")
-    )
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct PreparedConfig {
     config: Value,
@@ -281,14 +271,15 @@ impl Service {
     fn prepare_profile(&self, state: &State, profile: &Profile) -> Result<PreparedConfig> {
         let mut config = profile.config.clone();
         ensure!(config.is_object(), "配置必须是 JSON 对象");
-        // 1.13+ accepts WireGuard-style links only under `endpoints`, while the
-        // selector and Clash API address both kinds by tag. Work on owned copies
-        // so the two arrays can be appended independently.
-        let mut outbounds: Vec<Value> = config["outbounds"].as_array().cloned().unwrap_or_default();
-        let mut endpoints: Vec<Value> = config["endpoints"].as_array().cloned().unwrap_or_default();
+        let outbounds = config
+            .as_object_mut()
+            .unwrap()
+            .entry("outbounds")
+            .or_insert(json!([]))
+            .as_array_mut()
+            .context("outbounds 必须是数组")?;
         let mut tags: HashSet<String> = outbounds
             .iter()
-            .chain(endpoints.iter())
             .filter_map(|v| v["tag"].as_str().map(str::to_string))
             .collect();
         let mut added = vec![];
@@ -361,16 +352,8 @@ impl Service {
                     );
                     added.push(Value::String(generated_tag.clone()));
                 }
-                if is_endpoint_node(node) {
-                    endpoints.push(generated);
-                } else {
-                    outbounds.push(generated);
-                }
+                outbounds.push(generated);
             }
-        }
-        config["outbounds"] = json!(outbounds);
-        if !endpoints.is_empty() {
-            config["endpoints"] = json!(endpoints);
         }
         let explicit_selection = profile
             .selected_node
@@ -379,9 +362,7 @@ impl Service {
             .cloned();
         let selected_node = explicit_selection.clone().or(first_node);
         if !added.is_empty() {
-            let group = config["outbounds"]
-                .as_array_mut()
-                .context("outbounds 必须是数组")?
+            let group = outbounds
                 .iter_mut()
                 .find(|o| o["tag"] == "proxy" && o["type"] == "selector")
                 .context("添加订阅需要一个标签为 proxy 的 selector 代理组")?;
@@ -1949,7 +1930,15 @@ impl Service {
         } else {
             fs::read(&sub.source).context("无法读取订阅文件")?
         };
-        sub.nodes = subscription::parse(std::str::from_utf8(&bytes)?)?;
+        let (nodes, skipped) = subscription::parse_with_skips(std::str::from_utf8(&bytes)?)?;
+        if !skipped.is_empty() {
+            self.log(format!(
+                "订阅「{}」跳过 {} 个不支持的节点",
+                sub.name,
+                skipped.len()
+            ));
+        }
+        sub.nodes = nodes;
         ensure!(!sub.nodes.is_empty(), "订阅没有节点");
         model::validate_nodes(&sub.nodes)?;
         sub.updated = now();

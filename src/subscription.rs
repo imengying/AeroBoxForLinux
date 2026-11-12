@@ -28,43 +28,91 @@ fn number(v: &Value) -> u64 {
 }
 
 pub fn parse(body: &str) -> Result<Vec<Value>> {
+    parse_inner(body, false).map(|(nodes, _)| nodes)
+}
+
+/// Subscription downloads and scheduled refreshes keep every usable node and
+/// report the rest. This mirrors the Android app: one exotic proxy should not
+/// discard an otherwise usable subscription.
+pub fn parse_with_skips(body: &str) -> Result<(Vec<Value>, Vec<String>)> {
+    parse_inner(body, true)
+}
+
+fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> {
     let body = body.trim_start_matches('\u{feff}').trim();
+    let mut skipped = vec![];
     if let Ok(value) = serde_yaml_ng::from_str::<Value>(body)
         && let Some(items) = value
             .as_array()
             .or_else(|| value["outbounds"].as_array())
-            .or_else(|| value["endpoints"].as_array())
             .or_else(|| value["proxies"].as_array())
     {
-        let nodes = items
-            .iter()
-            .map(|v| {
-                if v.get("name").is_some() {
-                    clash(v)
-                } else {
-                    Ok(v.clone())
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(!nodes.is_empty(), "订阅没有节点");
+        let mut nodes = vec![];
+        for v in items {
+            let result = if v.get("name").is_some() {
+                clash(v)
+            } else {
+                Ok(v.clone())
+            };
+            match result {
+                Ok(node) => nodes.push(node),
+                Err(error) if tolerant => skipped.push(format!("{error:#}")),
+                Err(error) => return Err(error),
+            }
+        }
+        ensure!(
+            !nodes.is_empty(),
+            "订阅没有可用的节点{}",
+            skip_hint(&skipped)
+        );
         validate_nodes(&nodes)?;
-        return Ok(nodes);
+        return Ok((nodes, skipped));
     }
     let decoded = if !body.contains("://") {
         decode(body)?
     } else {
         body.to_owned()
     };
-    let nodes = decoded
+    let mut nodes = vec![];
+    for (index, line) in decoded
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .enumerate()
-        .map(|(i, line)| uri(line).with_context(|| format!("第 {} 个节点", i + 1)))
-        .collect::<Result<Vec<_>>>()?;
-    ensure!(!nodes.is_empty(), "订阅没有节点");
+    {
+        match uri(line) {
+            Ok(node) => nodes.push(node),
+            Err(error) if tolerant => skipped.push(format!("{error:#}")),
+            Err(error) => return Err(error.context(format!("第 {} 个节点", index + 1))),
+        }
+    }
+    ensure!(
+        !nodes.is_empty(),
+        "订阅没有可用的节点{}",
+        skip_hint(&skipped)
+    );
     validate_nodes(&nodes)?;
-    Ok(nodes)
+    Ok((nodes, skipped))
+}
+
+fn skip_hint(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    // A short, de-duplicated sample explains the common cause without dumping
+    // every line of a large subscription.
+    let mut reasons: Vec<&str> = skipped
+        .iter()
+        .map(|reason| reason.split(':').next().unwrap_or(reason).trim())
+        .collect();
+    reasons.dedup();
+    let sample = reasons
+        .iter()
+        .take(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("；");
+    format!("（跳过 {} 个不支持的节点：{sample}）", skipped.len())
 }
 /// User-triggered URL, app share link or node content; never a clipboard path.
 pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
@@ -154,9 +202,6 @@ pub fn uri(input: &str) -> Result<Value> {
         validate_server(&node)?;
         return Ok(node);
     }
-    if let Some(link) = input.strip_prefix("wireguard://") {
-        return wireguard(link);
-    }
     let mut raw = input.to_string();
     if let Some(ss) = input.strip_prefix("ss://") {
         let (authority, tag) = ss.split_once('#').unwrap_or((ss, ""));
@@ -168,11 +213,11 @@ pub fn uri(input: &str) -> Result<Value> {
     let typ = match u.scheme() {
         "ss" => "shadowsocks",
         "hy2" => "hysteria2",
-        "hysteria" => "hysteria",
         "socks5" => "socks",
         "https" => "http",
-        "anytls" => "anytls",
-        "ssh" => "ssh",
+        // Naive is exposed as plain HTTPS/QUIC over HTTP/2 or HTTP/3.
+        "naive+https" | "naive" => "naive",
+        "naive+quic" => "naive",
         other => other,
     };
     ensure!(
@@ -181,11 +226,10 @@ pub fn uri(input: &str) -> Result<Value> {
             "vmess",
             "vless",
             "trojan",
-            "hysteria",
             "hysteria2",
             "tuic",
             "anytls",
-            "ssh",
+            "naive",
             "socks",
             "http"
         ]
@@ -242,24 +286,11 @@ pub fn uri(input: &str) -> Result<Value> {
                 node["obfs"] = json!({"type":q("obfs"),"password":q("obfs-password")})
             }
         }
-        "hysteria" => {
-            node["auth_str"] = json!(if pass.is_empty() {
-                user
-            } else {
-                format!("{user}:{pass}")
-            });
-            if !q("obfs").is_empty() {
-                node["obfs"] = json!(q("obfs"))
-            };
-            for (from, to) in [
-                ("upmbps", "up_mbps"),
-                ("downmbps", "down_mbps"),
-                ("up", "up_mbps"),
-                ("down", "down_mbps"),
-            ] {
-                if let Ok(value) = q(from).parse::<u64>() {
-                    node[to] = json!(value)
-                }
+        "tuic" => {
+            node["uuid"] = json!(user);
+            node["password"] = json!(pass);
+            if !q("congestion_control").is_empty() {
+                node["congestion_control"] = json!(q("congestion_control"))
             }
         }
         "anytls" => {
@@ -269,25 +300,28 @@ pub fn uri(input: &str) -> Result<Value> {
                 format!("{user}:{pass}")
             })
         }
-        "ssh" => {
-            node["user"] = json!(user);
-            node["password"] = json!(pass)
-        }
-        "tuic" => {
-            node["uuid"] = json!(user);
-            node["password"] = json!(pass);
-            if !q("congestion_control").is_empty() {
-                node["congestion_control"] = json!(q("congestion_control"))
+        "naive" => {
+            if !user.is_empty() {
+                node["username"] = json!(user);
+                node["password"] = json!(pass)
+            };
+            // naive+quic or ?quic=1 switches the outbound to HTTP/3.
+            let quic = u.scheme() == "naive+quic" || q("quic") == "1";
+            if quic {
+                node["quic"] = json!(true);
+                if !q("congestion_control").is_empty() {
+                    node["quic_congestion_control"] = json!(q("congestion_control"))
+                }
             }
         }
         "socks" | "http" if !user.is_empty() => {
             node["username"] = json!(user);
-            node["password"] = json!(pass);
+            node["password"] = json!(pass)
         }
         _ => {}
     }
-    if ["trojan", "hysteria", "hysteria2", "tuic", "anytls"].contains(&typ)
-        || (typ == "http" && u.scheme() == "https")
+    if ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ)
+        || u.scheme() == "https"
         || ["tls", "reality"].contains(&q("security").as_str())
     {
         let mut tls = json!({"enabled":true});
@@ -297,14 +331,19 @@ pub fn uri(input: &str) -> Result<Value> {
         if q("insecure") == "1" || q("allowInsecure") == "1" {
             tls["insecure"] = json!(true)
         }
-        if !q("alpn").is_empty() {
+        // Naive manages HTTP/2 vs HTTP/3 itself and rejects an explicit ALPN.
+        if typ != "naive" && !q("alpn").is_empty() {
             tls["alpn"] = json!(q("alpn").split(',').collect::<Vec<_>>())
         };
         if !q("fp").is_empty() {
             tls["utls"] = json!({"enabled":true,"fingerprint":q("fp")})
         }
         if q("security") == "reality" {
-            tls["utls"] = json!({"enabled":true,"fingerprint":if q("fp").is_empty(){"chrome".to_owned()}else{q("fp")}});
+            // Reality requires uTLS; a missing fingerprint would make the
+            // generated config fail validation.
+            if tls.get("utls").is_none() {
+                tls["utls"] = json!({"enabled":true,"fingerprint":"chrome"})
+            }
             tls["reality"] = json!({"enabled":true,"public_key":q("pbk"),"short_id":q("sid")})
         };
         node["tls"] = tls;
@@ -327,26 +366,6 @@ pub fn uri(input: &str) -> Result<Value> {
     Ok(node)
 }
 fn validate_server(node: &Value) -> Result<()> {
-    if node["type"] == "wireguard" {
-        ensure!(
-            node["peers"].as_array().is_some_and(|peers| {
-                peers.iter().any(|peer| {
-                    peer["address"]
-                        .as_str()
-                        .is_some_and(|host| !host.is_empty())
-                        && (1..=65535).contains(&number(&peer["port"]))
-                })
-            }),
-            "WireGuard 节点缺少有效服务器"
-        );
-        ensure!(
-            node["private_key"]
-                .as_str()
-                .is_some_and(|key| !key.is_empty()),
-            "WireGuard 节点缺少私钥"
-        );
-        return Ok(());
-    }
     ensure!(
         node["server"].as_str().is_some_and(|s| !s.is_empty()),
         "节点服务器为空"
@@ -356,47 +375,6 @@ fn validate_server(node: &Value) -> Result<()> {
         "节点端口无效"
     );
     Ok(())
-}
-
-/// `wireguard://private_key@host:port?publickey=…&address=…&reserved=…`
-/// is what most share links and sysbox exports use. Address values may repeat.
-fn wireguard(link: &str) -> Result<Value> {
-    let u = Url::parse(&format!("wireguard://{link}"))?;
-    let host = u.host_str().context("WireGuard 节点缺少服务器")?;
-    let port = u.port().unwrap_or(51820);
-    let query = |key: &str| u.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v);
-    let private_key = unescape(u.username());
-    ensure!(!private_key.is_empty(), "WireGuard 节点缺少私钥");
-    let public_key = query("publickey")
-        .or_else(|| query("public-key"))
-        .or_else(|| query("peer_public_key"))
-        .context("WireGuard 节点缺少对端公钥")?
-        .into_owned();
-    let addresses: Vec<String> = u
-        .query_pairs()
-        .filter(|(k, _)| k == "address" || k == "local_address")
-        .map(|(_, v)| v.into_owned())
-        .collect();
-    ensure!(!addresses.is_empty(), "WireGuard 节点缺少本地地址");
-    let mut peer = json!({"address":host,"port":port,"public_key":public_key,"allowed_ips":["0.0.0.0/0","::/0"]});
-    if let Some(key) = query("presharedkey").or_else(|| query("pre-shared-key")) {
-        peer["pre_shared_key"] = json!(key)
-    }
-    if let Some(reserved) = query("reserved").or_else(|| query("reserved-bytes")) {
-        peer["reserved"] = json!(
-            reserved
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u8>().ok())
-                .collect::<Vec<_>>()
-        )
-    }
-    Ok(json!({
-        "type":"wireguard",
-        "tag":unescape(u.fragment().unwrap_or("WireGuard")),
-        "address":addresses,
-        "private_key":private_key,
-        "peers":[peer]
-    }))
 }
 
 fn supported_plugin(plugin: &str) -> Result<&str> {
@@ -441,9 +419,11 @@ fn plugin_options(value: &Value, plugin: &str) -> Result<String> {
 }
 fn clash(v: &Value) -> Result<Value> {
     let typ = match v["type"].as_str().unwrap_or("") {
-        "ss" => "shadowsocks",
+        "ss" | "shadowsocks" => "shadowsocks",
         "socks5" => "socks",
-        "hy" | "hysteria1" => "hysteria",
+        "hy2" => "hysteria2",
+        "naive+https" | "naive+quic" => "naive",
+        "https" => "http",
         t => t,
     };
     ensure!(
@@ -452,12 +432,10 @@ fn clash(v: &Value) -> Result<Value> {
             "vmess",
             "vless",
             "trojan",
-            "hysteria",
             "hysteria2",
             "tuic",
             "anytls",
-            "ssh",
-            "wireguard",
+            "naive",
             "socks",
             "http",
             "direct"
@@ -471,55 +449,21 @@ fn clash(v: &Value) -> Result<Value> {
     };
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
-    if typ == "wireguard" {
-        // Clash keeps the peer fields inline; sing-box 1.13+ expects a
-        // standalone endpoint with an address list and a peers array.
-        let addresses: Vec<String> = match &v["ip"] {
-            Value::String(ip) => vec![if ip.contains('/') {
-                ip.clone()
-            } else {
-                format!("{ip}/32")
-            }],
-            Value::Array(items) => items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
-            _ => vec![],
-        };
-        let mut peer = json!({
-            "address":v["server"],
-            "port":number(&v["port"]),
-            "public_key":v["public-key"],
-            "allowed_ips":["0.0.0.0/0","::/0"]
-        });
-        if let Some(key) = v.get("pre-shared-key") {
-            peer["pre_shared_key"] = key.clone()
+    if typ == "naive" {
+        // Naive is HTTP/2 by default; `quic: true` switches it to HTTP/3.
+        let quic = v["quic"] == true || v["type"] == "naive+quic";
+        if quic {
+            n["quic"] = json!(true)
         }
-        if let Some(reserved) = v.get("reserved") {
-            peer["reserved"] = match reserved {
-                Value::String(text) => json!(
-                    text.split(',')
-                        .filter_map(|s| s.trim().parse::<u8>().ok())
-                        .collect::<Vec<_>>()
-                ),
-                other => other.clone(),
-            }
+        if let Some(window) = v.get("quic-session-receive-window") {
+            n["quic_session_receive_window"] = window.clone()
         }
-        let mut endpoint = json!({
-            "type":"wireguard",
-            "tag":v["name"],
-            "private_key":v["private-key"],
-            "peers":[peer]
-        });
-        if !addresses.is_empty() {
-            endpoint["address"] = json!(addresses)
+        if let Some(window) = v.get("stream-receive-window") {
+            n["stream_receive_window"] = window.clone()
         }
-        if let Some(mtu) = v.get("mtu") {
-            endpoint["mtu"] = mtu.clone()
+        if let Some(concurrency) = v.get("insecure-concurrency") {
+            n["insecure_concurrency"] = concurrency.clone()
         }
-        validate_server(&endpoint)?;
-        return Ok(endpoint);
     }
     for (from, to) in [
         ("password", "password"),
@@ -537,9 +481,6 @@ fn clash(v: &Value) -> Result<Value> {
         if let Some(value) = v.get(from) {
             n[to] = value.clone()
         }
-    }
-    if typ == "ssh" {
-        n["user"] = v["username"].clone()
     }
     if typ == "shadowsocks" {
         n["method"] = v["cipher"].clone();
@@ -564,35 +505,16 @@ fn clash(v: &Value) -> Result<Value> {
     if typ == "vmess" {
         n["security"] = json!(v["cipher"].as_str().unwrap_or("auto"))
     }
-    if typ == "hysteria" {
-        for (from, to) in [("up", "up_mbps"), ("down", "down_mbps")] {
-            if let Some(value) = v.get(from) {
-                n[to] = value.clone()
-            }
-        }
-        if let Some(auth) = v.get("auth-str").or_else(|| v.get("auth_str")) {
-            n["auth_str"] = auth.clone()
-        }
-        if let Some(obfs) = v.get("obfs").and_then(Value::as_str) {
-            n["obfs"] = json!(obfs)
-        }
-    }
-    if typ == "hysteria2" {
-        for (from, to) in [("up", "up_mbps"), ("down", "down_mbps")] {
-            if let Some(value) = v.get(from) {
-                n[to] = value.clone()
-            }
-        }
-    }
-    if v["tls"] == true || ["trojan", "hysteria", "hysteria2", "tuic", "anytls"].contains(&typ) {
+    if v["tls"] == true || ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ) {
         let mut tls = json!({"enabled":true});
         for (from, to) in [
             ("servername", "server_name"),
             ("sni", "server_name"),
             ("skip-cert-verify", "insecure"),
+            // Naive negotiates HTTP/2 or HTTP/3 by itself and rejects ALPN.
             ("alpn", "alpn"),
         ] {
-            if let Some(value) = v.get(from) {
+            if let Some(value) = v.get(from).filter(|_| typ != "naive" || to != "alpn") {
                 tls[to] = value.clone()
             }
         }
@@ -600,10 +522,9 @@ fn clash(v: &Value) -> Result<Value> {
             tls["utls"] = json!({"enabled":true,"fingerprint":fp})
         };
         if let Some(r) = v.get("reality-opts") {
-            tls["utls"] = json!({"enabled":true,"fingerprint":v
-                .get("client-fingerprint")
-                .cloned()
-                .unwrap_or(json!("chrome"))});
+            if tls.get("utls").is_none() {
+                tls["utls"] = json!({"enabled":true,"fingerprint":"chrome"})
+            }
             tls["reality"] =
                 json!({"enabled":true,"public_key":r["public-key"],"short_id":r["short-id"]})
         };
@@ -623,20 +544,20 @@ fn clash(v: &Value) -> Result<Value> {
                 json!({"type":"grpc","service_name":v["grpc-opts"]["grpc-service-name"]})
         }
         "http" | "h2" => {
-            let mut transport = json!({
-                "type":"http",
-                "path":v["h2-opts"]["path"].as_str().unwrap_or("/")
-            });
+            let mut transport = json!({"type":"http"});
+            if let Some(path) = v["h2-opts"]["path"].as_str() {
+                transport["path"] = json!(path)
+            }
             if let Some(host) = v["h2-opts"]["host"].as_str() {
                 transport["host"] = json!(host)
             }
             n["transport"] = transport
         }
         "httpupgrade" => {
-            let mut transport = json!({
-                "type":"httpupgrade",
-                "path":v["http-opts"]["path"].as_str().unwrap_or("/")
-            });
+            let mut transport = json!({"type":"httpupgrade"});
+            if let Some(path) = v["http-opts"]["path"].as_str() {
+                transport["path"] = json!(path)
+            }
             if let Some(host) = v["http-opts"]["headers"]["Host"].as_str() {
                 transport["host"] = json!(host)
             }
@@ -644,7 +565,7 @@ fn clash(v: &Value) -> Result<Value> {
         }
         other => bail!("不支持的 Clash 传输: {other}"),
     }
-    if let Some(obfs) = v.get("obfs").filter(|_| typ == "hysteria2") {
+    if let Some(obfs) = v.get("obfs") {
         n["obfs"] = json!({"type":obfs,"password":v["obfs-password"]})
     }
     validate_server(&n)?;
@@ -739,60 +660,92 @@ mod protocol_tests {
     use super::*;
 
     #[test]
-    fn share_links_map_to_sing_box_fields() {
+    fn anytls_and_naive_links_map_to_sing_box_fields() {
         let anytls = uri("anytls://secret@example.com:443?sni=example.com#A").unwrap();
         assert_eq!(anytls["type"], "anytls");
         assert_eq!(anytls["password"], "secret");
         assert_eq!(anytls["tls"]["server_name"], "example.com");
 
-        let hy = uri("hysteria://auth@example.com:443?upmbps=20&downmbps=50&obfs=x#H").unwrap();
-        assert_eq!(hy["type"], "hysteria");
-        assert_eq!(hy["auth_str"], "auth");
-        assert_eq!(hy["up_mbps"], 20);
-        assert_eq!(hy["obfs"], "x");
+        let h2 = uri("naive+https://user:pass@example.com:443?sni=example.com#N").unwrap();
+        assert_eq!(h2["type"], "naive");
+        assert_eq!(h2["username"], "user");
+        assert_eq!(h2["password"], "pass");
+        assert!(h2.get("quic").is_none());
 
-        let reality = uri("vless://uuid@example.com:443?security=reality&pbk=k&sid=ab#R").unwrap();
-        assert_eq!(reality["tls"]["reality"]["public_key"], "k");
-        // Reality requires uTLS; a missing fingerprint must not silently
-        // produce a configuration the core rejects.
-        assert!(reality["tls"]["utls"]["fingerprint"].is_string());
-
-        let ssh = uri("ssh://user:pass@example.com:22#S").unwrap();
-        assert_eq!(ssh["user"], "user");
-        assert_eq!(ssh["password"], "pass");
+        let h3 = uri("naive+quic://user:pass@example.com:443?congestion_control=bbr#N").unwrap();
+        assert_eq!(h3["quic"], true);
+        assert_eq!(h3["quic_congestion_control"], "bbr");
     }
 
     #[test]
-    fn wireguard_links_use_endpoint_shape() {
-        let link = "wireguard://YWJj@example.com:51820?publickey=cHVi&address=10.0.0.2%2F32&address=fd00::2%2F128&reserved=1,2,3#WG";
-        let node = uri(link).unwrap();
-        assert_eq!(node["type"], "wireguard");
-        assert_eq!(node["private_key"], "YWJj");
-        assert_eq!(node["address"], json!(["10.0.0.2/32", "fd00::2/128"]));
-        assert_eq!(node["peers"][0]["address"], "example.com");
-        assert_eq!(node["peers"][0]["port"], 51820);
-        // Reserved bytes are a byte array in sing-box, not strings.
-        assert_eq!(node["peers"][0]["reserved"], json!([1, 2, 3]));
+    fn reality_always_carries_a_utls_fingerprint() {
+        let node = uri("vless://uuid@example.com:443?security=reality&pbk=k&sid=ab#R").unwrap();
+        assert_eq!(node["tls"]["reality"]["public_key"], "k");
+        // Without uTLS the core refuses to start a Reality client.
+        assert!(node["tls"]["utls"]["fingerprint"].is_string());
     }
 
     #[test]
-    fn clash_extra_protocols_and_transports_convert() {
+    fn vmess_and_vless_support_the_documented_transports() {
+        let h2 = uri("vless://uuid@example.com:443?type=h2&host=example.com&path=%2Fh2#V").unwrap();
+        assert_eq!(h2["transport"]["type"], "http");
+        assert_eq!(h2["transport"]["path"], "/h2");
+
+        let unsupported = uri("vless://uuid@example.com:443?type=kcp#V").unwrap_err();
+        assert!(unsupported.to_string().contains("传输"));
+    }
+
+    #[test]
+    fn clash_anytls_naive_and_new_fields_convert() {
         let source = json!({"proxies":[
-            {"name":"wg","type":"wireguard","server":"wg.example.com","port":51820,"ip":"10.9.0.2","private-key":"a","public-key":"b","reserved":"1,2,3"},
             {"name":"any","type":"anytls","server":"a.example.com","port":443,"password":"p","sni":"a.example.com"},
-            {"name":"hy","type":"hysteria","server":"h.example.com","port":443,"auth-str":"auth","up":20,"down":50,"obfs":"x"},
-            {"name":"ssh","type":"ssh","server":"s.example.com","port":22,"username":"u","password":"p"},
-            {"name":"h2","type":"vless","server":"v.example.com","port":443,"uuid":"u","network":"h2","tls":true,"h2-opts":{"host":"v.example.com","path":"/h2"}}
+            {"name":"n2","type":"naive","server":"n.example.com","port":443,"username":"u","password":"p","sni":"n.example.com"},
+            {"name":"n3","type":"naive+quic","server":"n.example.com","port":443,"username":"u","password":"p","congestion-controller":"bbr"},
+            {"name":"v","type":"vless","server":"v.example.com","port":443,"uuid":"u","network":"h2","tls":true,"h2-opts":{"host":"v.example.com","path":"/h2"},"packet-encoding":"xudp"}
         ]});
         let nodes = parse(&source.to_string()).unwrap();
-        assert_eq!(nodes[0]["private_key"], "a");
-        assert_eq!(nodes[0]["address"], json!(["10.9.0.2/32"]));
-        assert_eq!(nodes[0]["peers"][0]["reserved"], json!([1, 2, 3]));
-        assert_eq!(nodes[1]["type"], "anytls");
-        assert_eq!(nodes[2]["type"], "hysteria");
-        assert_eq!(nodes[2]["auth_str"], "auth");
-        assert_eq!(nodes[3]["user"], "u");
-        assert_eq!(nodes[4]["transport"]["type"], "http");
-        assert_eq!(nodes[4]["transport"]["path"], "/h2");
+        assert_eq!(nodes[0]["type"], "anytls");
+        assert_eq!(nodes[1]["type"], "naive");
+        assert_eq!(nodes[1]["tls"]["enabled"], true);
+        assert_eq!(nodes[2]["quic"], true);
+        assert_eq!(nodes[2]["congestion_control"], "bbr");
+        assert_eq!(nodes[3]["packet_encoding"], "xudp");
+        assert_eq!(nodes[3]["transport"]["type"], "http");
+    }
+
+    #[test]
+    fn unsupported_lines_are_skipped_with_a_report() {
+        let body = [
+            "ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:8388#SS",
+            "ssh://user:pass@example.com:22#SSH",
+            "trojan://secret@example.com:443?sni=example.com#Trojan",
+        ]
+        .join("\n");
+        // Downloads keep the two usable nodes and report the rest.
+        let (nodes, skipped) = parse_with_skips(&body).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(skipped.len(), 1);
+        // Manual editing stays strict so a typo is not silently dropped.
+        let error = format!("{:#}", parse(&body).unwrap_err());
+        assert!(error.contains("不支持的节点协议"), "{error}");
+    }
+
+    #[test]
+    fn a_subscription_with_no_usable_nodes_explains_why() {
+        let error = parse_with_skips("ssh://user:pass@example.com:22#SSH\nssh://b@c:22#D")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("跳过 2 个"), "{error}");
+    }
+
+    #[test]
+    fn protocols_outside_the_android_app_are_rejected() {
+        for link in [
+            "ssh://user:pass@example.com:22#S",
+            "hysteria://secret@example.com:443#H",
+            "wireguard://key@example.com:51820?publickey=x&address=10.0.0.2%2F32#W",
+        ] {
+            assert!(uri(link).is_err(), "accepted {link}");
+        }
     }
 }

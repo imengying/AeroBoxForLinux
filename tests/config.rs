@@ -575,38 +575,34 @@ fn legacy_percentage_text_scale_is_rejected_instead_of_silently_defaulted() {
     );
 }
 
-/// Every protocol the picker offers must survive conversion and still be
-/// accepted by a real core. Endpoint links (WireGuard) land in `endpoints`
-/// while the selector references them by tag.
+/// Mirrors the protocol set of the Android app: SS, VMess, VLESS, Trojan,
+/// AnyTLS, Hysteria2, TUIC, Naive, SOCKS and HTTP. Every generated outbound
+/// must pass a real core's validation.
 #[test]
-fn real_core_accepts_every_supported_node_protocol() {
+fn real_core_accepts_the_protocols_the_android_app_supports() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
-    let key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
-    let peer = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
     let links = [
         "ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:8388#SS",
-        "vless://bf000d23-0752-40b4-affe-68f7707a9661@example.com:443?security=tls&sni=example.com&type=ws&path=%2Fws#VLESS",
+        "ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206WVdKalpHVm1aMmhwYW10c2JXNXZjQT09@example.com:8388#SS2022",
+        "vmess://eyJ2IjoiMiIsInBzIjoiVk1lc3MiLCJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6ImJmMDAwZDIzLTA3NTItNDBiNC1hZmZlLTY4Zjc3MDdhOTY2MSIsImFpZCI6IjAiLCJuZXQiOiJ3cyIsInBhdGgiOiIvd3MiLCJob3N0IjoiZXhhbXBsZS5jb20iLCJ0bHMiOiJ0bHMifQ==",
+        "vless://bf000d23-0752-40b4-affe-68f7707a9661@example.com:443?security=tls&sni=example.com&type=grpc&serviceName=gs#VLESS",
         "trojan://secret@example.com:443?sni=example.com#Trojan",
-        "hysteria2://secret@example.com:443?sni=example.com&obfs=salamander&obfs-password=x#HY2",
-        "hysteria://secret@example.com:443?upmbps=20&downmbps=50&insecure=1#HY1",
-        "tuic://bf000d23-0752-40b4-affe-68f7707a9661:secret@example.com:443?congestion_control=bbr#TUIC",
         "anytls://secret@example.com:443?sni=example.com#AnyTLS",
+        "hysteria2://secret@example.com:443?sni=example.com#HY2",
+        "tuic://bf000d23-0752-40b4-affe-68f7707a9661:secret@example.com:443#TUIC",
+        "naive+https://user:pass@example.com:443?sni=example.com#NaiveH2",
+        "naive+quic://user:pass@example.com:443?congestion_control=bbr&alpn=h3#NaiveH3",
         "socks5://user:pass@example.com:1080#SOCKS",
-        "ssh://user:pass@example.com:22#SSH",
         "http://user:pass@example.com:8080#HTTP",
-        &format!(
-            "wireguard://{key}@example.com:51820?publickey={peer}&address=10.7.0.2%2F32&reserved=1,2,3#WG"
-        ),
     ];
     let nodes = links
         .iter()
         .map(|link| aerobox_for_linux::subscription::uri(link).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(nodes.len(), links.len());
     service
         .update(|state| {
             state.subscriptions = vec![aerobox_for_linux::model::Subscription {
@@ -622,72 +618,14 @@ fn real_core_accepts_every_supported_node_protocol() {
         .generate_profile(&state, &state.current_profile().unwrap())
         .unwrap();
     assert!(
-        config["endpoints"]
+        config["outbounds"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["type"] == "wireguard")),
-        "WireGuard 节点没有写入 endpoints: {config}"
+            .is_some_and(|items| items.iter().any(|item| item["quic"] == true)),
+        "Naive QUIC 节点没有写入 quic 标记"
     );
     let path = dir.path().join("protocols.json");
     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     let output = std::process::Command::new(&binary)
-        .args(["check", "-c"])
-        .arg(&path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Endpoint nodes live outside `outbounds`, so the selector default and the
-/// node picker must still resolve them by tag.
-#[test]
-fn endpoint_nodes_stay_selectable() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
-    let key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
-    let peer = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
-    let link =
-        format!("wireguard://{key}@example.com:51820?publickey={peer}&address=10.8.0.2%2F32#WG");
-    let node = aerobox_for_linux::subscription::uri(&link).unwrap();
-    assert!(aerobox_for_linux::model::is_connection_node(&node));
-    service
-        .update(|state| {
-            let mut sub = aerobox_for_linux::model::Subscription {
-                nodes: vec![node.clone()],
-                ..Default::default()
-            };
-            sub.selected_node = Some(node["tag"].as_str().unwrap().into());
-            state.settings.active_subscription = sub.id.clone();
-            state.subscriptions = vec![sub];
-            Ok(())
-        })
-        .unwrap();
-    let state = service.snapshot();
-    let config = service
-        .generate_profile(&state, &state.current_profile().unwrap())
-        .unwrap();
-    let selector = config["outbounds"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["tag"] == "proxy")
-        .unwrap();
-    assert_eq!(selector["default"], "WG");
-    assert_eq!(selector["outbounds"], json!(["WG"]));
-    assert!(
-        config["endpoints"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["tag"] == "WG"))
-    );
-    let path = dir.path().join("endpoint.json");
-    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let output = std::process::Command::new(binary)
         .args(["check", "-c"])
         .arg(&path)
         .output()
