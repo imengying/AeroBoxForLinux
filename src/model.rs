@@ -28,7 +28,7 @@ pub fn pretty(value: &impl Serialize) -> String {
 pub const FONT_SIZE_MIN: u32 = 9;
 pub const FONT_SIZE_MAX: u32 = 18;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: String,

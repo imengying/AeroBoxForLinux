@@ -190,6 +190,7 @@ struct Ui {
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
     nav: gtk::ListBox,
+    syncing_navigation: Cell<bool>,
     page: Cell<Page>,
     split: adw::OverlaySplitView,
     jobs: Cell<usize>,
@@ -199,6 +200,9 @@ struct Ui {
     dashboard: RefCell<Option<Rc<home::Dashboard>>>,
     core: RefCell<Option<Rc<core::CorePanel>>>,
     log_buffer: RefCell<Option<gtk::TextBuffer>>,
+    settings_panel: RefCell<Option<Rc<settings::SettingsPanel>>>,
+    pending_leave: RefCell<Option<Rc<dyn Fn()>>>,
+    settings_prompt: RefCell<Option<adw::AlertDialog>>,
     node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
 }
 
@@ -308,6 +312,7 @@ impl Ui {
             .build();
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(false)
             .child(&clamp)
             .vexpand(true)
             .build();
@@ -335,6 +340,7 @@ impl Ui {
             floating,
             home_action: RefCell::new(None),
             nav,
+            syncing_navigation: Cell::new(false),
             page: Cell::new(Page::Home),
             split,
             jobs: Cell::new(0),
@@ -344,16 +350,40 @@ impl Ui {
             dashboard: RefCell::new(None),
             core: RefCell::new(None),
             log_buffer: RefCell::new(None),
+            settings_panel: RefCell::new(None),
+            pending_leave: RefCell::new(None),
+            settings_prompt: RefCell::new(None),
             node_panel: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
         ui.nav.connect_row_selected(move |_, row| {
-            if let (Some(ui), Some(row)) = (weak.upgrade(), row) {
-                ui.show(Page::ALL[row.index() as usize]);
-                if ui.split.is_collapsed() {
-                    ui.split.set_show_sidebar(false)
-                }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(row) = row else {
+                return;
+            };
+            if ui.syncing_navigation.get() {
+                return;
             }
+            let page = Page::ALL[row.index() as usize];
+            if page == ui.page.get() {
+                return;
+            }
+            let destination = ui.clone();
+            if ui.confirm_discard_settings(move || destination.navigate(page)) {
+                ui.navigate(page);
+            }
+            if ui.split.is_collapsed() && ui.page.get() == page {
+                ui.split.set_show_sidebar(false)
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.window.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                return ui.confirm_close();
+            }
+            glib::Propagation::Proceed
         });
         ui.refresh(Page::Home);
         let weak = Rc::downgrade(&ui);
@@ -514,10 +544,14 @@ impl Ui {
         self.split.set_max_sidebar_width(width);
     }
     fn show(self: &Rc<Self>, page: Page) {
-        if self.page.get() == Page::Settings && page != Page::Settings {
-            let settings = self.service.snapshot().settings;
+        if let Some(panel) = self.settings_panel.borrow().as_ref() {
+            let settings = panel.saved_settings();
+            panel.discard_preview();
             self.apply_font_size(settings.font_size, settings.crisp_text);
+            apply_theme(&settings.theme);
         }
+        self.pending_leave.take();
+        self.settings_panel.replace(None);
         self.page.set(page);
         self.dashboard.replace(None);
         self.core.replace(None);
@@ -554,9 +588,46 @@ impl Ui {
     }
 
     fn navigate(self: &Rc<Self>, page: Page) {
-        let index = Page::ALL.iter().position(|p| *p == page).expect("page");
+        if page == self.page.get() {
+            return;
+        }
+        let destination = self.clone();
+        if self.confirm_discard_settings(move || destination.navigate(page)) {
+            self.show(page);
+        }
+        self.sync_navigation_selection();
+    }
+
+    fn sync_navigation_selection(&self) {
+        let index = Page::ALL
+            .iter()
+            .position(|page| *page == self.page.get())
+            .expect("current page");
+        self.syncing_navigation.set(true);
         self.nav
             .select_row(self.nav.row_at_index(index as i32).as_ref());
+        self.syncing_navigation.set(false);
+    }
+
+    /// Return true only when the caller may leave immediately. A save-and-leave
+    /// action is kept by the panel until persistence has really succeeded.
+    fn confirm_close(self: &Rc<Self>) -> glib::Propagation {
+        let window = self.window.clone();
+        if self.confirm_discard_settings(move || window.close()) {
+            glib::Propagation::Proceed
+        } else {
+            glib::Propagation::Stop
+        }
+    }
+
+    fn confirm_discard_settings(self: &Rc<Self>, leave: impl Fn() + 'static) -> bool {
+        if self.page.get() != Page::Settings {
+            return true;
+        }
+        let Some(panel) = self.settings_panel.borrow().as_ref().cloned() else {
+            return true;
+        };
+        panel.confirm_leave(self, Rc::new(leave))
     }
     fn rules(self: &Rc<Self>, heading: &gtk::Box) {
         let add = primary("新建规则集", "list-add-symbolic");
@@ -1336,6 +1407,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 22 => "subscriptions-menu.png",
                 23 => "subscriptions-narrow.png",
                 24 => "nodes-narrow.png",
+                25 => "settings-unsaved.png",
                 _ => "",
             };
             if !name.is_empty() {
@@ -1522,6 +1594,61 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 24 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
+                    ui.window.set_default_size(1180, 800);
+                    ui.navigate(Page::Settings);
+                    settings::smoke_unsaved(&ui, None)?;
+                }
+                25 => settings::smoke_unsaved(&ui, Some("cancel"))?,
+                26 => {
+                    anyhow::ensure!(
+                        !settings::SettingsPanel::smoke_has_prompt(&ui),
+                        "继续编辑后确认框未关闭"
+                    );
+                    anyhow::ensure!(ui.page.get() == Page::Settings, "继续编辑离开了设置页");
+                    ui.confirm_discard_settings({
+                        let ui = ui.clone();
+                        move || ui.navigate(Page::Nodes)
+                    });
+                    anyhow::ensure!(
+                        settings::SettingsPanel::smoke_has_prompt(&ui),
+                        "继续编辑后无法再次请求离开"
+                    );
+                }
+                27 => settings::smoke_unsaved(&ui, Some("discard"))?,
+                28 => {
+                    anyhow::ensure!(ui.page.get() == Page::Nodes, "放弃更改后未离开");
+                    ui.navigate(Page::Settings);
+                    settings::smoke_restored(&ui)?;
+                    settings::smoke_unsaved(&ui, None)?;
+                }
+                29 => {
+                    settings::smoke_unsaved(&ui, Some("save"))?;
+                    anyhow::ensure!(ui.page.get() == Page::Settings, "保存完成前提前离开");
+                }
+                30 => {
+                    anyhow::ensure!(ui.jobs.get() == 0, "保存并离开尚未完成");
+                    anyhow::ensure!(
+                        ui.page.get() == Page::Nodes,
+                        "保存并离开未切页: page={:?} jobs={} pending={} panel={}",
+                        ui.page.get(),
+                        ui.jobs.get(),
+                        ui.pending_leave.borrow().is_some(),
+                        ui.settings_panel.borrow().is_some()
+                    );
+                    anyhow::ensure!(
+                        ui.service.snapshot().settings.font_size == model::FONT_SIZE_MIN,
+                        "保存并离开未持久化"
+                    );
+                }
+                31 => {
+                    ui.navigate(Page::Settings);
+                    settings::smoke_edit(&ui)?;
+                    anyhow::ensure!(
+                        ui.confirm_close() == glib::Propagation::Stop,
+                        "未保存时允许关闭窗口"
+                    );
+                    anyhow::ensure!(ui.window.is_visible(), "未保存时直接关闭了窗口");
+                    settings::smoke_unsaved(&ui, Some("cancel"))?;
                 }
                 _ => {}
             }
@@ -1537,7 +1664,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 24 {
+        if current == 31 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

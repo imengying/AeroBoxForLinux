@@ -10,6 +10,8 @@ use super::*;
 pub(super) struct Typography {
     provider: gtk::CssProvider,
     system_rendering: Vec<(&'static str, glib::Value)>,
+    font_size: Cell<u32>,
+    crisp_text: Cell<bool>,
 }
 
 impl Typography {
@@ -41,13 +43,21 @@ impl Typography {
         let result = Self {
             provider,
             system_rendering,
+            font_size: Cell::new(model::FONT_SIZE_MIN),
+            crisp_text: Cell::new(false),
         };
         result.apply(font_size, crisp);
         result
     }
 
+    pub(super) fn preview(&self) -> (u32, bool) {
+        (self.font_size.get(), self.crisp_text.get())
+    }
+
     pub(super) fn apply(&self, font_size: u32, crisp: bool) {
         let size = font_size.clamp(model::FONT_SIZE_MIN, model::FONT_SIZE_MAX);
+        self.font_size.set(size);
+        self.crisp_text.set(crisp);
         // Applied to `window` so dialogs, popovers and editors inherit the same
         // base size; leftover desktop defaults made different surfaces drift.
         self.provider

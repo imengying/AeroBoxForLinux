@@ -1,4 +1,4 @@
-/* Font family and body size come from GTK and the application text scale.
+/* Font family and body size come from GTK and the application font setting.
  * GNOME heading/title classes provide the shared text hierarchy. */
 @define-color accent_bg_color #2878d7;
 @define-color accent_fg_color #ffffff;
@@ -68,8 +68,14 @@
 .dark .node-card, .dark .subscription-card { background: #24282f; border-color: #363c47; }
 .node-card:hover, .subscription-card:hover { background: #f0f4fb; border-color: #b9cce6; }
 .dark .node-card:hover, .dark .subscription-card:hover { background: #2a3342; border-color: #52647e; }
-.node-card.node-selected, .subscription-card.subscription-selected { background: #e7efff; border-color: #76a3e0; }
-.dark .node-card.node-selected, .dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
+.node-card.node-selected { background: @accent_bg_color; border-color: @accent_bg_color; color: @accent_fg_color; }
+.subscription-card.subscription-selected { background: #e7efff; border-color: #76a3e0; }
+.dark .node-card.node-selected { background: @accent_bg_color; border-color: #8dbdff; color: @accent_fg_color; }
+.dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
+.node-card.node-selected .muted,
+.node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .86); }
+.node-card.node-selected .node-check, .subscription-card.subscription-selected .selection-check { color: @accent_fg_color; }
+.node-card.node-selected .node-test-button { color: @accent_fg_color; }
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
@@ -83,6 +89,7 @@
 .node-test-button { padding: 0.36em; min-width: 2.18em; min-height: 2.18em; border-radius: 7px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
+.node-card.node-selected .node-test-button:disabled { color: alpha(@accent_fg_color, .68); }
 /* Cards must be allowed to shrink to half the grid width; a progress bar or
  * long usage string that refuses to compress forces a single column. */
 .subscription-card-content { min-width: 0; }
@@ -126,6 +133,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 4.91em; }
+.settings-dirty-mark { color: #b47716; font-size: 0.75em; }
+.settings-dirty-label { color: alpha(@window_fg_color, .78); }
 .aerobox-window .boxed-list { border-radius: 14px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
 .aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
 
