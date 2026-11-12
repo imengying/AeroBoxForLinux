@@ -24,7 +24,7 @@ cd AeroBoxForLinux-linux-amd64
 ## 使用
 
 1. 在设置中下载 sing-box 1.14 或更新的内核，或指定已有内核路径。内置安装器从 sing-box 官方 GitHub Release 下载并校验 SHA256。
-2. 通过链接、剪贴板或本地文件导入订阅，成功后自动设为当前订阅。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS / HTTP 节点链接。Clash Shadowsocks 的受支持插件参数会保留，不支持的插件明确报错。
+2. 通过链接、剪贴板或本地文件导入订阅，成功后自动设为当前订阅。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS / VMess / VLESS / Trojan / Hysteria / Hysteria2 / TUIC / AnyTLS / SSH / SOCKS / HTTP / WireGuard 节点链接。Clash 的 WireGuard 会转换为 sing-box 1.13+ 的 endpoint；VMess / VLESS 的 gRPC、WebSocket、HTTP/2 与 HTTPUpgrade 传输会保留。Clash Shadowsocks 的受支持插件参数会保留，不支持的插件和传输方式明确报错。
 3. 点击订阅卡片即可切换当前订阅；节点页只显示它的实际节点。点击节点卡片选择，成功后高亮并打勾，各订阅分别记住所选节点。运行中切换会先校验并应用，失败恢复原连接。
 4. 在首页选择规则、全局或直连，然后点击右下角「启动」。默认启用系统代理；需要时可切换 TUN。节点卡片底部的测速图标只测试该节点；页面顶部「测速」测试当前订阅，测速不会改变所选节点。连接页可查看和断开连接。
 

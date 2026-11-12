@@ -33,6 +33,7 @@ pub fn parse(body: &str) -> Result<Vec<Value>> {
         && let Some(items) = value
             .as_array()
             .or_else(|| value["outbounds"].as_array())
+            .or_else(|| value["endpoints"].as_array())
             .or_else(|| value["proxies"].as_array())
     {
         let nodes = items
@@ -145,10 +146,16 @@ pub fn uri(input: &str) -> Result<Value> {
                 node["transport"] =
                     json!({"type":"grpc","service_name":v["path"].as_str().unwrap_or("")})
             }
+            "http" | "h2" => {
+                node["transport"] = json!({"type":"http","path":v["path"].as_str().unwrap_or("/"),"host":v["host"].as_str().unwrap_or("")})
+            }
             other => bail!("不支持 VMess 传输: {other}"),
         };
         validate_server(&node)?;
         return Ok(node);
+    }
+    if let Some(link) = input.strip_prefix("wireguard://") {
+        return wireguard(link);
     }
     let mut raw = input.to_string();
     if let Some(ss) = input.strip_prefix("ss://") {
@@ -161,17 +168,24 @@ pub fn uri(input: &str) -> Result<Value> {
     let typ = match u.scheme() {
         "ss" => "shadowsocks",
         "hy2" => "hysteria2",
+        "hysteria" => "hysteria",
         "socks5" => "socks",
         "https" => "http",
+        "anytls" => "anytls",
+        "ssh" => "ssh",
         other => other,
     };
     ensure!(
         [
             "shadowsocks",
+            "vmess",
             "vless",
             "trojan",
+            "hysteria",
             "hysteria2",
             "tuic",
+            "anytls",
+            "ssh",
             "socks",
             "http"
         ]
@@ -228,6 +242,37 @@ pub fn uri(input: &str) -> Result<Value> {
                 node["obfs"] = json!({"type":q("obfs"),"password":q("obfs-password")})
             }
         }
+        "hysteria" => {
+            node["auth_str"] = json!(if pass.is_empty() {
+                user
+            } else {
+                format!("{user}:{pass}")
+            });
+            if !q("obfs").is_empty() {
+                node["obfs"] = json!(q("obfs"))
+            };
+            for (from, to) in [
+                ("upmbps", "up_mbps"),
+                ("downmbps", "down_mbps"),
+                ("up", "up_mbps"),
+                ("down", "down_mbps"),
+            ] {
+                if let Ok(value) = q(from).parse::<u64>() {
+                    node[to] = json!(value)
+                }
+            }
+        }
+        "anytls" => {
+            node["password"] = json!(if pass.is_empty() {
+                user
+            } else {
+                format!("{user}:{pass}")
+            })
+        }
+        "ssh" => {
+            node["user"] = json!(user);
+            node["password"] = json!(pass)
+        }
         "tuic" => {
             node["uuid"] = json!(user);
             node["password"] = json!(pass);
@@ -235,15 +280,14 @@ pub fn uri(input: &str) -> Result<Value> {
                 node["congestion_control"] = json!(q("congestion_control"))
             }
         }
-        _ => {
-            if !user.is_empty() {
-                node["username"] = json!(user);
-                node["password"] = json!(pass)
-            }
+        "socks" | "http" if !user.is_empty() => {
+            node["username"] = json!(user);
+            node["password"] = json!(pass);
         }
+        _ => {}
     }
-    if ["trojan", "hysteria2", "tuic"].contains(&typ)
-        || u.scheme() == "https"
+    if ["trojan", "hysteria", "hysteria2", "tuic", "anytls"].contains(&typ)
+        || (typ == "http" && u.scheme() == "https")
         || ["tls", "reality"].contains(&q("security").as_str())
     {
         let mut tls = json!({"enabled":true});
@@ -260,6 +304,7 @@ pub fn uri(input: &str) -> Result<Value> {
             tls["utls"] = json!({"enabled":true,"fingerprint":q("fp")})
         }
         if q("security") == "reality" {
+            tls["utls"] = json!({"enabled":true,"fingerprint":if q("fp").is_empty(){"chrome".to_owned()}else{q("fp")}});
             tls["reality"] = json!({"enabled":true,"public_key":q("pbk"),"short_id":q("sid")})
         };
         node["tls"] = tls;
@@ -273,12 +318,35 @@ pub fn uri(input: &str) -> Result<Value> {
         "httpupgrade" => {
             node["transport"] = json!({"type":"httpupgrade","host":q("host"),"path":q("path")})
         }
+        "http" | "h2" => {
+            node["transport"] = json!({"type":"http","host":q("host"),"path":q("path")})
+        }
         other => bail!("不支持的传输方式: {other}"),
     }
     validate_server(&node)?;
     Ok(node)
 }
 fn validate_server(node: &Value) -> Result<()> {
+    if node["type"] == "wireguard" {
+        ensure!(
+            node["peers"].as_array().is_some_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer["address"]
+                        .as_str()
+                        .is_some_and(|host| !host.is_empty())
+                        && (1..=65535).contains(&number(&peer["port"]))
+                })
+            }),
+            "WireGuard 节点缺少有效服务器"
+        );
+        ensure!(
+            node["private_key"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty()),
+            "WireGuard 节点缺少私钥"
+        );
+        return Ok(());
+    }
     ensure!(
         node["server"].as_str().is_some_and(|s| !s.is_empty()),
         "节点服务器为空"
@@ -288,6 +356,47 @@ fn validate_server(node: &Value) -> Result<()> {
         "节点端口无效"
     );
     Ok(())
+}
+
+/// `wireguard://private_key@host:port?publickey=…&address=…&reserved=…`
+/// is what most share links and sysbox exports use. Address values may repeat.
+fn wireguard(link: &str) -> Result<Value> {
+    let u = Url::parse(&format!("wireguard://{link}"))?;
+    let host = u.host_str().context("WireGuard 节点缺少服务器")?;
+    let port = u.port().unwrap_or(51820);
+    let query = |key: &str| u.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v);
+    let private_key = unescape(u.username());
+    ensure!(!private_key.is_empty(), "WireGuard 节点缺少私钥");
+    let public_key = query("publickey")
+        .or_else(|| query("public-key"))
+        .or_else(|| query("peer_public_key"))
+        .context("WireGuard 节点缺少对端公钥")?
+        .into_owned();
+    let addresses: Vec<String> = u
+        .query_pairs()
+        .filter(|(k, _)| k == "address" || k == "local_address")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    ensure!(!addresses.is_empty(), "WireGuard 节点缺少本地地址");
+    let mut peer = json!({"address":host,"port":port,"public_key":public_key,"allowed_ips":["0.0.0.0/0","::/0"]});
+    if let Some(key) = query("presharedkey").or_else(|| query("pre-shared-key")) {
+        peer["pre_shared_key"] = json!(key)
+    }
+    if let Some(reserved) = query("reserved").or_else(|| query("reserved-bytes")) {
+        peer["reserved"] = json!(
+            reserved
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u8>().ok())
+                .collect::<Vec<_>>()
+        )
+    }
+    Ok(json!({
+        "type":"wireguard",
+        "tag":unescape(u.fragment().unwrap_or("WireGuard")),
+        "address":addresses,
+        "private_key":private_key,
+        "peers":[peer]
+    }))
 }
 
 fn supported_plugin(plugin: &str) -> Result<&str> {
@@ -334,6 +443,7 @@ fn clash(v: &Value) -> Result<Value> {
     let typ = match v["type"].as_str().unwrap_or("") {
         "ss" => "shadowsocks",
         "socks5" => "socks",
+        "hy" | "hysteria1" => "hysteria",
         t => t,
     };
     ensure!(
@@ -342,8 +452,12 @@ fn clash(v: &Value) -> Result<Value> {
             "vmess",
             "vless",
             "trojan",
+            "hysteria",
             "hysteria2",
             "tuic",
+            "anytls",
+            "ssh",
+            "wireguard",
             "socks",
             "http",
             "direct"
@@ -357,6 +471,56 @@ fn clash(v: &Value) -> Result<Value> {
     };
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
+    if typ == "wireguard" {
+        // Clash keeps the peer fields inline; sing-box 1.13+ expects a
+        // standalone endpoint with an address list and a peers array.
+        let addresses: Vec<String> = match &v["ip"] {
+            Value::String(ip) => vec![if ip.contains('/') {
+                ip.clone()
+            } else {
+                format!("{ip}/32")
+            }],
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => vec![],
+        };
+        let mut peer = json!({
+            "address":v["server"],
+            "port":number(&v["port"]),
+            "public_key":v["public-key"],
+            "allowed_ips":["0.0.0.0/0","::/0"]
+        });
+        if let Some(key) = v.get("pre-shared-key") {
+            peer["pre_shared_key"] = key.clone()
+        }
+        if let Some(reserved) = v.get("reserved") {
+            peer["reserved"] = match reserved {
+                Value::String(text) => json!(
+                    text.split(',')
+                        .filter_map(|s| s.trim().parse::<u8>().ok())
+                        .collect::<Vec<_>>()
+                ),
+                other => other.clone(),
+            }
+        }
+        let mut endpoint = json!({
+            "type":"wireguard",
+            "tag":v["name"],
+            "private_key":v["private-key"],
+            "peers":[peer]
+        });
+        if !addresses.is_empty() {
+            endpoint["address"] = json!(addresses)
+        }
+        if let Some(mtu) = v.get("mtu") {
+            endpoint["mtu"] = mtu.clone()
+        }
+        validate_server(&endpoint)?;
+        return Ok(endpoint);
+    }
     for (from, to) in [
         ("password", "password"),
         ("username", "username"),
@@ -364,10 +528,18 @@ fn clash(v: &Value) -> Result<Value> {
         ("alterId", "alter_id"),
         ("flow", "flow"),
         ("congestion-controller", "congestion_control"),
+        ("udp-relay-mode", "udp_relay_mode"),
+        ("packet-encoding", "packet_encoding"),
+        ("packet_encoding", "packet_encoding"),
+        ("global-padding", "global_padding"),
+        ("authenticated-length", "authenticated_length"),
     ] {
         if let Some(value) = v.get(from) {
             n[to] = value.clone()
         }
+    }
+    if typ == "ssh" {
+        n["user"] = v["username"].clone()
     }
     if typ == "shadowsocks" {
         n["method"] = v["cipher"].clone();
@@ -392,7 +564,27 @@ fn clash(v: &Value) -> Result<Value> {
     if typ == "vmess" {
         n["security"] = json!(v["cipher"].as_str().unwrap_or("auto"))
     }
-    if v["tls"] == true || ["trojan", "hysteria2", "tuic"].contains(&typ) {
+    if typ == "hysteria" {
+        for (from, to) in [("up", "up_mbps"), ("down", "down_mbps")] {
+            if let Some(value) = v.get(from) {
+                n[to] = value.clone()
+            }
+        }
+        if let Some(auth) = v.get("auth-str").or_else(|| v.get("auth_str")) {
+            n["auth_str"] = auth.clone()
+        }
+        if let Some(obfs) = v.get("obfs").and_then(Value::as_str) {
+            n["obfs"] = json!(obfs)
+        }
+    }
+    if typ == "hysteria2" {
+        for (from, to) in [("up", "up_mbps"), ("down", "down_mbps")] {
+            if let Some(value) = v.get(from) {
+                n[to] = value.clone()
+            }
+        }
+    }
+    if v["tls"] == true || ["trojan", "hysteria", "hysteria2", "tuic", "anytls"].contains(&typ) {
         let mut tls = json!({"enabled":true});
         for (from, to) in [
             ("servername", "server_name"),
@@ -408,6 +600,10 @@ fn clash(v: &Value) -> Result<Value> {
             tls["utls"] = json!({"enabled":true,"fingerprint":fp})
         };
         if let Some(r) = v.get("reality-opts") {
+            tls["utls"] = json!({"enabled":true,"fingerprint":v
+                .get("client-fingerprint")
+                .cloned()
+                .unwrap_or(json!("chrome"))});
             tls["reality"] =
                 json!({"enabled":true,"public_key":r["public-key"],"short_id":r["short-id"]})
         };
@@ -426,9 +622,29 @@ fn clash(v: &Value) -> Result<Value> {
             n["transport"] =
                 json!({"type":"grpc","service_name":v["grpc-opts"]["grpc-service-name"]})
         }
+        "http" | "h2" => {
+            let mut transport = json!({
+                "type":"http",
+                "path":v["h2-opts"]["path"].as_str().unwrap_or("/")
+            });
+            if let Some(host) = v["h2-opts"]["host"].as_str() {
+                transport["host"] = json!(host)
+            }
+            n["transport"] = transport
+        }
+        "httpupgrade" => {
+            let mut transport = json!({
+                "type":"httpupgrade",
+                "path":v["http-opts"]["path"].as_str().unwrap_or("/")
+            });
+            if let Some(host) = v["http-opts"]["headers"]["Host"].as_str() {
+                transport["host"] = json!(host)
+            }
+            n["transport"] = transport
+        }
         other => bail!("不支持的 Clash 传输: {other}"),
     }
-    if let Some(obfs) = v.get("obfs") {
+    if let Some(obfs) = v.get("obfs").filter(|_| typ == "hysteria2") {
         n["obfs"] = json!({"type":obfs,"password":v["obfs-password"]})
     }
     validate_server(&n)?;
@@ -515,5 +731,68 @@ mod tests {
     fn rejects_bad_nodes() {
         assert!(parse("fake://x@host:1").is_err());
         assert!(parse(r#"[{"type":"direct","tag":"a"},{"type":"direct","tag":"a"}]"#).is_err())
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn share_links_map_to_sing_box_fields() {
+        let anytls = uri("anytls://secret@example.com:443?sni=example.com#A").unwrap();
+        assert_eq!(anytls["type"], "anytls");
+        assert_eq!(anytls["password"], "secret");
+        assert_eq!(anytls["tls"]["server_name"], "example.com");
+
+        let hy = uri("hysteria://auth@example.com:443?upmbps=20&downmbps=50&obfs=x#H").unwrap();
+        assert_eq!(hy["type"], "hysteria");
+        assert_eq!(hy["auth_str"], "auth");
+        assert_eq!(hy["up_mbps"], 20);
+        assert_eq!(hy["obfs"], "x");
+
+        let reality = uri("vless://uuid@example.com:443?security=reality&pbk=k&sid=ab#R").unwrap();
+        assert_eq!(reality["tls"]["reality"]["public_key"], "k");
+        // Reality requires uTLS; a missing fingerprint must not silently
+        // produce a configuration the core rejects.
+        assert!(reality["tls"]["utls"]["fingerprint"].is_string());
+
+        let ssh = uri("ssh://user:pass@example.com:22#S").unwrap();
+        assert_eq!(ssh["user"], "user");
+        assert_eq!(ssh["password"], "pass");
+    }
+
+    #[test]
+    fn wireguard_links_use_endpoint_shape() {
+        let link = "wireguard://YWJj@example.com:51820?publickey=cHVi&address=10.0.0.2%2F32&address=fd00::2%2F128&reserved=1,2,3#WG";
+        let node = uri(link).unwrap();
+        assert_eq!(node["type"], "wireguard");
+        assert_eq!(node["private_key"], "YWJj");
+        assert_eq!(node["address"], json!(["10.0.0.2/32", "fd00::2/128"]));
+        assert_eq!(node["peers"][0]["address"], "example.com");
+        assert_eq!(node["peers"][0]["port"], 51820);
+        // Reserved bytes are a byte array in sing-box, not strings.
+        assert_eq!(node["peers"][0]["reserved"], json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn clash_extra_protocols_and_transports_convert() {
+        let source = json!({"proxies":[
+            {"name":"wg","type":"wireguard","server":"wg.example.com","port":51820,"ip":"10.9.0.2","private-key":"a","public-key":"b","reserved":"1,2,3"},
+            {"name":"any","type":"anytls","server":"a.example.com","port":443,"password":"p","sni":"a.example.com"},
+            {"name":"hy","type":"hysteria","server":"h.example.com","port":443,"auth-str":"auth","up":20,"down":50,"obfs":"x"},
+            {"name":"ssh","type":"ssh","server":"s.example.com","port":22,"username":"u","password":"p"},
+            {"name":"h2","type":"vless","server":"v.example.com","port":443,"uuid":"u","network":"h2","tls":true,"h2-opts":{"host":"v.example.com","path":"/h2"}}
+        ]});
+        let nodes = parse(&source.to_string()).unwrap();
+        assert_eq!(nodes[0]["private_key"], "a");
+        assert_eq!(nodes[0]["address"], json!(["10.9.0.2/32"]));
+        assert_eq!(nodes[0]["peers"][0]["reserved"], json!([1, 2, 3]));
+        assert_eq!(nodes[1]["type"], "anytls");
+        assert_eq!(nodes[2]["type"], "hysteria");
+        assert_eq!(nodes[2]["auth_str"], "auth");
+        assert_eq!(nodes[3]["user"], "u");
+        assert_eq!(nodes[4]["transport"]["type"], "http");
+        assert_eq!(nodes[4]["transport"]["path"], "/h2");
     }
 }

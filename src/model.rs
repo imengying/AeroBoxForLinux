@@ -508,12 +508,31 @@ pub fn validate_nodes(nodes: &[Value]) -> Result<()> {
 /// Only dialable subscription outbounds belong in the node picker. Helper
 /// groups and terminal routing actions stay available to generated references.
 pub fn is_connection_node(node: &Value) -> bool {
-    node["type"].as_str().is_some_and(|kind| {
-        !matches!(
-            kind,
-            "selector" | "urltest" | "direct" | "block" | "dns" | "reject" | "hysteria-realm"
-        )
-    }) && node["server"]
+    let kind = node["type"].as_str().unwrap_or("");
+    if matches!(
+        kind,
+        "selector" | "urltest" | "direct" | "block" | "dns" | "reject" | "hysteria-realm"
+    ) {
+        return false;
+    }
+    // Endpoint links (WireGuard and friends) have no top-level server; they
+    // carry one or more peers instead.
+    if matches!(
+        kind,
+        "wireguard" | "tailscale" | "openvpn-client" | "openvpn-server" | "openconnect"
+    ) {
+        return node["peers"].as_array().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["address"]
+                    .as_str()
+                    .is_some_and(|host| !host.trim().is_empty())
+                    && peer["port"]
+                        .as_u64()
+                        .is_some_and(|port| (1..=65535).contains(&port))
+            })
+        }) || kind == "tailscale";
+    }
+    node["server"]
         .as_str()
         .is_some_and(|host| !host.trim().is_empty())
         && node["server_port"]
