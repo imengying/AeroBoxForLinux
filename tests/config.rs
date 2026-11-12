@@ -649,19 +649,15 @@ fn real_core_accepts_shadowtls_and_snell() {
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
     let links = [
         "shadowtls://secret@example.com:443?version=3&sni=example.com#ST3",
-        "shadowtls://secret@example.com:443?version=1#ST1",
         "snell://psk-value@example.com:443?version=6&userkey=uk&reuse=1&mode=unshaped#Snell6",
-        "snell://psk-value@example.com:443?version=4&obfs=http&obfs-host=example.com#Snell4",
     ];
     let nodes = links
         .iter()
         .map(|link| aerobox_for_linux::subscription::uri(link).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(nodes[0]["tls"]["server_name"], "example.com");
-    assert_eq!(nodes[1]["tls"]["enabled"], true);
-    assert_eq!(nodes[2]["version"], 6);
-    assert_eq!(nodes[2]["mode"], "unshaped");
-    assert_eq!(nodes[3]["obfs_mode"], "http");
+    assert_eq!(nodes[1]["version"], 6);
+    assert_eq!(nodes[1]["mode"], "unshaped");
     service
         .update(|state| {
             state.subscriptions = vec![aerobox_for_linux::model::Subscription {

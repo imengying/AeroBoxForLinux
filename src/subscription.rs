@@ -457,43 +457,33 @@ pub fn uri(input: &str) -> Result<Value> {
             } else {
                 format!("{user}:{pass}")
             });
-            let version: u64 = q("version").parse().unwrap_or(3);
-            ensure!((1..=3).contains(&version), "ShadowTLS 版本须为 1、2 或 3");
-            node["version"] = json!(version);
+            if !q("version").is_empty() {
+                ensure!(q("version") == "3", "ShadowTLS 仅支持 v3");
+            }
+            node["version"] = json!(3);
             if !q("detour").is_empty() {
                 node["detour"] = json!(q("detour"))
             }
         }
         "snell" => {
-            // snell://psk@host:port?version=6&userkey=…&obfs=http&obfs-host=…
+            // snell://psk@host:port?version=6&userkey=…&mode=…
+            if !q("version").is_empty() {
+                ensure!(q("version") == "6", "Snell 仅支持 v6");
+            }
             node["psk"] = json!(if pass.is_empty() {
                 user
             } else {
                 format!("{user}:{pass}")
             });
-            let version: u64 = q("version").parse().unwrap_or(4);
-            ensure!(
-                matches!(version, 4 | 6),
-                "Snell 版本须为 4 或 6（内核仅支持这两个版本）"
-            );
-            node["version"] = json!(version);
+            node["version"] = json!(6);
             if !q("userkey").is_empty() {
                 node["userkey"] = json!(q("userkey"))
             }
             if q("reuse") == "1" || q("reuse") == "true" {
                 node["reuse"] = json!(true)
             }
-            if version == 6 {
-                if !q("mode").is_empty() {
-                    node["mode"] = json!(q("mode"))
-                }
-            } else {
-                if !q("obfs").is_empty() {
-                    node["obfs_mode"] = json!(q("obfs"))
-                }
-                if !q("obfs-host").is_empty() {
-                    node["obfs_host"] = json!(q("obfs-host"))
-                }
+            if !q("mode").is_empty() {
+                node["mode"] = json!(q("mode"))
             }
         }
         "socks" | "http" if !user.is_empty() => {
@@ -638,33 +628,22 @@ fn clash(v: &Value) -> Result<Value> {
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
     if typ == "snell" {
+        // Only Snell v6 exists in current cores; older profiles are rejected
+        // instead of being silently upgraded.
+        let version = v["version"].as_u64().unwrap_or(6);
+        ensure!(version == 6, "Snell 仅支持 v6");
+        n["version"] = json!(6);
         if let Some(psk) = v.get("psk").or_else(|| v.get("password")) {
             n["psk"] = psk.clone()
         }
-        let version = v["version"].as_u64().unwrap_or(4);
-        ensure!(
-            matches!(version, 4 | 6),
-            "Snell 版本须为 4 或 6（内核仅支持这两个版本）"
-        );
-        n["version"] = json!(version);
         for (from, to) in [
             ("userkey", "userkey"),
             ("reuse", "reuse"),
             ("network", "network"),
+            ("mode", "mode"),
         ] {
             if let Some(value) = v.get(from) {
                 n[to] = value.clone()
-            }
-        }
-        if version == 6 {
-            if let Some(mode) = v.get("mode") {
-                n["mode"] = mode.clone()
-            }
-        } else {
-            for (from, to) in [("obfs", "obfs_mode"), ("obfs-host", "obfs_host")] {
-                if let Some(value) = v.get(from).filter(|value| **value != json!("")) {
-                    n[to] = value.clone()
-                }
             }
         }
         validate_server(&n)?;
@@ -672,8 +651,8 @@ fn clash(v: &Value) -> Result<Value> {
     }
     if typ == "shadowtls" {
         let version = v["version"].as_u64().unwrap_or(3);
-        ensure!((1..=3).contains(&version), "ShadowTLS 版本须为 1、2 或 3");
-        n["version"] = json!(version);
+        ensure!(version == 3, "ShadowTLS 仅支持 v3");
+        n["version"] = json!(3);
         if let Some(detour) = v.get("detour") {
             n["detour"] = detour.clone()
         }
@@ -979,22 +958,19 @@ mod protocol_tests {
         assert_eq!(st3["type"], "shadowtls");
         assert_eq!(st3["version"], 3);
         assert_eq!(st3["tls"]["server_name"], "example.com");
-        let st1 = uri("shadowtls://secret@example.com:443#ST1").unwrap();
-        assert_eq!(st1["version"], 3, "缺省使用 v3");
-        assert_eq!(st1["tls"]["enabled"], true);
 
         let s6 = uri("snell://psk@example.com:443?version=6&userkey=uk&mode=unshaped#S").unwrap();
         assert_eq!(s6["version"], 6);
         assert_eq!(s6["psk"], "psk");
         assert_eq!(s6["userkey"], "uk");
         assert_eq!(s6["mode"], "unshaped");
-        let s4 = uri("snell://psk@example.com:443?version=4&obfs=tls&obfs-host=a.com#S").unwrap();
-        assert_eq!(s4["obfs_mode"], "tls");
-        assert_eq!(s4["obfs_host"], "a.com");
 
+        // Only the current versions are accepted.
         for bad in [
+            "snell://p@example.com:443?version=4#S",
             "snell://p@example.com:443?version=5#S",
-            "shadowtls://p@example.com:443?version=4#ST",
+            "shadowtls://p@example.com:443?version=1#ST",
+            "shadowtls://p@example.com:443?version=2#ST",
         ] {
             assert!(uri(bad).is_err(), "accepted {bad}");
         }
@@ -1004,15 +980,13 @@ mod protocol_tests {
     fn clash_shadowtls_and_snell_convert() {
         let source = json!({"proxies":[
             {"name":"st","type":"shadowtls","server":"s.example.com","port":443,"password":"p","version":3,"sni":"s.example.com"},
-            {"name":"s6","type":"snell","server":"n.example.com","port":443,"psk":"key","version":6,"userkey":"uk","reuse":true,"mode":"unshaped"},
-            {"name":"s4","type":"snell","server":"n.example.com","port":443,"psk":"key","version":4,"obfs":"http","obfs-host":"n.example.com"}
+            {"name":"s6","type":"snell","server":"n.example.com","port":443,"psk":"key","version":6,"userkey":"uk","reuse":true,"mode":"unshaped"}
         ]});
         let nodes = parse(&source.to_string()).unwrap();
         assert_eq!(nodes[0]["tls"]["server_name"], "s.example.com");
         assert_eq!(nodes[1]["reuse"], true);
         assert_eq!(nodes[1]["mode"], "unshaped");
-        assert_eq!(nodes[2]["obfs_mode"], "http");
-        assert!(nodes[2].get("mode").is_none());
+        assert_eq!(nodes[1]["version"], 6);
     }
 
     #[test]
