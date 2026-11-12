@@ -337,7 +337,8 @@ impl Service {
                 }
                 // Direct/block helper outbounds are needed by imported groups,
                 // but must not become the default node of our proxy selector.
-                if model::is_connection_node(node) {
+                if model::is_connection_node(node) && !model::is_hidden_transport(&sub.nodes, node)
+                {
                     let identity = NodeSelection {
                         subscription_id: sub.id.clone(),
                         node_tag: tag.to_owned(),
@@ -1114,6 +1115,7 @@ impl Service {
             .nodes
             .iter()
             .filter(|node| model::is_connection_node(node))
+            .filter(|node| !model::is_hidden_transport(&subscription.nodes, node))
             .map(|node| {
                 let key = NodeSelection {
                     subscription_id: subscription_id.into(),
@@ -1211,7 +1213,7 @@ impl Service {
             .find(|s| s.id == subscription_id)
             .context("订阅不存在")?;
         ensure!(
-            sub.nodes.iter().any(model::is_connection_node),
+            model::has_selectable_node(&sub.nodes),
             "此订阅没有可连接节点，请先更新"
         );
         let mut candidate = before.clone();
@@ -1233,9 +1235,7 @@ impl Service {
             .find(|s| s.id == subscription_id)
             .context("订阅不存在")?;
         ensure!(
-            sub.nodes
-                .iter()
-                .any(|n| n["tag"] == node_tag && model::is_connection_node(n)),
+            model::selectable_nodes(&sub.nodes).any(|n| n["tag"] == node_tag),
             "节点不存在或不是可连接的节点"
         );
         sub.selected_node = Some(node_tag.into());
@@ -1304,11 +1304,7 @@ impl Service {
             .subscriptions
             .iter()
             .find(|s| s.id == subscription_id)
-            .and_then(|s| {
-                s.nodes
-                    .iter()
-                    .find(|n| n["tag"] == node_tag && model::is_connection_node(n))
-            })
+            .and_then(|s| model::selectable_nodes(&s.nodes).find(|n| n["tag"] == node_tag))
             .context("节点不存在")?;
         let (pid, tag) = {
             let run = self.running.lock().unwrap();
@@ -1632,10 +1628,7 @@ impl Service {
         nodes: Vec<Value>,
     ) -> Result<()> {
         model::validate_nodes(&nodes)?;
-        ensure!(
-            nodes.iter().any(model::is_connection_node),
-            "订阅没有可连接节点"
-        );
+        ensure!(model::has_selectable_node(&nodes), "订阅没有可连接节点");
         let mut next = original.clone();
         next.nodes = nodes;
         next.updated = now();
@@ -1658,10 +1651,7 @@ impl Service {
             model::validate_nodes(&sub.nodes)?;
             sub.updated = now();
         }
-        ensure!(
-            sub.nodes.iter().any(model::is_connection_node),
-            "订阅没有可连接节点"
-        );
+        ensure!(model::has_selectable_node(&sub.nodes), "订阅没有可连接节点");
         let name = sub.name.clone();
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();

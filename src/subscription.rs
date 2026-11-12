@@ -50,12 +50,12 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
         let mut nodes = vec![];
         for v in items {
             let result = if v.get("name").is_some() {
-                clash(v)
+                clash_nodes(v)
             } else {
-                Ok(v.clone())
+                Ok(vec![v.clone()])
             };
             match result {
-                Ok(node) => nodes.push(node),
+                Ok(parsed) => nodes.extend(parsed),
                 Err(error) if tolerant => skipped.push(format!("{error:#}")),
                 Err(error) => return Err(error),
             }
@@ -80,8 +80,8 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .enumerate()
     {
-        match uri(line) {
-            Ok(node) => nodes.push(node),
+        match uri_nodes(line) {
+            Ok(parsed) => nodes.extend(parsed),
             Err(error) if tolerant => skipped.push(format!("{error:#}")),
             Err(error) => return Err(error.context(format!("第 {} 个节点", index + 1))),
         }
@@ -93,6 +93,138 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
     );
     validate_nodes(&nodes)?;
     Ok((nodes, skipped))
+}
+
+/// A single link can expand into more than one outbound: a Shadowsocks node
+/// tunnelled through ShadowTLS is a pair, with the ShadowTLS outbound acting as
+/// its `detour`.
+fn uri_nodes(input: &str) -> Result<Vec<Value>> {
+    let (ss, shadowtls) = split_shadowtls_plugin(input)?;
+    let Some(shadowtls) = shadowtls else {
+        return uri(input).map(|node| vec![node]);
+    };
+    Ok(vec![ss, shadowtls])
+}
+
+fn clash_nodes(v: &Value) -> Result<Vec<Value>> {
+    let (ss, shadowtls) = split_clash_shadowtls(v)?;
+    let Some(shadowtls) = shadowtls else {
+        return clash(v).map(|node| vec![node]);
+    };
+    Ok(vec![clash(&ss)?, shadowtls])
+}
+
+/// `ss://…?plugin=shadow-tls;host=…;password=…;version=3` describes a
+/// Shadowsocks server reached through a ShadowTLS camouflage layer. sing-box
+/// models it as two outbounds: ShadowTLS carries the TLS session and the
+/// Shadowsocks outbound points at it with `detour`.
+fn split_shadowtls_plugin(input: &str) -> Result<(Value, Option<Value>)> {
+    let Ok(url) = Url::parse(input) else {
+        return Ok((uri(input)?, None));
+    };
+    if !matches!(url.scheme(), "ss") || url.scheme() == "https" {
+        return Ok((uri(input)?, None));
+    }
+    let plugin = url
+        .query_pairs()
+        .find(|(key, _)| key == "plugin")
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or_default();
+    let Some(options) = plugin.strip_prefix("shadow-tls") else {
+        return Ok((uri(input)?, None));
+    };
+    let options = options.trim_start_matches(';');
+    let mut host = String::new();
+    let mut password = String::new();
+    let mut version = 3u64;
+    for item in options.split(';') {
+        let Some((key, value)) = item.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "host" => host = value.trim().to_owned(),
+            "password" => password = value.trim().to_owned(),
+            "version" => version = value.trim().parse().unwrap_or(3),
+            _ => {}
+        }
+    }
+    ensure!(
+        !password.is_empty(),
+        "ShadowTLS 插件缺少密码，无法转换为 ShadowTLS 节点"
+    );
+    let server = url.host_str().context("节点缺少服务器")?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let tag = unescape(url.fragment().unwrap_or(server));
+    let shadowtls = shadowtls_node(server, u64::from(port), &password, version, &host, &tag);
+    // The Shadowsocks outbound keeps its own tag and gains a detour reference.
+    let mut plain = url.clone();
+    plain.set_query(None);
+    let mut ss = uri(plain.as_str())?;
+    ss["tag"] = json!(&tag);
+    ss["detour"] = json!(shadowtls["tag"]);
+    Ok((ss, Some(shadowtls)))
+}
+
+fn split_clash_shadowtls(v: &Value) -> Result<(Value, Option<Value>)> {
+    if v["plugin"].as_str() != Some("shadow-tls") {
+        return Ok((v.clone(), None));
+    }
+    let options = v.get("plugin-opts").or_else(|| v.get("plugin_opts"));
+    let field = |key: &str| {
+        options
+            .and_then(|options| options.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let password = field("password");
+    ensure!(
+        !password.is_empty(),
+        "ShadowTLS 插件缺少密码，无法转换为 ShadowTLS 节点"
+    );
+    let version = options
+        .and_then(|options| options.get("version"))
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+        .unwrap_or(3);
+    let name = v["name"].as_str().unwrap_or("ShadowTLS");
+    let server = v["server"].as_str().context("节点缺少服务器")?;
+    let port = number(&v["port"]);
+    let shadowtls = shadowtls_node(server, port, &password, version, &field("host"), name);
+    let mut ss = v.clone();
+    if let Some(options) = ss.as_object_mut() {
+        options.remove("plugin");
+        options.remove("plugin-opts");
+        options.remove("plugin_opts");
+    }
+    ss["name"] = json!(name);
+    ss["detour"] = json!(shadowtls["tag"]);
+    Ok((ss, Some(shadowtls)))
+}
+
+fn shadowtls_node(
+    server: &str,
+    port: u64,
+    password: &str,
+    version: u64,
+    host: &str,
+    name: &str,
+) -> Value {
+    let mut node = json!({
+        "type":"shadowtls",
+        "tag":format!("{name} · ShadowTLS"),
+        "server":server,
+        "server_port":port,
+        "version":version,
+        "password":password
+    });
+    if version >= 2 {
+        let mut tls = json!({"enabled":true});
+        if !host.is_empty() {
+            tls["server_name"] = json!(host)
+        }
+        node["tls"] = tls;
+    }
+    node
 }
 
 fn skip_hint(skipped: &[String]) -> String {
@@ -218,6 +350,7 @@ pub fn uri(input: &str) -> Result<Value> {
         // Naive is exposed as plain HTTPS/QUIC over HTTP/2 or HTTP/3.
         "naive+https" | "naive" => "naive",
         "naive+quic" => "naive",
+        "snell" => "snell",
         other => other,
     };
     ensure!(
@@ -230,6 +363,8 @@ pub fn uri(input: &str) -> Result<Value> {
             "tuic",
             "anytls",
             "naive",
+            "shadowtls",
+            "snell",
             "socks",
             "http"
         ]
@@ -314,13 +449,63 @@ pub fn uri(input: &str) -> Result<Value> {
                 }
             }
         }
+        "shadowtls" => {
+            // shadowtls://password@host:port?version=3&sni=…&detour=…
+            // Version 2+ requires TLS with the camouflage host name.
+            node["password"] = json!(if pass.is_empty() {
+                user
+            } else {
+                format!("{user}:{pass}")
+            });
+            let version: u64 = q("version").parse().unwrap_or(3);
+            ensure!((1..=3).contains(&version), "ShadowTLS 版本须为 1、2 或 3");
+            node["version"] = json!(version);
+            if !q("detour").is_empty() {
+                node["detour"] = json!(q("detour"))
+            }
+        }
+        "snell" => {
+            // snell://psk@host:port?version=6&userkey=…&obfs=http&obfs-host=…
+            node["psk"] = json!(if pass.is_empty() {
+                user
+            } else {
+                format!("{user}:{pass}")
+            });
+            let version: u64 = q("version").parse().unwrap_or(4);
+            ensure!(
+                matches!(version, 4 | 6),
+                "Snell 版本须为 4 或 6（内核仅支持这两个版本）"
+            );
+            node["version"] = json!(version);
+            if !q("userkey").is_empty() {
+                node["userkey"] = json!(q("userkey"))
+            }
+            if q("reuse") == "1" || q("reuse") == "true" {
+                node["reuse"] = json!(true)
+            }
+            if version == 6 {
+                if !q("mode").is_empty() {
+                    node["mode"] = json!(q("mode"))
+                }
+            } else {
+                if !q("obfs").is_empty() {
+                    node["obfs_mode"] = json!(q("obfs"))
+                }
+                if !q("obfs-host").is_empty() {
+                    node["obfs_host"] = json!(q("obfs-host"))
+                }
+            }
+        }
         "socks" | "http" if !user.is_empty() => {
             node["username"] = json!(user);
             node["password"] = json!(pass)
         }
         _ => {}
     }
+    // Every ShadowTLS version runs TLS; v2+ also pins the camouflage host name.
+    let shadowtls_tls = typ == "shadowtls";
     if ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ)
+        || shadowtls_tls
         || u.scheme() == "https"
         || ["tls", "reality"].contains(&q("security").as_str())
     {
@@ -381,6 +566,7 @@ fn supported_plugin(plugin: &str) -> Result<&str> {
     match plugin {
         "obfs" | "simple-obfs" | "obfs-local" => Ok("obfs-local"),
         "v2ray-plugin" => Ok("v2ray-plugin"),
+        "shadow-tls" => bail!("ShadowTLS 须作为独立节点导出，不能作为 Shadowsocks 插件"),
         _ => bail!("此 Shadowsocks 插件不受支持（支持 obfs-local 和 v2ray-plugin）"),
     }
 }
@@ -436,6 +622,8 @@ fn clash(v: &Value) -> Result<Value> {
             "tuic",
             "anytls",
             "naive",
+            "shadowtls",
+            "snell",
             "socks",
             "http",
             "direct"
@@ -449,6 +637,47 @@ fn clash(v: &Value) -> Result<Value> {
     };
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
+    if typ == "snell" {
+        if let Some(psk) = v.get("psk").or_else(|| v.get("password")) {
+            n["psk"] = psk.clone()
+        }
+        let version = v["version"].as_u64().unwrap_or(4);
+        ensure!(
+            matches!(version, 4 | 6),
+            "Snell 版本须为 4 或 6（内核仅支持这两个版本）"
+        );
+        n["version"] = json!(version);
+        for (from, to) in [
+            ("userkey", "userkey"),
+            ("reuse", "reuse"),
+            ("network", "network"),
+        ] {
+            if let Some(value) = v.get(from) {
+                n[to] = value.clone()
+            }
+        }
+        if version == 6 {
+            if let Some(mode) = v.get("mode") {
+                n["mode"] = mode.clone()
+            }
+        } else {
+            for (from, to) in [("obfs", "obfs_mode"), ("obfs-host", "obfs_host")] {
+                if let Some(value) = v.get(from).filter(|value| **value != json!("")) {
+                    n[to] = value.clone()
+                }
+            }
+        }
+        validate_server(&n)?;
+        return Ok(n);
+    }
+    if typ == "shadowtls" {
+        let version = v["version"].as_u64().unwrap_or(3);
+        ensure!((1..=3).contains(&version), "ShadowTLS 版本须为 1、2 或 3");
+        n["version"] = json!(version);
+        if let Some(detour) = v.get("detour") {
+            n["detour"] = detour.clone()
+        }
+    }
     if typ == "naive" {
         // Naive is HTTP/2 by default; `quic: true` switches it to HTTP/3.
         let quic = v["quic"] == true || v["type"] == "naive+quic";
@@ -477,6 +706,8 @@ fn clash(v: &Value) -> Result<Value> {
         ("packet_encoding", "packet_encoding"),
         ("global-padding", "global_padding"),
         ("authenticated-length", "authenticated_length"),
+        // Set by the ShadowTLS unwrapping path; plain proxies never carry it.
+        ("detour", "detour"),
     ] {
         if let Some(value) = v.get(from) {
             n[to] = value.clone()
@@ -505,7 +736,11 @@ fn clash(v: &Value) -> Result<Value> {
     if typ == "vmess" {
         n["security"] = json!(v["cipher"].as_str().unwrap_or("auto"))
     }
-    if v["tls"] == true || ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ) {
+    let shadowtls_tls = typ == "shadowtls";
+    if v["tls"] == true
+        || shadowtls_tls
+        || ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ)
+    {
         let mut tls = json!({"enabled":true});
         for (from, to) in [
             ("servername", "server_name"),
@@ -739,6 +974,48 @@ mod protocol_tests {
     }
 
     #[test]
+    fn shadowtls_and_snell_links_carry_their_version_fields() {
+        let st3 = uri("shadowtls://secret@example.com:443?version=3&sni=example.com#ST").unwrap();
+        assert_eq!(st3["type"], "shadowtls");
+        assert_eq!(st3["version"], 3);
+        assert_eq!(st3["tls"]["server_name"], "example.com");
+        let st1 = uri("shadowtls://secret@example.com:443#ST1").unwrap();
+        assert_eq!(st1["version"], 3, "缺省使用 v3");
+        assert_eq!(st1["tls"]["enabled"], true);
+
+        let s6 = uri("snell://psk@example.com:443?version=6&userkey=uk&mode=unshaped#S").unwrap();
+        assert_eq!(s6["version"], 6);
+        assert_eq!(s6["psk"], "psk");
+        assert_eq!(s6["userkey"], "uk");
+        assert_eq!(s6["mode"], "unshaped");
+        let s4 = uri("snell://psk@example.com:443?version=4&obfs=tls&obfs-host=a.com#S").unwrap();
+        assert_eq!(s4["obfs_mode"], "tls");
+        assert_eq!(s4["obfs_host"], "a.com");
+
+        for bad in [
+            "snell://p@example.com:443?version=5#S",
+            "shadowtls://p@example.com:443?version=4#ST",
+        ] {
+            assert!(uri(bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn clash_shadowtls_and_snell_convert() {
+        let source = json!({"proxies":[
+            {"name":"st","type":"shadowtls","server":"s.example.com","port":443,"password":"p","version":3,"sni":"s.example.com"},
+            {"name":"s6","type":"snell","server":"n.example.com","port":443,"psk":"key","version":6,"userkey":"uk","reuse":true,"mode":"unshaped"},
+            {"name":"s4","type":"snell","server":"n.example.com","port":443,"psk":"key","version":4,"obfs":"http","obfs-host":"n.example.com"}
+        ]});
+        let nodes = parse(&source.to_string()).unwrap();
+        assert_eq!(nodes[0]["tls"]["server_name"], "s.example.com");
+        assert_eq!(nodes[1]["reuse"], true);
+        assert_eq!(nodes[1]["mode"], "unshaped");
+        assert_eq!(nodes[2]["obfs_mode"], "http");
+        assert!(nodes[2].get("mode").is_none());
+    }
+
+    #[test]
     fn protocols_outside_the_android_app_are_rejected() {
         for link in [
             "ssh://user:pass@example.com:22#S",
@@ -747,5 +1024,39 @@ mod protocol_tests {
         ] {
             assert!(uri(link).is_err(), "accepted {link}");
         }
+    }
+}
+
+#[cfg(test)]
+mod shadowtls_chain_tests {
+    use super::*;
+
+    #[test]
+    fn shadowsocks_over_shadowtls_expands_into_a_detour_pair() {
+        let link = "ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:443?plugin=shadow-tls%3Bhost%3Dexample.com%3Bpassword%3Dstpass%3Bversion%3D3#Node";
+        let nodes = uri_nodes(link).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["type"], "shadowsocks");
+        assert_eq!(nodes[1]["type"], "shadowtls");
+        assert_eq!(nodes[0]["detour"], nodes[1]["tag"]);
+        assert_eq!(nodes[1]["password"], "stpass");
+        assert_eq!(nodes[1]["tls"]["server_name"], "example.com");
+        // Only the inner Shadowsocks node is a dialable picker entry.
+        assert!(crate::model::is_connection_node(&nodes[0]));
+    }
+
+    #[test]
+    fn clash_shadowtls_plugin_expands_too() {
+        let source = json!({"proxies":[{
+            "name":"Node","type":"ss","server":"example.com","port":443,
+            "cipher":"aes-128-gcm","password":"secret",
+            "plugin":"shadow-tls","plugin-opts":{"host":"example.com","password":"stpass","version":3}
+        }]});
+        let nodes = parse(&source.to_string()).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["type"], "shadowsocks");
+        assert!(nodes[0].get("plugin").is_none());
+        assert_eq!(nodes[0]["detour"], nodes[1]["tag"]);
+        assert_eq!(nodes[1]["type"], "shadowtls");
     }
 }

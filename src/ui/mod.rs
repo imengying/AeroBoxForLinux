@@ -124,7 +124,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
                                 .subscriptions
                                 .iter()
                                 .find(|sub| sub.id == settings.active_subscription)
-                                .is_none_or(|sub| !sub.nodes.iter().any(model::is_connection_node));
+                                .is_none_or(|sub| !model::has_selectable_node(&sub.nodes));
                             let update_first = settings.auto_start
                                 && settings.update_subscriptions_on_start
                                 && needs_nodes;

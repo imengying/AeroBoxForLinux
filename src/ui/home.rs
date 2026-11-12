@@ -56,7 +56,7 @@ impl Ui {
                 || (self.jobs.get() == 0
                     && state.subscriptions.iter().any(|sub| {
                         sub.id == state.settings.active_subscription
-                            && sub.nodes.iter().any(model::is_connection_node)
+                            && model::has_selectable_node(&sub.nodes)
                     })),
         );
         let weak = Rc::downgrade(self);
@@ -303,7 +303,7 @@ impl Dashboard {
                     status.running
                         || state.subscriptions.iter().any(|sub| {
                             sub.id == state.settings.active_subscription
-                                && sub.nodes.iter().any(model::is_connection_node)
+                                && model::has_selectable_node(&sub.nodes)
                         }),
                 );
             } else if !status.running {

@@ -342,15 +342,13 @@ impl Default for State {
 impl State {
     pub fn normalize_selection(&mut self) {
         for sub in &mut self.subscriptions {
-            if sub.selected_node.as_ref().is_none_or(|tag| {
-                !sub.nodes
-                    .iter()
-                    .any(|n| n["tag"] == *tag && is_connection_node(n))
-            }) {
-                sub.selected_node = sub
-                    .nodes
-                    .iter()
-                    .find(|n| is_connection_node(n))
+            if sub
+                .selected_node
+                .as_ref()
+                .is_none_or(|tag| !selectable_nodes(&sub.nodes).any(|n| n["tag"] == *tag))
+            {
+                sub.selected_node = selectable_nodes(&sub.nodes)
+                    .next()
                     .and_then(|n| n["tag"].as_str())
                     .map(str::to_owned);
             }
@@ -380,12 +378,8 @@ impl State {
         let node = sub
             .selected_node
             .as_deref()
-            .and_then(|tag| {
-                sub.nodes
-                    .iter()
-                    .find(|n| n["tag"] == tag && is_connection_node(n))
-            })
-            .or_else(|| sub.nodes.iter().find(|n| is_connection_node(n)))
+            .and_then(|tag| selectable_nodes(&sub.nodes).find(|n| n["tag"] == tag))
+            .or_else(|| selectable_nodes(&sub.nodes).next())
             .context("当前订阅没有可连接节点，请更新或更换订阅")?;
         let mut profile = Profile::new(&sub.name);
         profile.id = sub.id.clone();
@@ -462,10 +456,9 @@ impl State {
             );
             validate_nodes(&s.nodes)?;
             ensure!(
-                s.selected_node.as_ref().is_none_or(|tag| s
-                    .nodes
-                    .iter()
-                    .any(|n| n["tag"] == *tag && is_connection_node(n))),
+                s.selected_node
+                    .as_ref()
+                    .is_none_or(|tag| selectable_nodes(&s.nodes).any(|n| n["tag"] == *tag)),
                 "订阅所选节点不存在"
             );
         }
@@ -519,6 +512,29 @@ pub fn is_connection_node(node: &Value) -> bool {
         && node["server_port"]
             .as_u64()
             .is_some_and(|port| (1..=65535).contains(&port))
+}
+
+/// A ShadowTLS outbound used as another node's `detour` is a transport layer,
+/// not a selectable proxy. Used standalone it remains selectable.
+pub fn is_hidden_transport(nodes: &[Value], node: &Value) -> bool {
+    if node["type"] != "shadowtls" {
+        return false;
+    }
+    let tag = node["tag"].as_str().unwrap_or("");
+    nodes
+        .iter()
+        .any(|other| other["detour"].as_str() == Some(tag))
+}
+
+/// The nodes a person can actually pick from a subscription.
+pub fn selectable_nodes(nodes: &[Value]) -> impl Iterator<Item = &Value> {
+    nodes
+        .iter()
+        .filter(|node| is_connection_node(node) && !is_hidden_transport(nodes, node))
+}
+
+pub fn has_selectable_node(nodes: &[Value]) -> bool {
+    selectable_nodes(nodes).next().is_some()
 }
 
 pub struct Store {

@@ -636,3 +636,102 @@ fn real_core_accepts_the_protocols_the_android_app_supports() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// ShadowTLS is a transport-like outbound: it must carry TLS with the
+/// camouflage host name, and it may hand traffic to a Shadowsocks upstream via
+/// `detour`. Snell only has versions 4 and 6 in the core.
+#[test]
+fn real_core_accepts_shadowtls_and_snell() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    let links = [
+        "shadowtls://secret@example.com:443?version=3&sni=example.com#ST3",
+        "shadowtls://secret@example.com:443?version=1#ST1",
+        "snell://psk-value@example.com:443?version=6&userkey=uk&reuse=1&mode=unshaped#Snell6",
+        "snell://psk-value@example.com:443?version=4&obfs=http&obfs-host=example.com#Snell4",
+    ];
+    let nodes = links
+        .iter()
+        .map(|link| aerobox_for_linux::subscription::uri(link).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(nodes[0]["tls"]["server_name"], "example.com");
+    assert_eq!(nodes[1]["tls"]["enabled"], true);
+    assert_eq!(nodes[2]["version"], 6);
+    assert_eq!(nodes[2]["mode"], "unshaped");
+    assert_eq!(nodes[3]["obfs_mode"], "http");
+    service
+        .update(|state| {
+            state.subscriptions = vec![aerobox_for_linux::model::Subscription {
+                nodes,
+                ..Default::default()
+            }];
+            state.settings.active_subscription = state.subscriptions[0].id.clone();
+            Ok(())
+        })
+        .unwrap();
+    let state = service.snapshot();
+    let config = service
+        .generate_profile(&state, &state.current_profile().unwrap())
+        .unwrap();
+    let path = dir.path().join("shadowtls.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = std::process::Command::new(binary)
+        .args(["check", "-c"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A Shadowsocks server behind ShadowTLS is imported as a detour pair. Only the
+/// inner Shadowsocks node belongs in the picker, and the generated config must
+/// still be valid for a real core.
+#[test]
+fn real_core_accepts_shadowsocks_over_shadowtls() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    let link = "ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:443?plugin=shadow-tls%3Bhost%3Dexample.com%3Bpassword%3Dstpass%3Bversion%3D3#Node";
+    let nodes = aerobox_for_linux::subscription::parse(link).unwrap();
+    assert_eq!(nodes.len(), 2);
+    service
+        .update(|state| {
+            state.subscriptions = vec![aerobox_for_linux::model::Subscription {
+                nodes,
+                ..Default::default()
+            }];
+            state.settings.active_subscription = state.subscriptions[0].id.clone();
+            Ok(())
+        })
+        .unwrap();
+    let listed = service
+        .subscription_nodes(&service.snapshot().subscriptions[0].id)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "ShadowTLS 传输层不应出现在节点列表");
+    assert_eq!(listed[0].protocol, "shadowsocks");
+    let state = service.snapshot();
+    let config = service
+        .generate_profile(&state, &state.current_profile().unwrap())
+        .unwrap();
+    let path = dir.path().join("sha-dowtls.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = std::process::Command::new(binary)
+        .args(["check", "-c"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
