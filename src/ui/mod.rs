@@ -450,8 +450,7 @@ impl Ui {
         // Only one toast at a time: stacked toasts overlapped and cut their
         // text off, and a stale "已保存" hides the result that matters.
         if let Some(previous) = self.active_toast.borrow_mut().take() {
-            self.toast.dismiss_all();
-            drop(previous);
+            previous.dismiss();
         }
         let toast = adw::Toast::new(message);
         toast.set_timeout(3);
