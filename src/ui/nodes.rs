@@ -137,7 +137,7 @@ impl NodesPanel {
                 // grid fills wide windows and reflows evenly in narrow ones.
                 child.set_hexpand(true);
                 child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
-                let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
                 content.add_css_class("node-card-content");
                 let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 title.set_vexpand(true);
@@ -252,7 +252,7 @@ impl NodesPanel {
                     .find(|old| old.node_tag == node.node_tag)
                     .and_then(|old| old.delay_ms);
             }
-            card.delay.set_text(&delay_text(node.delay_ms));
+            update_delay(&card.delay, node.delay_ms);
         }
         drop(previous);
         self.grid.set_visible(!nodes.is_empty());
@@ -394,12 +394,14 @@ impl NodesPanel {
             match result {
                 Ok(delay) => {
                     node.delay_ms = Some(delay);
-                    card.delay.set_text(&delay_text(Some(delay)));
+                    update_delay(&card.delay, Some(delay));
                     card.delay.set_tooltip_text(None);
                 }
                 Err(error) => {
                     node.delay_ms = None;
+                    update_delay(&card.delay, None);
                     card.delay.set_text(if stopped { "未启动" } else { "失败" });
+                    card.delay.add_css_class("latency-bad");
                     card.delay.set_tooltip_text(Some(&format!("{error:#}")));
                 }
             }
@@ -480,12 +482,58 @@ impl NodesPanel {
     }
 }
 
+fn update_delay(label: &gtk::Label, delay: Option<u64>) {
+    label.set_text(&delay_text(delay));
+    label.remove_css_class("latency-good");
+    label.remove_css_class("latency-medium");
+    label.remove_css_class("latency-bad");
+    if let Some(class) = match delay {
+        Some(1..=300) => Some("latency-good"),
+        Some(301..=600) => Some("latency-medium"),
+        Some(_) => Some("latency-bad"),
+        None => None,
+    } {
+        label.add_css_class(class);
+    }
+    label.remove_css_class("muted");
+}
+
 fn delay_text(delay: Option<u64>) -> String {
     match delay {
         Some(0) => "超时".into(),
         Some(ms) => format!("{ms} ms"),
         None => "—".into(),
     }
+}
+
+pub(super) fn smoke_delay_colors(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let cards = panel.cards.borrow();
+    ensure!(cards.len() == 2, "延迟配色测试需要两个节点");
+    for (card, delay, class) in [
+        (&cards[0], Some(180), "latency-good"),
+        (&cards[1], Some(420), "latency-medium"),
+    ] {
+        update_delay(&card.delay, delay);
+        ensure!(card.delay.has_css_class(class), "延迟没有分级着色");
+        ensure!(!card.delay.has_css_class("muted"), "延迟仍是次要文字色");
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_delay_failure(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let cards = panel.cards.borrow();
+    for (card, delay, class) in [
+        (&cards[0], Some(920), "latency-bad"),
+        (&cards[1], Some(0), "latency-bad"),
+    ] {
+        update_delay(&card.delay, delay);
+        ensure!(card.delay.has_css_class(class), "高延迟或超时没有警示色");
+    }
+    Ok(())
 }
 
 pub(super) fn smoke_nodes(

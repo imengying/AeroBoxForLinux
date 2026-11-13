@@ -3,6 +3,9 @@
 @define-color accent_bg_color #2878d7;
 @define-color accent_fg_color #ffffff;
 @define-color accent_color #2878d7;
+@define-color latency_good #237a45;
+@define-color latency_medium #8a5a00;
+@define-color latency_bad #b3261e;
 .aerobox-window { background: #f5f6f9; color: #272d36; }
 .aerobox-window.dark { background: #191c22; color: #e8eaf0; }
 .app-sidebar { background: #eef1f6; border-right: 1px solid alpha(#728292, .13); }
@@ -10,62 +13,59 @@
 
 .nav-list { background: transparent; }
 .sidebar-scroll { background: transparent; }
-.nav-list row { border-radius: 10px; margin: 0.18em 0; padding: 0; color: alpha(@window_fg_color, .82); }
+.nav-list row { border-radius: 9px; margin: 0.12em 0; padding: 0; color: alpha(@window_fg_color, .86); }
 .nav-list row:selected { background: #dde9fc; color: #2268bc; }
-
 .dark .nav-list row:selected { background: #26364e; color: #a4c8ff; }
 .nav-list row:hover { background: alpha(#2878d7, .07); }
-.nav-item { min-height: 3.82em; font-weight: normal; }
-/* Icon sizes follow the font too, so a larger font keeps icons proportional
- * instead of leaving tiny glyphs next to oversized labels. */
-.brand-mark { -gtk-icon-size: 3.27em; }
-.nav-icon { -gtk-icon-size: 1.64em; }
+.nav-item { min-height: 3.18em; font-weight: normal; }
+/* Icons follow the discrete font setting, but use a slightly quieter visual
+ * weight than the old, oversized navigation glyphs. */
+.brand-mark { -gtk-icon-size: 2.82em; }
+.nav-icon { -gtk-icon-size: 1.45em; }
 .nav-list row:selected .nav-item { font-weight: 600; }
 
+/* Secondary text stays readable on both card surfaces instead of disappearing
+ * into the same grey as a disabled control. */
+.muted { color: alpha(@window_fg_color, .70); }
 
-.muted { color: alpha(@window_fg_color, .78); }
-
-/* One type scale for the whole app. Steps stay close together so the page
- * title, card titles and body text stop competing with each other:
- * brand 1.28 > page title 1.14 > card/item 1.02 > body 1.00 > small 0.92. */
-.brand { font-size: 1.28em; font-weight: 700; letter-spacing: .01em; }
-.page-title { font-size: 1.14em; font-weight: 700; }
-.section-title, .resource-name { font-size: 1.02em; font-weight: 600; }
-.empty-title { font-size: 1.06em; font-weight: 600; }
-.small { font-size: 0.92em; }
-.surface-card { border-radius: 14px; background: #ffffff; border: 1px solid #e2e6ed; box-shadow: none; }
+/* One type scale for the whole app: page titles lead, card titles follow,
+ * and body text remains the reference size. */
+.brand { font-size: 1.22em; font-weight: 700; letter-spacing: .01em; }
+.page-title { font-size: 1.12em; font-weight: 700; }
+.section-title, .resource-name { font-size: 1em; font-weight: 600; }
+.empty-title { font-size: 1.04em; font-weight: 600; }
+.small { font-size: 0.90em; }
+.surface-card { border-radius: 12px; background: #ffffff; border: 1px solid #e2e6ed; box-shadow: none; }
 .dark .surface-card { background: #24282f; border-color: #363c47; box-shadow: none; }
-.metric-value { font-size: 1.4em; font-feature-settings: "tnum"; font-weight: 600; }
+.metric-value { font-size: 1.30em; font-feature-settings: "tnum"; font-weight: 600; }
 .metric-icon { color: #6888b4; }
-.primary-action { border-radius: 10px; padding: 0.82em 1.46em; font-weight: 600; }
-.compact-action { border-radius: 8px; min-height: 2.73em; }
-.row-icon { background: #edf2fb; color: #4c77ae; border-radius: 11px; -gtk-icon-size: 1.82em; min-width: 3.82em; min-height: 3.82em; }
+.primary-action { border-radius: 9px; padding: 0.55em 1.18em; font-weight: 600; }
+.compact-action { border-radius: 8px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
+.row-icon { background: #edf2fb; color: #4c77ae; border-radius: 9px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
 .dark .row-icon { background: #29364c; color: #a4bfe4; }
 
-.resource-subtitle { color: alpha(@window_fg_color, .78); font-size: 0.92em; }
-
-.resource-row { padding: 1.09em 1.64em; }
+.resource-subtitle { color: alpha(@window_fg_color, .70); font-size: 0.90em; }
+.resource-row { padding: 0.73em 1.18em; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
 /* Fixed slot for trailing row controls: rows with fewer actions keep the same
  * right edge instead of drifting outward. */
-.row-actions { min-width: 15.27em; }
+.row-actions { min-width: 13.64em; }
 .row-actions > button, .row-actions > switch { margin-left: 0; }
-.empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 24px; -gtk-icon-size: 3.09em; min-height: 6.91em; min-width: 6.91em; }
-
-.empty-description { color: alpha(@window_fg_color, .78); }
-.search { border-radius: 10px; min-height: 3.27em; }
+.empty-icon { color: #8a9dba; background: alpha(#2878d7,.07); border-radius: 20px; -gtk-icon-size: 2.73em; min-height: 5.45em; min-width: 5.45em; }
+.empty-description { color: alpha(@window_fg_color, .70); }
+.search { border-radius: 9px; min-height: 2.73em; }
 /* Fixed-caption inputs: the caption never moves into the field, so entering
  * text cannot shift the layout the way a floating entry label does. */
-.labeled-entry { margin-top: 0.18em; margin-bottom: 0.18em; }
-.labeled-entry-title { font-size: 0.88em; font-weight: 600; color: alpha(@window_fg_color, 0.72); }
-.labeled-entry-input { min-height: 3.46em; border-radius: 9px; }
+.labeled-entry { margin-top: 0.12em; margin-bottom: 0.12em; }
+.labeled-entry-title { font-size: 0.86em; font-weight: 600; color: alpha(@window_fg_color, 0.70); }
+.labeled-entry-input { min-height: 2.82em; border-radius: 8px; }
 .labeled-entry-input:focus { border-color: @accent_color; }
 
 /* Shared card surfaces, selection and focus for nodes and subscriptions. */
 .nodes-grid, .subscriptions-grid { background: transparent; }
 /* Longhand borders everywhere: a `border-color` only override keeps the box
  * metrics identical between the default and selected states. */
-.node-card, .subscription-card { padding: 0; border-radius: 14px; background: #ffffff; border-width: 1px; border-style: solid; border-color: #e2e6ed; }
+.node-card, .subscription-card { padding: 0; border-radius: 12px; background: #ffffff; border-width: 1px; border-style: solid; border-color: #e2e6ed; }
 .dark .node-card, .dark .subscription-card { background: #24282f; border-color: #363c47; }
 .node-card:hover, .subscription-card:hover { background: #f0f4fb; border-color: #b9cce6; }
 .dark .node-card:hover, .dark .subscription-card:hover { background: #2a3342; border-color: #52647e; }
@@ -74,7 +74,7 @@
 .dark .node-card.node-selected { background: @accent_bg_color; border-color: #8dbdff; color: @accent_fg_color; }
 .dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
 .node-card.node-selected .muted,
-.node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .86); }
+.node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .90); }
 .node-card.node-selected .node-check { color: @accent_fg_color; }
 .subscription-card.subscription-selected .selection-check { color: @accent_color; }
 .dark .subscription-card.subscription-selected .selection-check { color: @accent_fg_color; }
@@ -82,14 +82,26 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content, .subscription-card-content { padding: 1.27em 1.46em; }
+.node-card-content, .subscription-card-content { padding: 0.91em 1.09em; }
 .node-name, .subscription-name { font-weight: 600; }
-.node-protocol, .node-delay { font-size: 0.9em; }
-.node-protocol { color: alpha(@window_fg_color, .72); letter-spacing: .02em; }
+.node-protocol, .node-delay { font-size: 0.88em; }
+.node-protocol { color: alpha(@window_fg_color, .70); letter-spacing: .02em; }
 .node-check, .selection-check { color: @accent_color; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
-.node-card-footer { margin-top: 0.91em; }
-.node-test-button { padding: 0.36em; min-width: 2.18em; min-height: 2.18em; border-radius: 7px; }
+/* Latency colour communicates quality on an unselected card. The selected
+ * blue card deliberately uses white text for a consistent, readable contrast. */
+.node-delay { font-weight: 600; }
+.node-delay.latency-good { color: @latency_good; }
+.node-delay.latency-medium { color: @latency_medium; }
+.node-delay.latency-bad { color: @latency_bad; }
+.dark .node-delay.latency-good { color: #69d58c; }
+.dark .node-delay.latency-medium { color: #e8bd62; }
+.dark .node-delay.latency-bad { color: #ff8b82; }
+.node-card.node-selected .node-delay.latency-good,
+.node-card.node-selected .node-delay.latency-medium,
+.node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
+.node-card-footer { margin-top: 0.64em; }
+.node-test-button { padding: 0.27em; min-width: 2.36em; min-height: 2.36em; border-radius: 7px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
 .node-card.node-selected .node-test-button:disabled { color: alpha(@accent_fg_color, .68); }
@@ -98,68 +110,102 @@
 .subscription-card-content { min-width: 0; }
 .subscription-card, .subscription-card-content, .subscription-progress { min-width: 0; }
 .subscription-progress trough, .subscription-progress progress { min-width: 0; }
-.subscription-card-header { min-height: 2.36em; }
+.subscription-card-header { min-height: 2em; }
 .subscription-expiry { font-feature-settings: "tnum"; }
 .subscription-expiry.error { color: @error_color; }
-.subscription-progress { margin-top: 1.09em; margin-bottom: 0.91em; }
-.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 0.55em; }
-.subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 0.55em; }
-.subscription-usage { font-size: 0.92em; font-weight: 500; }
-.card-menu > button { padding: 0.36em; min-width: 1.82em; min-height: 2em; border-radius: 8px; }
-.subscription-actions { padding: 0.36em; }
-.subscription-actions button { padding: 0.73em 1.46em; }
+.subscription-progress { margin-top: 0.73em; margin-bottom: 0.64em; }
+.subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 0.45em; }
+.subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 0.45em; }
+.subscription-usage { font-size: 0.90em; font-weight: 500; }
+.card-menu > button { padding: 0.27em; min-width: 2.18em; min-height: 2.18em; border-radius: 7px; }
+.subscription-actions { padding: 0.27em; }
+.subscription-actions button { padding: 0.55em 1.09em; }
 
 .log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
 .editor-root { background: @window_bg_color; }
-.editor-toolbar { padding: 0.73em 1.46em; border-bottom: 1px solid alpha(@borders,.5); }
-.settings-group { margin-bottom: 0.36em; }
-.page-content > preferencesgroup { margin-top: 0.36em; }
+.editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
+.settings-group { margin-bottom: 0.27em; }
+.page-content > preferencesgroup { margin-top: 0.27em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
 separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
-.padded-card { padding: 1.64em 1.82em; }
+.padded-card { padding: 1.09em 1.27em; }
 
 .metrics > flowboxchild { padding: 0; }
-.stat-card { padding: 1.46em 1.64em; min-width: 18.18em; }
+.stat-card { padding: 1em 1.18em; min-width: 15.5em; }
 .download { color: #2878d7; }
 .upload { color: #62708a; }
 .dark .download { color: #8cbaff; }
 .dark .upload { color: #b3bcd5; }
 .aerobox-window preferencesgroup .title, .editor-root preferencesgroup .title { font-size: 1em; }
-.aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
-.aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.95em; color: alpha(@window_fg_color, .78); opacity: 1; }
+.aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
+.aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
 
 .settings-page entry { font-size: 1em; }
-.editor-tabs { border-radius: 12px; background: alpha(@window_fg_color, .06); padding: 0.36em; }
-.editor-tabs button { border: none; border-radius: 9px; box-shadow: none; background: transparent; padding: 0.73em 1.46em; }
+.editor-tabs { border-radius: 10px; background: alpha(@window_fg_color, .06); padding: 0.27em; }
+.editor-tabs button { border: none; border-radius: 8px; box-shadow: none; background: transparent; padding: 0.45em 1.09em; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
-.settings-page row { min-height: 4.91em; }
+.settings-page row { min-height: 3.82em; }
 .settings-dirty-mark { color: #b47716; font-size: 0.75em; }
-.settings-dirty-label { color: alpha(@window_fg_color, .78); }
-.aerobox-window .boxed-list { border-radius: 14px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
+.settings-dirty-label { color: alpha(@window_fg_color, .70); }
+.aerobox-window .boxed-list { border-radius: 12px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
 .aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
-
-.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .78); }
+.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .70); }
 
 .dashboard-grid > flowboxchild { padding: 0; }
 /* Cards in the same row stretch to the tallest one so their bottom edges line
  * up; inner spacing stays on the card class, not on the flow child. */
 .dashboard-grid > flowboxchild > .surface-card { margin: 0; }
-.home-network { padding: 1.46em 1.64em; min-width: 15.5em; }
-.home-network .exit-ip { font-size: 1.4em; font-weight: 600; }
-.speed-card { padding: 1.46em 1.46em; min-width: 7.2em; }
-.speed-value { font-size: 1.85em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-mode { padding: 1.46em 1.64em; min-width: 15.5em; }
-.mode-selector { border-radius: 12px; background: #edf0f6; padding: 0.36em; }
-.mode-selector button { border-radius: 9px; border: none; box-shadow: none; background: transparent; padding: 0.73em 1.09em; font-weight: 500; }
+.home-network { padding: 1.09em 1.27em; min-width: 15.5em; }
+.home-network .exit-ip { font-size: 1.30em; font-weight: 600; }
+.speed-card { padding: 1.09em; min-width: 7.2em; }
+.speed-value { font-size: 1.55em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 1.09em 1.27em; min-width: 15.5em; }
+.mode-selector { border-radius: 10px; background: #edf0f6; padding: 0.27em; }
+.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 0.45em 1em; font-weight: 500; }
 .mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .dark .mode-selector { background: #1b2029; }
-.home-takeover { padding: 0.36em 1.64em; min-width: 21.82em; }
-.home-switch { min-height: 4.73em; }
+.home-takeover { padding: 0.18em 1.27em; min-width: 21.82em; }
+.home-switch { min-height: 3.64em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
-.home-stat { padding: 1.46em 1.64em; min-width: 7.7em; }
-.home-stat-value { font-size: 1.45em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-start { border-radius: 16px; padding: 1.46em 2.18em; min-height: 2.18em; box-shadow: 0 4px 14px alpha(#183b50,.18); }
-.home-start image { -gtk-icon-size: 22px; }
+.home-stat { padding: 1.09em 1.27em; min-width: 7.7em; }
+.home-stat-value { font-size: 1.32em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-start { border-radius: 12px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.home-start image { -gtk-icon-size: 20px; }
+
+/* Keep one compact control density across the main pages and dialogs. These
+ * selectors override libadwaita's generous touch-sized defaults, not the
+ * user's font size: every metric still follows the discrete font setting. */
+.aerobox-window headerbar,
+.editor-root headerbar { min-height: 3.27em; }
+.aerobox-window button,
+.editor-root button { min-height: 2.36em; padding-top: 0.27em; padding-bottom: 0.27em; }
+.aerobox-window button.compact-action,
+.editor-root button.compact-action { min-height: 2.36em; }
+.aerobox-window button.primary-action { min-height: 2.73em; padding-top: 0.45em; padding-bottom: 0.45em; }
+.aerobox-window entry,
+.editor-root entry { min-height: 2.55em; }
+/* GTK's default recessed entry fill is too heavy on these white form cards.
+ * Use a quiet solid surface, but retain the native blue focus indicator. */
+.aerobox-window entry,
+.editor-root entry { background: #ffffff; border: 1px solid #d9dfe8; box-shadow: none; }
+.dark.aerobox-window entry,
+.dark .editor-root entry { background: #24282f; border-color: #414957; }
+.import-dialog .import-source text { background: #ffffff; }
+.dark .import-dialog .import-source text { background: #24282f; }
+.aerobox-window spinbutton,
+.editor-root spinbutton { min-height: 2.36em; }
+.aerobox-window spinbutton text,
+.editor-root spinbutton text { min-height: 0; }
+.aerobox-window dropdown > button,
+.editor-root dropdown > button { min-height: 2.36em; }
+.aerobox-window .settings-page row,
+.editor-root row { min-height: 3.55em; }
+.editor-root preferencesgroup .boxed-list > row { min-height: 3.55em; }
+.import-dialog .import-sources { margin-bottom: 0.18em; }
+.import-dialog .import-source { border: 1px solid #d9dfe8; border-radius: 9px; background: #ffffff; }
+.dark .import-dialog .import-source { border-color: #363c47; background: #24282f; }
+.import-dialog .import-source text { font-size: 0.95em; }
+.import-dialog preferencesgroup .boxed-list > row { min-height: 3.36em; }

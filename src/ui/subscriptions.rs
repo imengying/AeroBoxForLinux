@@ -313,27 +313,31 @@ impl Ui {
             .title("导入订阅")
             .transient_for(&self.window)
             .modal(true)
-            .default_width(600)
-            .default_height(640)
+            .default_width(560)
+            .default_height(470)
             .build();
         if let Some(app) = self.window.application() {
             window.set_application(Some(&app));
         }
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("editor-root");
+        root.add_css_class("import-dialog");
         let header = adw::HeaderBar::new();
         let import = primary("导入", "document-save-symbolic");
         import.set_widget_name("subscription-import-save");
         header.pack_end(&import);
         root.append(&header);
-        let form = gtk::Box::new(gtk::Orientation::Vertical, 18);
-        form.set_margin_start(24);
-        form.set_margin_end(24);
-        form.set_margin_top(24);
-        form.set_margin_bottom(24);
+        let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        form.set_margin_start(20);
+        form.set_margin_end(20);
+        form.set_margin_top(12);
+        form.set_margin_bottom(20);
         let sources = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         let paste = gtk::Button::with_label("从剪贴板导入");
         let file = gtk::Button::with_label("从文件导入");
+        sources.add_css_class("import-sources");
+        paste.add_css_class("compact-action");
+        file.add_css_class("compact-action");
         sources.append(&paste);
         sources.append(&file);
         form.append(&sources);
@@ -341,22 +345,26 @@ impl Ui {
         form.append(&name.root);
         let source_title = gtk::Label::new(Some("订阅链接或节点内容"));
         source_title.set_xalign(0.0);
+        source_title.add_css_class("labeled-entry-title");
         form.append(&source_title);
         let source = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
-            .top_margin(12)
-            .bottom_margin(12)
-            .left_margin(12)
-            .right_margin(12)
+            .top_margin(9)
+            .bottom_margin(9)
+            .left_margin(10)
+            .right_margin(10)
             .build();
         source.set_widget_name("subscription-import-source");
         let scroll = gtk::ScrolledWindow::builder()
             .child(&source)
-            .min_content_height(110)
-            .vexpand(true)
+            .min_content_height(72)
+            .max_content_height(144)
+            .propagate_natural_height(true)
+            .vexpand(false)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
         scroll.add_css_class("card");
+        scroll.add_css_class("import-source");
         form.append(&scroll);
         // Live feedback under the source box: the import button used to be the
         // only place that reported problems, after the user had committed.
@@ -719,6 +727,16 @@ pub(super) fn smoke_menu(ui: &Rc<Ui>, open: bool) -> Result<()> {
         menu.popdown();
     }
     Ok(())
+}
+
+pub(super) fn smoke_import_window(ui: &Rc<Ui>) -> Result<adw::Window> {
+    let application = ui.window.application().context("缺少应用")?;
+    application
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<adw::Window>().ok())
+        .find(|window| window.title().as_deref() == Some("导入订阅"))
+        .context("导入订阅窗口未打开")
 }
 
 pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {

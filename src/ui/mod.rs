@@ -267,7 +267,7 @@ impl Ui {
         let nav = gtk::ListBox::new();
         nav.add_css_class("nav-list");
         nav.set_selection_mode(gtk::SelectionMode::Single);
-        margin(&nav, 14, 14, 0, 20);
+        margin(&nav, 12, 12, 0, 16);
         for page in Page::ALL {
             let row = gtk::ListBoxRow::new();
             let item = gtk::Box::new(gtk::Orientation::Horizontal, 13);
@@ -308,7 +308,7 @@ impl Ui {
             }
         });
         content.append(&header);
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 20);
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 16);
         body.set_hexpand(true);
         body.add_css_class("page-content");
         margin(&body, 24, 24, 12, 24);
@@ -567,8 +567,8 @@ impl Ui {
         self.node_panel.replace(None);
         self.body.remove_css_class("settings-page");
         self.body.remove_css_class("home-page");
-        self.body.set_spacing(20);
-        self.body.set_margin_bottom(32);
+        self.body.set_spacing(16);
+        self.body.set_margin_bottom(24);
         self.scroll.vadjustment().set_value(0.0);
         self.scroll.set_margin_bottom(0);
         if let Some(button) = self.home_action.borrow_mut().take() {
@@ -1412,33 +1412,33 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             let name = match current {
                 0 => "home.png",
                 1 => "subscriptions.png",
-                2 => "subscriptions-selected.png",
-                3 => "nodes.png",
-                4 => "nodes-selected.png",
-                5 => "subscriptions-returned.png",
-                6 => "nodes-returned.png",
-                7 => "nodes-dark.png",
-                8 => "connections.png",
-                9 => "logs.png",
-                10 => "home-narrow.png",
-                11 => "home-compact.png",
-                12 => "home-scrolled.png",
-                13 => "rules.png",
-                14 => "online-rules-editor.png",
-                16 => "settings.png",
-                17 => "settings-tun.png",
-                18 => "subscription-import.png",
-                21 => "core-settings.png",
-                22 => "nodes-imported.png",
-                23 => "subscriptions-large-text.png",
-                24 => "subscriptions-menu.png",
-                25 => "subscriptions-narrow.png",
-                26 => "nodes-narrow.png",
-                27 => "settings-unsaved.png",
+                3 => "subscriptions-selected.png",
+                5 => "nodes.png",
+                6 => "nodes-selected.png",
+                7 => "subscriptions-returned.png",
+                8 => "nodes-returned.png",
+                9 => "nodes-dark.png",
+                10 => "connections.png",
+                11 => "logs.png",
+                12 => "home-narrow.png",
+                13 => "home-compact.png",
+                14 => "home-scrolled.png",
+                15 => "rules.png",
+                16 => "online-rules-editor.png",
+                18 => "settings.png",
+                19 => "settings-tun.png",
+                20 => "subscription-import.png",
+                23 => "core-settings.png",
+                24 => "nodes-imported.png",
+                25 => "subscriptions-large-text.png",
+                26 => "subscriptions-menu.png",
+                27 => "subscriptions-narrow.png",
+                28 => "nodes-narrow.png",
+                29 => "settings-unsaved.png",
                 _ => "",
             };
             if !name.is_empty() {
-                let window = if matches!(current, 14 | 18) {
+                let window = if matches!(current, 16 | 20) {
                     app.active_window().context("编辑窗口未打开")?
                 } else {
                     ui.window.clone().upcast::<gtk::Window>()
@@ -1465,7 +1465,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     "配置页面仍存在"
                 );
             }
-            if current == 11 || current == 12 {
+            if current == 13 || current == 14 {
                 let button = ui.home_action.borrow();
                 let bounds = button
                     .as_ref()
@@ -1488,17 +1488,28 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             match current {
                 0 => ui.navigate(Page::Subscriptions),
                 1 => {
-                    subscriptions::smoke_selection(&ui, 0, Some(1))?;
+                    subscriptions::smoke_selection(&ui, 0, None)?;
+                    ui.import_subscription();
                 }
                 2 => {
+                    let window = subscriptions::smoke_import_window(&ui)?;
+                    screenshot(&window, &parent.join("subscription-import-default.png"))?;
+                    window.close();
+                }
+                3 => {
+                    subscriptions::smoke_selection(&ui, 0, Some(1))?;
+                }
+                4 => {
                     subscriptions::smoke_selection(&ui, 1, None)?;
                     ui.navigate(Page::Nodes);
                 }
-                3 => {
+                5 => {
+                    nodes::smoke_delay_colors(&ui)?;
                     ui.service.set_routing_mode("global")?;
                     nodes::smoke_nodes(&ui, "备用订阅", 2, Some("香港 · 01"), Some(1))?;
+                    nodes::smoke_delay_colors(&ui)?;
                 }
-                4 => {
+                6 => {
                     nodes::smoke_nodes(&ui, "备用订阅", 2, Some("备用 · 02"), None)?;
                     anyhow::ensure!(
                         ui.service.snapshot().settings.routing_mode == "global",
@@ -1507,32 +1518,33 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     ui.navigate(Page::Subscriptions);
                     subscriptions::smoke_selection(&ui, 1, Some(0))?;
                 }
-                5 => {
+                7 => {
                     subscriptions::smoke_selection(&ui, 0, None)?;
                     ui.navigate(Page::Nodes);
                 }
-                6 => {
+                8 => {
+                    nodes::smoke_delay_failure(&ui)?;
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
-                7 => ui.navigate(Page::Connections),
-                8 => ui.navigate(Page::Logs),
-                9 => {
+                9 => ui.navigate(Page::Connections),
+                10 => ui.navigate(Page::Logs),
+                11 => {
                     apply_theme("light");
                     ui.navigate(Page::Home);
                     ui.window.set_default_size(790, 800);
                 }
-                10 => ui.window.set_default_size(700, 600),
-                11 => {
+                12 => ui.window.set_default_size(700, 600),
+                13 => {
                     let adjustment = ui.scroll.vadjustment();
                     adjustment.set_value(adjustment.upper());
                 }
-                12 => {
+                14 => {
                     ui.window.set_default_size(1180, 800);
                     ui.navigate(Page::Rules);
                 }
-                13 => {
+                15 => {
                     let rule = ui
                         .service
                         .snapshot()
@@ -1542,12 +1554,12 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         .unwrap();
                     editors::ruleset(&ui.window, ui.service.clone(), rule, ui.saved());
                 }
-                14 => editors::smoke_ruleset(&ui.window, ui.service.clone(), false)?,
-                15 => {
+                16 => editors::smoke_ruleset(&ui.window, ui.service.clone(), false)?,
+                17 => {
                     editors::smoke_ruleset(&ui.window, ui.service.clone(), true)?;
                     ui.navigate(Page::Settings);
                 }
-                16 => {
+                18 => {
                     font_size.set(
                         ui.window
                             .pango_context()
@@ -1557,7 +1569,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     row_height.set(settings::smoke_row_height(&ui));
                     settings::smoke_settings(&ui, false)?;
                 }
-                17 => {
+                19 => {
                     settings::smoke_settings(&ui, true)?;
                     let larger = ui
                         .window
@@ -1580,8 +1592,8 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     ui.navigate(Page::Subscriptions);
                     ui.import_subscription();
                 }
-                18 | 19 => subscriptions::smoke_import(&ui, current - 17)?,
-                20 => {
+                20 | 21 => subscriptions::smoke_import(&ui, current - 19)?,
+                22 => {
                     subscriptions::smoke_import(&ui, 3)?;
                     ui.navigate(Page::Settings);
                     fn select_core(widget: &gtk::Widget) {
@@ -1598,36 +1610,36 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     }
                     select_core(ui.body.upcast_ref());
                 }
-                21 => ui.navigate(Page::Nodes),
-                22 => {
+                23 => ui.navigate(Page::Nodes),
+                24 => {
                     nodes::smoke_nodes(&ui, "导入检查", 1, None, None)?;
                     startup::smoke_recovery()?;
                     ui.navigate(Page::Subscriptions);
                 }
-                23 => {
+                25 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     subscriptions::smoke_menu(&ui, true)?;
                 }
-                24 => {
+                26 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     subscriptions::smoke_menu(&ui, false)?;
                     ui.window.set_default_size(600, 720);
                 }
-                25 => {
+                27 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);
                 }
-                26 => {
+                28 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
                     ui.window.set_default_size(1180, 800);
                     ui.navigate(Page::Settings);
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                27 => settings::smoke_unsaved(&ui, Some("cancel"))?,
-                28 => {
+                29 => settings::smoke_unsaved(&ui, Some("cancel"))?,
+                30 => {
                     anyhow::ensure!(
                         !settings::SettingsPanel::smoke_has_prompt(&ui),
                         "继续编辑后确认框未关闭"
@@ -1642,18 +1654,18 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "继续编辑后无法再次请求离开"
                     );
                 }
-                30 => settings::smoke_unsaved(&ui, Some("discard"))?,
-                31 => {
+                32 => settings::smoke_unsaved(&ui, Some("discard"))?,
+                33 => {
                     anyhow::ensure!(ui.page.get() == Page::Nodes, "放弃更改后未离开");
                     ui.navigate(Page::Settings);
                     settings::smoke_restored(&ui)?;
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                32 => {
+                34 => {
                     settings::smoke_unsaved(&ui, Some("save"))?;
                     anyhow::ensure!(ui.page.get() == Page::Settings, "保存完成前提前离开");
                 }
-                33 => {
+                35 => {
                     anyhow::ensure!(ui.jobs.get() == 0, "保存并离开尚未完成");
                     anyhow::ensure!(
                         ui.page.get() == Page::Nodes,
@@ -1668,7 +1680,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "保存并离开未持久化"
                     );
                 }
-                34 => {
+                36 => {
                     ui.navigate(Page::Settings);
                     settings::smoke_edit(&ui)?;
                     anyhow::ensure!(
@@ -1692,7 +1704,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 34 {
+        if current == 36 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();
