@@ -9,6 +9,7 @@
 .dark .app-sidebar { background: #14171c; }
 
 .nav-list { background: transparent; }
+.sidebar-scroll { background: transparent; }
 .nav-list row { border-radius: 10px; margin: 0.18em 0; padding: 0; color: alpha(@window_fg_color, .82); }
 .nav-list row:selected { background: #dde9fc; color: #2268bc; }
 
@@ -74,7 +75,9 @@
 .dark .subscription-card.subscription-selected { background: #263b58; border-color: #5c84bc; }
 .node-card.node-selected .muted,
 .node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .86); }
-.node-card.node-selected .node-check, .subscription-card.subscription-selected .selection-check { color: @accent_fg_color; }
+.node-card.node-selected .node-check { color: @accent_fg_color; }
+.subscription-card.subscription-selected .selection-check { color: @accent_color; }
+.dark .subscription-card.subscription-selected .selection-check { color: @accent_fg_color; }
 .node-card.node-selected .node-test-button { color: @accent_fg_color; }
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the

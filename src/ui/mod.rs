@@ -190,6 +190,7 @@ struct Ui {
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
     nav: gtk::ListBox,
+    nav_scroll: gtk::ScrolledWindow,
     syncing_navigation: Cell<bool>,
     page: Cell<Page>,
     split: adw::OverlaySplitView,
@@ -256,10 +257,17 @@ impl Ui {
         brand.append(&mark);
         brand.append(&name);
         sidebar.append(&brand);
+        let nav_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(false)
+            .vexpand(true)
+            .build();
+        nav_scroll.add_css_class("sidebar-scroll");
+        sidebar.append(&nav_scroll);
         let nav = gtk::ListBox::new();
         nav.add_css_class("nav-list");
         nav.set_selection_mode(gtk::SelectionMode::Single);
-        margin(&nav, 14, 14, 0, 0);
+        margin(&nav, 14, 14, 0, 20);
         for page in Page::ALL {
             let row = gtk::ListBoxRow::new();
             let item = gtk::Box::new(gtk::Orientation::Horizontal, 13);
@@ -273,7 +281,7 @@ impl Ui {
             nav.append(&row);
         }
         nav.select_row(nav.row_at_index(0).as_ref());
-        sidebar.append(&nav);
+        nav_scroll.set_child(Some(&nav));
         let split = adw::OverlaySplitView::new();
         split.set_sidebar(Some(&sidebar));
         let sidebar_width = sidebar_width(settings.font_size);
@@ -313,6 +321,7 @@ impl Ui {
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(false)
+            .propagate_natural_width(false)
             .child(&clamp)
             .vexpand(true)
             .build();
@@ -340,6 +349,7 @@ impl Ui {
             floating,
             home_action: RefCell::new(None),
             nav,
+            nav_scroll,
             syncing_navigation: Cell::new(false),
             page: Cell::new(Page::Home),
             split,
@@ -607,6 +617,17 @@ impl Ui {
         self.nav
             .select_row(self.nav.row_at_index(index as i32).as_ref());
         self.syncing_navigation.set(false);
+        if let Some(row) = self.nav.row_at_index(index as i32) {
+            let bounds = row.allocation();
+            let adjustment = self.nav_scroll.vadjustment();
+            let top = bounds.y() as f64;
+            let bottom = top + bounds.height() as f64;
+            if top < adjustment.value() {
+                adjustment.set_value(top);
+            } else if bottom > adjustment.value() + adjustment.page_size() {
+                adjustment.set_value((bottom - adjustment.page_size()).max(0.0));
+            }
+        }
     }
 
     /// Return true only when the caller may leave immediately. A save-and-leave
@@ -1177,7 +1198,13 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 fn sidebar_width(font_size: u32) -> f64 {
     200.0 * (font_size as f64 / 11.0).clamp(0.9, 1.6)
 }
-fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_columns: u32) {
+fn follow_width(
+    grid: &gtk::FlowBox,
+    min_card_width: i32,
+    spacing: i32,
+    max_columns: u32,
+    responsive: bool,
+) {
     let last_width = std::rc::Rc::new(Cell::new(-1));
     let grid_weak = grid.downgrade();
     grid.add_tick_callback(move |_, _| {
@@ -1187,20 +1214,19 @@ fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_colu
         let width = grid.width();
         if width != last_width.get() {
             last_width.set(width);
-            // Thresholds are authored for the default font. A larger font makes
-            // the grid's own allocation smaller (the sidebar and padding grow
-            // with it), which is already accounted for here; scaling the
-            // threshold again would drop a column on a window that still fits.
-            let scale = grid
-                .pango_context()
-                .font_description()
-                .map(|font| {
-                    let points = font.size() as f32 / gtk::pango::SCALE as f32;
-                    // Square-root damping keeps large text from collapsing the
-                    // grid while still giving it a little extra breathing room.
-                    (points / 11.0).sqrt().clamp(0.85, 1.4)
-                })
-                .unwrap_or(1.0);
+            let scale = if responsive {
+                grid.pango_context()
+                    .font_description()
+                    .map(|font| {
+                        let points = font.size() as f32 / gtk::pango::SCALE as f32;
+                        // Large text needs more room, but not a fully linear
+                        // column collapse at every small size increase.
+                        (points / 11.0).sqrt().clamp(0.85, 1.4)
+                    })
+                    .unwrap_or(1.0)
+            } else {
+                1.0
+            };
             let card = (min_card_width as f32 * scale).round() as i32;
             let gap = (spacing as f32 * scale).round() as i32;
             if width > 0 && card > 0 {
@@ -1208,11 +1234,11 @@ fn follow_width(grid: &gtk::FlowBox, min_card_width: i32, spacing: i32, max_colu
                 if grid.max_children_per_line() != columns as u32 {
                     grid.set_max_children_per_line(columns as u32);
                 }
-                // Pin the minimum as well: a FlowBox left at min=1 happily gives
-                // a single card the whole row instead of using the columns it
-                // was told it may use.
-                if grid.min_children_per_line() != columns as u32 {
-                    grid.set_min_children_per_line(columns as u32);
+                // Let GTK reduce the column count when the children's measured
+                // minima no longer fit. Pinning min=max here makes a two-column
+                // grid wider than the window before this callback can run again.
+                if grid.min_children_per_line() != 1 {
+                    grid.set_min_children_per_line(1);
                 }
             }
         }
@@ -1393,25 +1419,27 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 5 => "subscriptions-returned.png",
                 6 => "nodes-returned.png",
                 7 => "nodes-dark.png",
-                8 => "home-narrow.png",
-                9 => "home-compact.png",
-                10 => "home-scrolled.png",
-                11 => "rules.png",
-                12 => "online-rules-editor.png",
-                14 => "settings.png",
-                15 => "settings-tun.png",
-                16 => "subscription-import.png",
-                19 => "core-settings.png",
-                20 => "nodes-imported.png",
-                21 => "subscriptions-large-text.png",
-                22 => "subscriptions-menu.png",
-                23 => "subscriptions-narrow.png",
-                24 => "nodes-narrow.png",
-                25 => "settings-unsaved.png",
+                8 => "connections.png",
+                9 => "logs.png",
+                10 => "home-narrow.png",
+                11 => "home-compact.png",
+                12 => "home-scrolled.png",
+                13 => "rules.png",
+                14 => "online-rules-editor.png",
+                16 => "settings.png",
+                17 => "settings-tun.png",
+                18 => "subscription-import.png",
+                21 => "core-settings.png",
+                22 => "nodes-imported.png",
+                23 => "subscriptions-large-text.png",
+                24 => "subscriptions-menu.png",
+                25 => "subscriptions-narrow.png",
+                26 => "nodes-narrow.png",
+                27 => "settings-unsaved.png",
                 _ => "",
             };
             if !name.is_empty() {
-                let window = if matches!(current, 12 | 16) {
+                let window = if matches!(current, 14 | 18) {
                     app.active_window().context("编辑窗口未打开")?
                 } else {
                     ui.window.clone().upcast::<gtk::Window>()
@@ -1438,7 +1466,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     "配置页面仍存在"
                 );
             }
-            if current == 9 || current == 10 {
+            if current == 11 || current == 12 {
                 let button = ui.home_action.borrow();
                 let bounds = button
                     .as_ref()
@@ -1489,22 +1517,23 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
-                7 => {
-                    nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
+                7 => ui.navigate(Page::Connections),
+                8 => ui.navigate(Page::Logs),
+                9 => {
                     apply_theme("light");
                     ui.navigate(Page::Home);
                     ui.window.set_default_size(790, 800);
                 }
-                8 => ui.window.set_default_size(700, 600),
-                9 => {
+                10 => ui.window.set_default_size(700, 600),
+                11 => {
                     let adjustment = ui.scroll.vadjustment();
                     adjustment.set_value(adjustment.upper());
                 }
-                10 => {
+                12 => {
                     ui.window.set_default_size(1180, 800);
                     ui.navigate(Page::Rules);
                 }
-                11 => {
+                13 => {
                     let rule = ui
                         .service
                         .snapshot()
@@ -1514,12 +1543,12 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         .unwrap();
                     editors::ruleset(&ui.window, ui.service.clone(), rule, ui.saved());
                 }
-                12 => editors::smoke_ruleset(&ui.window, ui.service.clone(), false)?,
-                13 => {
+                14 => editors::smoke_ruleset(&ui.window, ui.service.clone(), false)?,
+                15 => {
                     editors::smoke_ruleset(&ui.window, ui.service.clone(), true)?;
                     ui.navigate(Page::Settings);
                 }
-                14 => {
+                16 => {
                     font_size.set(
                         ui.window
                             .pango_context()
@@ -1529,7 +1558,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     row_height.set(settings::smoke_row_height(&ui));
                     settings::smoke_settings(&ui, false)?;
                 }
-                15 => {
+                17 => {
                     settings::smoke_settings(&ui, true)?;
                     let larger = ui
                         .window
@@ -1552,8 +1581,8 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     ui.navigate(Page::Subscriptions);
                     ui.import_subscription();
                 }
-                16 | 17 => subscriptions::smoke_import(&ui, current - 15)?,
-                18 => {
+                18 | 19 => subscriptions::smoke_import(&ui, current - 17)?,
+                20 => {
                     subscriptions::smoke_import(&ui, 3)?;
                     ui.navigate(Page::Settings);
                     fn select_core(widget: &gtk::Widget) {
@@ -1570,36 +1599,36 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     }
                     select_core(ui.body.upcast_ref());
                 }
-                19 => ui.navigate(Page::Nodes),
-                20 => {
+                21 => ui.navigate(Page::Nodes),
+                22 => {
                     nodes::smoke_nodes(&ui, "导入检查", 1, None, None)?;
                     startup::smoke_recovery()?;
                     ui.navigate(Page::Subscriptions);
                 }
-                21 => {
+                23 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     subscriptions::smoke_menu(&ui, true)?;
                 }
-                22 => {
+                24 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     subscriptions::smoke_menu(&ui, false)?;
                     ui.window.set_default_size(600, 720);
                 }
-                23 => {
+                25 => {
                     subscriptions::smoke_selection(&ui, 2, None)?;
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);
                 }
-                24 => {
+                26 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
                     ui.window.set_default_size(1180, 800);
                     ui.navigate(Page::Settings);
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                25 => settings::smoke_unsaved(&ui, Some("cancel"))?,
-                26 => {
+                27 => settings::smoke_unsaved(&ui, Some("cancel"))?,
+                28 => {
                     anyhow::ensure!(
                         !settings::SettingsPanel::smoke_has_prompt(&ui),
                         "继续编辑后确认框未关闭"
@@ -1614,18 +1643,18 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "继续编辑后无法再次请求离开"
                     );
                 }
-                27 => settings::smoke_unsaved(&ui, Some("discard"))?,
-                28 => {
+                30 => settings::smoke_unsaved(&ui, Some("discard"))?,
+                31 => {
                     anyhow::ensure!(ui.page.get() == Page::Nodes, "放弃更改后未离开");
                     ui.navigate(Page::Settings);
                     settings::smoke_restored(&ui)?;
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                29 => {
+                32 => {
                     settings::smoke_unsaved(&ui, Some("save"))?;
                     anyhow::ensure!(ui.page.get() == Page::Settings, "保存完成前提前离开");
                 }
-                30 => {
+                33 => {
                     anyhow::ensure!(ui.jobs.get() == 0, "保存并离开尚未完成");
                     anyhow::ensure!(
                         ui.page.get() == Page::Nodes,
@@ -1640,7 +1669,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "保存并离开未持久化"
                     );
                 }
-                31 => {
+                34 => {
                     ui.navigate(Page::Settings);
                     settings::smoke_edit(&ui)?;
                     anyhow::ensure!(
@@ -1664,7 +1693,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 31 {
+        if current == 34 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

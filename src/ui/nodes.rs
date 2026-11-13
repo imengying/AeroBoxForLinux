@@ -68,7 +68,7 @@ impl Ui {
         grid.set_column_spacing(12);
         grid.set_row_spacing(12);
         grid.set_valign(gtk::Align::Start);
-        follow_width(&grid, 232, 12, 4);
+        follow_width(&grid, 232, 12, 4, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");

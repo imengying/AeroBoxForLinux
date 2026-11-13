@@ -96,7 +96,7 @@ impl Ui {
         // Subscription cards stay at two columns at most: they carry a name,
         // expiry, progress bar and usage figures that a third column would
         // squeeze below a readable width.
-        follow_width(&list, 280, 16, 2);
+        follow_width(&list, 360, 16, 2, self.typography.preview().0 >= 16);
         let ids: Vec<_> = state
             .subscriptions
             .iter()
@@ -259,6 +259,7 @@ impl Ui {
             footer.append(&usage);
             let updated = label(&updated(item.updated), "subscription-updated muted small");
             updated.set_widget_name("subscription-updated");
+            updated.set_ellipsize(gtk::pango::EllipsizeMode::End);
             updated.set_tooltip_text(
                 (item.updated > 0)
                     .then(|| format_timestamp(item.updated, "%Y-%m-%d %H:%M"))
@@ -658,7 +659,8 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
                     .unwrap()
                     .compute_bounds(&list)
                     .unwrap();
-                if ui.window.width() >= 1100 {
+                let large_text = ui.typography.preview().0 >= 16;
+                if ui.window.width() >= 1100 && !large_text {
                     ensure!(
                         (bounds.y() - first.y()).abs() < 1.0 && bounds.x() > first.x(),
                         "常规窗口没有一行两个订阅: window={} list={} first=({},{} {}x{}) second=({},{} {}x{}) max_cols={}",
@@ -674,10 +676,10 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
                         bounds.height(),
                         list.max_children_per_line()
                     );
-                } else if ui.window.width() <= 620 {
+                } else if ui.window.width() <= 620 || large_text {
                     ensure!(
                         bounds.y() >= first.y() + first.height(),
-                        "窄窗口没有改为单列订阅"
+                        "空间不足时没有改为单列订阅"
                     );
                 }
             }
