@@ -33,7 +33,7 @@ export XDG_CONFIG_HOME="$test_dir/config"
 export XDG_DATA_HOME="$test_dir/data"
 export XDG_CACHE_HOME="$test_dir/cache"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
-export GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals GTK_A11Y=none
+export GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals GTK_A11Y=none GTK_ANIMATIONS=0
 export AEROBOX_TEST_SCALE=1.25
 unset DISPLAY WAYLAND_DISPLAY SWAYSOCK
 sway --unsupported-gpu --config "$test_dir/sway.config" > "$test_dir/screenshots/sway.log" 2>&1 &

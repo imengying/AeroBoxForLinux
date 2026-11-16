@@ -106,8 +106,16 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
             gtk::Settings::default()
                 .expect("GTK settings")
                 .set_gtk_xft_dpi(-1);
+            gtk::Settings::default()
+                .expect("GTK settings")
+                .set_gtk_enable_animations(false);
         }
         let ui = Ui::new(app, activate_service.clone());
+        ui.smoke_dir.replace(
+            smoke
+                .as_ref()
+                .and_then(|path| path.parent().map(Path::to_owned)),
+        );
         ui.window.present();
         if let Some(path) = smoke.clone() {
             smoke_sequence(ui.clone(), path, activate_failed.clone());
@@ -204,6 +212,7 @@ struct Ui {
     settings_panel: RefCell<Option<Rc<settings::SettingsPanel>>>,
     pending_leave: RefCell<Option<Rc<dyn Fn()>>>,
     settings_prompt: RefCell<Option<adw::AlertDialog>>,
+    smoke_dir: RefCell<Option<PathBuf>>,
     node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
 }
 
@@ -363,6 +372,7 @@ impl Ui {
             settings_panel: RefCell::new(None),
             pending_leave: RefCell::new(None),
             settings_prompt: RefCell::new(None),
+            smoke_dir: RefCell::new(None),
             node_panel: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
@@ -459,7 +469,7 @@ impl Ui {
         self.toast.add_toast(toast);
     }
     fn error(&self, title: &str, error: impl std::fmt::Display) {
-        let dialog = adw::AlertDialog::new(Some(title), Some(&error.to_string()));
+        let dialog = alert_dialog(title, &error.to_string());
         dialog.add_response("close", "知道了");
         dialog.set_default_response(Some("close"));
         dialog.set_close_response("close");
@@ -553,6 +563,9 @@ impl Ui {
         self.split.set_max_sidebar_width(width);
     }
     fn show(self: &Rc<Self>, page: Page) {
+        if let Some(dialog) = self.settings_prompt.take() {
+            dialog.force_close();
+        }
         if let Some(panel) = self.settings_panel.borrow().as_ref() {
             let settings = panel.saved_settings();
             panel.discard_preview();
@@ -593,6 +606,18 @@ impl Ui {
             Page::Connections => self.connections(&heading),
             Page::Logs => self.logs(&heading),
             Page::Settings => self.settings(&heading),
+        }
+    }
+
+    fn dismiss_settings_prompt(&self, dialog: &adw::AlertDialog) {
+        let current = self
+            .settings_prompt
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| current == dialog);
+        if current {
+            self.settings_prompt.take();
+            dialog.force_close();
         }
     }
 
@@ -782,10 +807,7 @@ impl Ui {
         let name = name.to_string();
         button.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                let dialog = adw::AlertDialog::new(
-                    Some(&format!("删除「{name}」？")),
-                    Some("此操作无法撤销。"),
-                );
+                let dialog = alert_dialog(&format!("删除「{name}」？"), "此操作无法撤销。");
                 dialog.add_response("cancel", "取消");
                 dialog.add_response("delete", "删除");
                 dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
@@ -1075,6 +1097,35 @@ impl Ui {
             },
         );
     }
+}
+
+fn alert_dialog(title: &str, body: &str) -> adw::AlertDialog {
+    let dialog = adw::AlertDialog::new(None::<&str>, None::<&str>);
+    // Keep heading and body constrained independently. AlertDialog's own
+    // heading label does not wrap in libadwaita 1.5, so use equivalent labels.
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let heading = gtk::Label::builder()
+        .label(title)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
+        .halign(gtk::Align::Center)
+        .width_chars(20)
+        .max_width_chars(36)
+        .build();
+    heading.add_css_class("title-3");
+    content.append(&heading);
+    let body = gtk::Label::builder()
+        .label(body)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
+        .width_chars(20)
+        .max_width_chars(36)
+        .build();
+    content.append(&body);
+    dialog.set_extra_child(Some(&content));
+    dialog
 }
 
 fn apply_theme(theme: &str) {
@@ -1394,6 +1445,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let floating_y = Cell::new(None::<f32>);
     let font_size = Cell::new(None);
     let row_height = Cell::new(None);
+    let resources_before_reset = Rc::new(RefCell::new(None::<model::State>));
     let parent = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1401,13 +1453,16 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let app = ui.window.application().expect("application");
     let guard_app = app.clone();
     let guard_failed = failed.clone();
-    glib::timeout_add_local_once(Duration::from_secs(40), move || {
+    glib::timeout_add_local_once(Duration::from_secs(120), move || {
         guard_failed.set(true);
         eprintln!("Wayland smoke: timed out");
         guard_app.quit();
     });
     glib::timeout_add_local(Duration::from_millis(850), move || {
         let current = step.get();
+        if matches!(current, 38..=48) && ui.settings_prompt.borrow().is_some() {
+            return glib::ControlFlow::Continue;
+        }
         let result = (|| -> Result<()> {
             let name = match current {
                 0 => "home.png",
@@ -1435,6 +1490,10 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 27 => "subscriptions-narrow.png",
                 28 => "nodes-narrow.png",
                 29 => "settings-unsaved.png",
+                38 => "settings-data.png",
+                43 => "settings-data.png",
+                46 => "settings-network.png",
+                48 => "settings-tun-permission.png",
                 _ => "",
             };
             if !name.is_empty() {
@@ -1656,7 +1715,14 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 }
                 32 => settings::smoke_unsaved(&ui, Some("discard"))?,
                 33 => {
-                    anyhow::ensure!(ui.page.get() == Page::Nodes, "放弃更改后未离开");
+                    anyhow::ensure!(
+                        ui.page.get() == Page::Nodes,
+                        "放弃更改后未离开: page={:?} pending={} prompt={} jobs={}",
+                        ui.page.get(),
+                        ui.pending_leave.borrow().is_some(),
+                        ui.settings_prompt.borrow().is_some(),
+                        ui.jobs.get()
+                    );
                     ui.navigate(Page::Settings);
                     settings::smoke_restored(&ui)?;
                     settings::smoke_unsaved(&ui, None)?;
@@ -1690,6 +1756,113 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     anyhow::ensure!(ui.window.is_visible(), "未保存时直接关闭了窗口");
                     settings::smoke_unsaved(&ui, Some("cancel"))?;
                 }
+                37 => {
+                    ui.navigate(Page::Nodes);
+                    settings::smoke_unsaved(&ui, Some("discard"))?;
+                }
+                38 => {
+                    anyhow::ensure!(
+                        ui.page.get() == Page::Nodes,
+                        "放弃更改后未离开: page={:?} pending={} prompt={} jobs={}",
+                        ui.page.get(),
+                        ui.pending_leave.borrow().is_some(),
+                        ui.settings_prompt.borrow().is_some(),
+                        ui.jobs.get()
+                    );
+                    ui.navigate(Page::Settings);
+                    settings::smoke_restored(&ui)?;
+                    settings::smoke_data_action(&ui, 0)?;
+                    resources_before_reset.replace(None);
+                }
+                39 => settings::smoke_data_action(&ui, 1)?,
+                40 => settings::smoke_data_action(&ui, 1)?,
+                41 => {
+                    resources_before_reset.replace(Some(ui.service.snapshot()));
+                    settings::smoke_data_action(&ui, 2)?;
+                }
+                42 => {
+                    settings::smoke_data_action(&ui, 3)?;
+                    let state = ui.service.snapshot();
+                    let before = resources_before_reset
+                        .borrow()
+                        .clone()
+                        .context("没有恢复默认前的资源快照")?;
+                    anyhow::ensure!(
+                        serde_json::to_value(&state.subscriptions)?
+                            == serde_json::to_value(&before.subscriptions)?
+                            && serde_json::to_value(&state.rulesets)?
+                                == serde_json::to_value(&before.rulesets)?
+                            && state.settings.active_subscription
+                                == before.settings.active_subscription
+                            && (state.settings.width, state.settings.height)
+                                == (before.settings.width, before.settings.height),
+                        "恢复默认改变了订阅、规则、当前选择或窗口尺寸"
+                    );
+                    anyhow::ensure!(
+                        state.settings.routing_mode == before.settings.routing_mode,
+                        "恢复默认错误地改变了首页运行模式"
+                    );
+                    let adjustment = ui.scroll.vadjustment();
+                    adjustment.set_value(adjustment.upper());
+                }
+                43 => {
+                    let adjustment = ui.scroll.vadjustment();
+                    adjustment.set_value(0.0);
+                    settings::smoke_data_action(&ui, 4)?;
+                }
+                44 => {
+                    let state = ui.service.snapshot();
+                    let before = resources_before_reset
+                        .borrow()
+                        .clone()
+                        .context("没有合并恢复前的资源快照")?;
+                    anyhow::ensure!(
+                        state.subscriptions.len() == before.subscriptions.len() * 2
+                            && state.rulesets.len() == before.rulesets.len() * 2
+                            && state.settings.direct_dns == "tcp://223.5.5.5:5353"
+                            && state.settings.active_subscription
+                                != before.settings.active_subscription
+                            && state.settings.routing_mode == "global",
+                        "备份没有正确合并或恢复设置"
+                    );
+                    fn select_settings_page(widget: &gtk::Widget, name: &str) {
+                        if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
+                            && stack.widget_name() == "settings-sections"
+                        {
+                            stack.set_visible_child_name(name);
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(widget) = child {
+                            child = widget.next_sibling();
+                            select_settings_page(&widget, name);
+                        }
+                    }
+                    select_settings_page(ui.body.upcast_ref(), "network");
+                }
+                45 => {
+                    if !settings::smoke_scroll_dns(&ui)? {
+                        return Ok(());
+                    }
+                }
+                46 => {
+                    settings::smoke_network(&ui)?;
+                    fn select_tun(widget: &gtk::Widget) {
+                        if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
+                            && stack.widget_name() == "settings-sections"
+                        {
+                            stack.set_visible_child_name("tun");
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(widget) = child {
+                            child = widget.next_sibling();
+                            select_tun(&widget);
+                        }
+                    }
+                    select_tun(ui.body.upcast_ref());
+                }
+                48 => {
+                    settings::smoke_tun_permission(&ui)?;
+                }
                 _ => {}
             }
             Ok(())
@@ -1699,12 +1872,18 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 return glib::ControlFlow::Continue;
             }
             eprintln!("Wayland smoke step {current}: {error:#}");
+            if let Err(screenshot_error) = screenshot(
+                &ui.window.clone().upcast::<gtk::Window>(),
+                &parent.join("smoke-failure.png"),
+            ) {
+                eprintln!("failure screenshot: {screenshot_error:#}");
+            }
             failed.set(true);
             app.quit();
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 36 {
+        if current == 48 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

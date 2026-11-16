@@ -1356,6 +1356,101 @@ impl Service {
         self.commit_state(&before, candidate)
     }
 
+    pub fn export_backup(&self, path: &Path) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let state = self.snapshot();
+        let store = self.store.lock().unwrap();
+        crate::backup::export(path, &state, |rule| fs::read(store.rule_path(rule)).ok())
+    }
+
+    pub fn restore_backup(&self, path: &Path) -> Result<(usize, usize)> {
+        let (imported, files) = crate::backup::read(path)?;
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let (candidate, files) = crate::backup::merge(&before, imported, files)?;
+        // Only new IDs are written during a merge; rollback can safely remove
+        // these files without touching an existing resource's cached bytes.
+        let store = self.store.lock().unwrap();
+        for rule in &candidate.rulesets {
+            if !before.rulesets.iter().any(|current| current.id == rule.id) && rule.binary {
+                ensure!(
+                    files.contains_key(&rule.id),
+                    "SRS 规则集「{}」缺少二进制数据",
+                    rule.name
+                );
+            }
+        }
+        let mut installed: Vec<PathBuf> = Vec::new();
+        for rule in &candidate.rulesets {
+            if let Some(bytes) = files.get(&rule.id) {
+                let path = store.rule_path(rule);
+                let result = if path.exists() {
+                    Err(anyhow::anyhow!("规则集缓存已存在：{}", rule.name))
+                } else {
+                    crate::model::atomic_write(&path, bytes, 0o600)
+                        .with_context(|| format!("无法写入规则集「{}」", rule.name))
+                };
+                if let Err(error) = result {
+                    for path in installed {
+                        let _ = fs::remove_file(path);
+                    }
+                    return Err(error);
+                }
+                installed.push(path);
+            }
+        }
+        drop(store);
+        match self.commit_state(&before, candidate) {
+            Ok(()) => {
+                let counts = (
+                    self.snapshot().subscriptions.len() - before.subscriptions.len(),
+                    self.snapshot().rulesets.len() - before.rulesets.len(),
+                );
+                self.log("备份已合并恢复");
+                Ok(counts)
+            }
+            Err(error) => {
+                for path in installed {
+                    let _ = fs::remove_file(path);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn apply_settings_form(&self, previous: Settings, settings: Settings) -> Result<()> {
+        settings.validate()?;
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        ensure!(
+            before.settings == previous,
+            "其他操作已更改设置，请重新打开设置页后再保存"
+        );
+        let mut candidate = before.clone();
+        candidate.settings = settings;
+        self.commit_state(&before, candidate)
+    }
+
+    pub fn reset_settings(&self, previous: Settings) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        ensure!(
+            before.settings == previous,
+            "其他操作已更改设置，请重新打开设置页后再保存"
+        );
+        let mut candidate = before.clone();
+        candidate.settings = Settings {
+            // These describe the local desktop and the live resource selection,
+            // not preference defaults. Resources themselves remain untouched.
+            active_subscription: before.settings.active_subscription.clone(),
+            routing_mode: before.settings.routing_mode.clone(),
+            width: before.settings.width,
+            height: before.settings.height,
+            ..Settings::default()
+        };
+        self.commit_state(&before, candidate)
+    }
+
     pub fn network_info(&self) -> Result<network::NetworkInfo> {
         let (pid, config) = {
             let running = self.running.lock().unwrap();

@@ -33,6 +33,41 @@ fn setup(service: &Service) {
 }
 
 #[test]
+fn real_core_accepts_custom_dns_transports_and_domain_bootstrap() {
+    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
+    service
+        .update(|state| {
+            state.settings.core_path = binary;
+            state.rulesets.clear();
+            Ok(())
+        })
+        .unwrap();
+    for address in [
+        "udp://127.0.0.1:5353",
+        "tcp://127.0.0.1:5353",
+        "tls://127.0.0.1:5353",
+        "https://127.0.0.1:5353/dns-query",
+        "quic://127.0.0.1:5353",
+        "tls://dns.alidns.com",
+        "https://cloudflare-dns.com/dns-query",
+        "quic://dns.adguard-dns.com",
+    ] {
+        let mut settings = service.snapshot().settings;
+        settings.remote_dns = address.into();
+        service.apply_settings(settings).unwrap();
+        let generated = service.generate_current().unwrap();
+        service
+            .check(&generated)
+            .unwrap_or_else(|error| panic!("{address}: {error:#}\n{generated}"));
+    }
+}
+
+#[test]
 fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache() {
     let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
         return;

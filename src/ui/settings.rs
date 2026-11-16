@@ -1,5 +1,7 @@
 use super::*;
 
+type SettingsAction = Rc<dyn Fn(&Rc<Ui>, bool)>;
+
 pub(super) struct SettingsPanel {
     save: gtk::Button,
     stack: gtk::Stack,
@@ -17,7 +19,14 @@ impl SettingsPanel {
             return;
         }
         let after = ui.pending_leave.take();
-        let (next, login) = (self.read)();
+        let (current, login) = (self.read)();
+        let saved = ui.service.snapshot().settings;
+        let previous = self.baseline.borrow().0.clone();
+        let next = model::Settings {
+            active_subscription: saved.active_subscription,
+            routing_mode: saved.routing_mode,
+            ..current
+        };
         if let Err(error) = next.validate() {
             ui.pending_leave.replace(after);
             ui.error("设置无效", error);
@@ -30,16 +39,14 @@ impl SettingsPanel {
             ui.error("设置无效", "测速地址须为 HTTP 或 HTTPS 地址");
             return;
         }
-        self.saving.set(true);
-        self.stack.set_sensitive(false);
-        self.tabs.set_sensitive(false);
+        self.busy(true);
         let weak = Rc::downgrade(self);
         ui.button_task(
             &self.save,
             "保存中…",
             move |service| {
                 service
-                    .apply_settings(next)
+                    .apply_settings_form(previous.clone(), next)
                     .and_then(|_| platform::set_autostart(login))
             },
             move |ui, result| {
@@ -60,6 +67,12 @@ impl SettingsPanel {
                             .replace((ui.service.snapshot().settings, login));
                         ui.notify("设置已保存");
                         if let Some(after) = after {
+                            // Rebuilding a same-page form clears the global
+                            // pending callback, so continue this captured action
+                            // only after the rebuild has finished.
+                            if ui.page.get() == Page::Settings {
+                                ui.refresh(Page::Settings);
+                            }
                             after();
                         } else {
                             ui.refresh(Page::Settings);
@@ -93,9 +106,9 @@ impl SettingsPanel {
             return true;
         }
         ui.pending_leave.replace(Some(leave));
-        let dialog = adw::AlertDialog::new(
-            Some("保存设置更改？"),
-            Some("当前设置尚未保存。保存后离开，或放弃本次修改。"),
+        let dialog = alert_dialog(
+            "保存设置更改？",
+            "当前设置尚未保存。保存后离开，或放弃本次修改。",
         );
         dialog.add_response("cancel", "继续编辑");
         dialog.add_response("discard", "放弃更改");
@@ -106,22 +119,28 @@ impl SettingsPanel {
         dialog.set_close_response("cancel");
         let weak = Rc::downgrade(self);
         let weak_ui = Rc::downgrade(ui);
-        dialog.connect_response(None, move |_: &adw::AlertDialog, response| {
+        dialog.connect_response(None, move |dialog, response| {
             let (Some(panel), Some(ui)) = (weak.upgrade(), weak_ui.upgrade()) else {
                 return;
             };
-            ui.settings_prompt.take();
+            // Take the action before closing: `force_close` may synchronously
+            // emit `closed`, whose dismissal path clears obsolete callbacks.
+            let after = ui.pending_leave.take();
+            ui.dismiss_settings_prompt(dialog);
             match response {
                 "discard" => {
                     let settings = panel.saved_settings();
                     ui.apply_font_size(settings.font_size, settings.crisp_text);
                     apply_theme(&settings.theme);
                     panel.is_dirty.set(false);
-                    if let Some(after) = ui.pending_leave.take() {
+                    if let Some(after) = after {
                         after();
                     }
                 }
                 "save" => {
+                    // Closing consumes the navigation guard; hand the action
+                    // to `save`, which owns it until persistence succeeds.
+                    ui.pending_leave.replace(after);
                     panel.save(&ui);
                 }
                 _ => {
@@ -129,7 +148,6 @@ impl SettingsPanel {
                 }
             }
         });
-        dialog.present(Some(&ui.window));
         ui.settings_prompt.replace(Some(dialog.clone()));
         let weak_ui = Rc::downgrade(ui);
         dialog.connect_closed(move |dialog| {
@@ -141,9 +159,12 @@ impl SettingsPanel {
                     .is_some_and(|current| current == dialog)
             {
                 ui.settings_prompt.take();
-                ui.pending_leave.take();
+                if ui.page.get() == Page::Settings {
+                    ui.pending_leave.take();
+                }
             }
         });
+        dialog.present(Some(&ui.window));
         false
     }
     pub(super) fn smoke_has_prompt(ui: &Rc<Ui>) -> bool {
@@ -157,6 +178,84 @@ impl SettingsPanel {
 
     pub(super) fn saved_settings(&self) -> model::Settings {
         self.baseline.borrow().0.clone()
+    }
+
+    fn busy(&self, active: bool) {
+        self.saving.set(active);
+        self.stack.set_sensitive(!active);
+        self.tabs.set_sensitive(!active);
+        self.save.set_sensitive(!active && self.is_dirty.get());
+    }
+
+    fn request_save(ui: &Rc<Ui>, action: &str, on_ready: SettingsAction) {
+        let panel = ui
+            .settings_panel
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("settings controller");
+        if panel.saving.get() || ui.settings_prompt.borrow().is_some() {
+            return;
+        }
+        let login = panel.baseline.borrow().1;
+        if !panel.is_dirty.get() {
+            on_ready(ui, login);
+            return;
+        }
+        let prompt = alert_dialog(
+            "有未保存的更改",
+            &format!("保存当前设置后{action}，或放弃未保存的修改。"),
+        );
+        prompt.add_response("cancel", "取消");
+        prompt.add_response("discard", "放弃并继续");
+        prompt.add_response("save", "保存并继续");
+        prompt.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        prompt.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+        prompt.set_default_response(Some("save"));
+        prompt.set_close_response("cancel");
+        let weak_ui = Rc::downgrade(ui);
+        let weak_panel = Rc::downgrade(&panel);
+        prompt.connect_response(None, move |prompt, response| {
+            let (Some(ui), Some(panel)) = (weak_ui.upgrade(), weak_panel.upgrade()) else {
+                return;
+            };
+            ui.dismiss_settings_prompt(prompt);
+            match response {
+                "discard" => {
+                    let saved = panel.saved_settings();
+                    let login = panel.baseline.borrow().1;
+                    ui.apply_font_size(saved.font_size, saved.crisp_text);
+                    apply_theme(&saved.theme);
+                    ui.refresh(Page::Settings);
+                    on_ready(&ui, login);
+                }
+                "save" => {
+                    let weak_ui = Rc::downgrade(&ui);
+                    let on_ready = on_ready.clone();
+                    ui.pending_leave.replace(Some(Rc::new(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            on_ready(&ui, login);
+                        }
+                    })));
+                    panel.save(&ui);
+                }
+                _ => {}
+            }
+        });
+        let weak_ui = Rc::downgrade(ui);
+        prompt.connect_closed(move |dialog| {
+            if let Some(ui) = weak_ui.upgrade()
+                && ui
+                    .settings_prompt
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| current == dialog)
+            {
+                ui.settings_prompt.take();
+            }
+        });
+        ui.settings_prompt.replace(Some(prompt.clone()));
+        prompt.present(Some(&ui.window));
     }
 }
 
@@ -282,9 +381,22 @@ impl Ui {
         let sniff = switch_row("流量嗅探", "", settings.sniff);
         routing.add(&sniff);
         let dns = group("DNS");
-        let hijack = switch_row("DNS 劫持", "", settings.dns_hijack);
+        dns.set_description(Some(
+            "支持 udp://、tcp://、tls://、https:// 和 quic://；远程 DNS 经所选节点查询。",
+        ));
+        let direct_dns = LabeledEntry::new("直连 DNS", &settings.direct_dns);
+        direct_dns.root.set_tooltip_text(Some(
+            "例如 udp://223.5.5.5 或 https://dns.alidns.com/dns-query",
+        ));
+        dns.add(&direct_dns.root);
+        let remote_dns = LabeledEntry::new("远程 DNS", &settings.remote_dns);
+        remote_dns
+            .root
+            .set_tooltip_text(Some("远程 DNS 经代理查询；域名型服务器使用直连 DNS 解析"));
+        dns.add(&remote_dns.root);
+        let hijack = switch_row("DNS 劫持", "拦截局域网 DNS 查询", settings.dns_hijack);
         dns.add(&hijack);
-        let cache = switch_row("DNS 缓存", "", settings.dns_cache);
+        let cache = switch_row("DNS 缓存", "缓存域名解析结果", settings.dns_cache);
         dns.add(&cache);
         network_page.append(&routing);
         network_page.append(&dns);
@@ -316,33 +428,85 @@ impl Ui {
             widget.set_sensitive(settings.tun_enabled);
             tun.connect_active_notify(move |row| widget.set_sensitive(row.is_active()));
         }
-        let permissions = adw::ActionRow::builder().title("网络权限").build();
+        let permissions = adw::ActionRow::builder()
+            .title("网络权限")
+            .subtitle("读取中…")
+            .build();
         let authorize = gtk::Button::with_label("授权");
         authorize.set_valign(gtk::Align::Center);
         authorize.set_tooltip_text(Some("为 sing-box 内核授予创建虚拟网卡所需的权限"));
         permissions.add_suffix(&authorize);
+        tun_group.add(&permissions);
+        tun_page.append(&tun_group);
+        let refresh_permissions = {
+            let permissions = permissions.clone();
+            let authorize = authorize.clone();
+            move |ui: &Rc<Ui>| {
+                let (tx, rx) = mpsc::channel();
+                let service = ui.service.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(service.tun_available());
+                });
+                let permissions = permissions.downgrade();
+                let authorize = authorize.downgrade();
+                glib::timeout_add_local(Duration::from_millis(100), move || {
+                    let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade())
+                    else {
+                        return glib::ControlFlow::Break;
+                    };
+                    match rx.try_recv() {
+                        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Ok(Ok(true)) => {
+                            row.set_subtitle("已授权，可创建虚拟网卡");
+                            button.set_sensitive(false);
+                            button.set_label("已授权");
+                            glib::ControlFlow::Break
+                        }
+                        Ok(Ok(false)) => {
+                            row.set_subtitle("未授权；TUN 需要网络管理权限");
+                            button.set_sensitive(true);
+                            button.set_label("授权");
+                            glib::ControlFlow::Break
+                        }
+                        Ok(Err(error)) => {
+                            row.set_subtitle("无法读取权限，请先选择有效内核");
+                            row.set_tooltip_text(Some(&format!("{error:#}")));
+                            button.set_sensitive(true);
+                            glib::ControlFlow::Break
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            row.set_subtitle("权限检查未完成，请重新打开设置");
+                            button.set_sensitive(true);
+                            glib::ControlFlow::Break
+                        }
+                    }
+                });
+            }
+        };
+        refresh_permissions(self);
+        let refresh_permissions = Rc::new(refresh_permissions);
         let weak = Rc::downgrade(self);
         authorize.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
                 button.set_sensitive(false);
                 let button = button.downgrade();
+                let refresh = refresh_permissions.clone();
                 ui.task(
                     "授权",
                     |s| Ok(s.authorize_tun()),
                     move |ui, result| {
-                        if let Some(button) = button.upgrade() {
-                            button.set_sensitive(true);
-                        }
                         match result {
                             Ok(()) => ui.notify("已授权"),
                             Err(e) => ui.error("授权失败", format!("{e:#}")),
                         }
+                        if let Some(button) = button.upgrade() {
+                            button.set_label("检查中…");
+                        }
+                        refresh(ui);
                     },
                 );
             }
         });
-        tun_group.add(&permissions);
-        tun_page.append(&tun_group);
 
         self.core_panel(&core_page);
         let core = group("内核设置");
@@ -418,7 +582,268 @@ impl Ui {
         );
         general_page.append(&data);
         let weak = Rc::downgrade(self);
-        let saved = self.service.snapshot().settings;
+        let reset = adw::ActionRow::builder()
+            .title("恢复默认设置")
+            .subtitle("保留订阅、节点和规则，仅重置设置")
+            .build();
+        let reset_button = gtk::Button::with_label("恢复默认");
+        reset_button.add_css_class("compact-action");
+        reset_button.set_valign(gtk::Align::Center);
+        reset.add_suffix(&reset_button);
+        data.add(&reset);
+        reset_button.connect_clicked(move |_| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if ui.settings_panel.borrow().is_none() {
+                return;
+            }
+            let ready = Rc::new(move |ui: &Rc<Ui>, login: bool| {
+                let dialog = alert_dialog(
+                    "恢复默认设置？",
+                    "仅重置外观、网络、虚拟网卡和内核设置，不删除任何订阅或规则。",
+                );
+                dialog.add_response("cancel", "取消");
+                dialog.add_response("reset", "恢复默认");
+                dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+                dialog.set_close_response("cancel");
+                let weak = Rc::downgrade(ui);
+                dialog.connect_response(None, move |dialog, response| {
+                    let Some(ui) = weak.upgrade() else {
+                        return;
+                    };
+                    ui.dismiss_settings_prompt(dialog);
+                    if response != "reset" {
+                        return;
+                    }
+                    let saved = ui.service.snapshot().settings;
+                    let settings = model::Settings {
+                        active_subscription: saved.active_subscription,
+                        routing_mode: saved.routing_mode,
+                        width: saved.width,
+                        height: saved.height,
+                        ..model::Settings::default()
+                    };
+                    let Some(panel) = ui.settings_panel.borrow().as_ref().cloned() else {
+                        return;
+                    };
+                    let previous = panel.saved_settings();
+                    ui.apply_font_size(settings.font_size, settings.crisp_text);
+                    apply_theme(&settings.theme);
+                    panel.busy(true);
+                    ui.button_task(
+                        &panel.save,
+                        "恢复中…",
+                        move |service| {
+                            service
+                                .reset_settings(previous)
+                                .and_then(|_| platform::set_autostart(login))
+                        },
+                        |ui, result| match result {
+                            Ok(()) => {
+                                ui.notify("已恢复默认设置");
+                                ui.refresh(Page::Settings);
+                            }
+                            Err(error) => {
+                                let saved = ui.service.snapshot().settings;
+                                ui.apply_font_size(saved.font_size, saved.crisp_text);
+                                apply_theme(&saved.theme);
+                                ui.error("恢复默认失败", format!("{error:#}"));
+                                if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                                    panel.busy(false);
+                                    panel.update_dirty();
+                                }
+                            }
+                        },
+                    );
+                });
+                let weak_ui = Rc::downgrade(ui);
+                dialog.connect_closed(move |dialog| {
+                    if let Some(ui) = weak_ui.upgrade()
+                        && ui
+                            .settings_prompt
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|current| current == dialog)
+                    {
+                        ui.settings_prompt.take();
+                    }
+                });
+                ui.settings_prompt.replace(Some(dialog.clone()));
+                dialog.present(Some(&ui.window));
+            });
+            SettingsPanel::request_save(&ui, "恢复默认设置", ready);
+        });
+        let backup_group = group("数据管理");
+        backup_group.set_description(Some(
+            "备份包含订阅、节点、规则和设置；恢复保留现有资源并添加备份副本。",
+        ));
+        let export_row = adw::ActionRow::builder()
+            .title("导出备份")
+            .subtitle("包含明文节点凭据，请妥善保管备份文件")
+            .build();
+        let export = gtk::Button::with_label("导出");
+        export.add_css_class("compact-action");
+        export.set_valign(gtk::Align::Center);
+        export_row.add_suffix(&export);
+        backup_group.add(&export_row);
+        let import_row = adw::ActionRow::builder()
+            .title("合并恢复备份")
+            .subtitle("添加订阅和规则副本，并按备份恢复设置")
+            .build();
+        let restore = gtk::Button::with_label("选择文件");
+        restore.add_css_class("compact-action");
+        restore.set_valign(gtk::Align::Center);
+        import_row.add_suffix(&restore);
+        backup_group.add(&import_row);
+        general_page.append(&backup_group);
+        let weak = Rc::downgrade(self);
+        export.connect_clicked(move |button| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let button = button.clone();
+            let ready = Rc::new(move |ui: &Rc<Ui>, _: bool| {
+                let button = button.clone();
+                let finish = Rc::new(|ui: &Rc<Ui>, result: Result<()>| {
+                    if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                        panel.busy(false);
+                        panel.update_dirty();
+                    }
+                    match result {
+                        Ok(()) => ui.notify("备份已导出"),
+                        Err(error) => ui.error("导出备份失败", format!("{error:#}")),
+                    }
+                }); // Weston has no desktop file portal. The explicit smoke-test
+                // directory exercises the real export without needing one.
+                if let Some(dir) = ui.smoke_dir.borrow().clone() {
+                    let path = dir.join("smoke-backup.json");
+                    ui.button_task(
+                        &button,
+                        "导出中…",
+                        move |service| service.export_backup(&path),
+                        move |ui, result| finish(ui, result),
+                    );
+                    return;
+                }
+                let dialog = gtk::FileDialog::builder()
+                    .title("导出 AeroBox 备份")
+                    .initial_name("AeroBox-backup.json")
+                    .build();
+                let weak = Rc::downgrade(ui);
+                let finish = finish.clone();
+                dialog.save(Some(&ui.window), None::<&gio::Cancellable>, move |result| {
+                    let (Ok(file), Some(ui)) = (result, weak.upgrade()) else {
+                        return;
+                    };
+                    let Some(path) = file.path() else {
+                        return;
+                    };
+                    if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                        panel.busy(true);
+                    }
+                    ui.button_task(
+                        &button,
+                        "导出中…",
+                        move |service| service.export_backup(&path),
+                        move |ui, result| finish(ui, result),
+                    );
+                });
+            });
+            SettingsPanel::request_save(&ui, "导出备份", ready);
+        });
+        let weak = Rc::downgrade(self);
+        restore.connect_clicked(move |button| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let button = button.clone();
+            let restore_file = Rc::new(move |ui: &Rc<Ui>, path: PathBuf, login: bool| {
+                let button = button.clone();
+                if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                    panel.busy(true);
+                }
+                ui.button_task(
+                    &button,
+                    "恢复中…",
+                    move |service| {
+                        service
+                            .restore_backup(&path)
+                            .and_then(|counts| platform::set_autostart(login).map(|()| counts))
+                    },
+                    |ui, result| {
+                        if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                            panel.busy(false);
+                            panel.update_dirty();
+                        }
+                        match result {
+                            Ok((subscriptions, rules)) => {
+                                ui.notify(&format!("已恢复 {subscriptions} 个订阅、{rules} 个规则集"));
+                                let settings = ui.service.snapshot().settings;
+                                ui.apply_font_size(settings.font_size, settings.crisp_text);
+                                apply_theme(&settings.theme);
+                                ui.refresh(Page::Settings);
+                            }
+                            Err(error) => ui.error("恢复备份失败", format!("{error:#}")),
+                        }
+                    },
+                );
+            });
+            let ready = Rc::new(move |ui: &Rc<Ui>, login: bool| {
+                let dialog = alert_dialog(
+                    "合并恢复备份？",
+                    "保留现有订阅和规则并添加备份副本，当前设置将被备份替换。运行中的连接会先校验新配置，失败则保留原连接。",
+                );
+                dialog.add_response("cancel", "取消");
+                dialog.add_response("restore", "选择备份");
+                dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
+                dialog.set_close_response("cancel");
+                let weak = Rc::downgrade(ui);
+                let restore_file = restore_file.clone();
+                dialog.connect_response(None, move |dialog, response| {
+                    let Some(ui) = weak.upgrade() else {
+                        return;
+                    };
+                    ui.dismiss_settings_prompt(dialog);
+                    if response != "restore" {
+                        return;
+                    }
+                    if let Some(dir) = ui.smoke_dir.borrow().clone() {
+                        restore_file(&ui, dir.join("smoke-backup.json"), login);
+                        return;
+                    }
+                    let chooser = gtk::FileDialog::builder().title("选择 AeroBox 备份").build();
+                    let weak = Rc::downgrade(&ui);
+                    let restore_file = restore_file.clone();
+                    chooser.open(Some(&ui.window), None::<&gio::Cancellable>, move |result| {
+                        let (Ok(file), Some(ui)) = (result, weak.upgrade()) else {
+                            return;
+                        };
+                        let Some(path) = file.path() else {
+                            return;
+                        };
+                        restore_file(&ui, path, login);
+                    });
+                });
+                let weak_ui = Rc::downgrade(ui);
+                dialog.connect_closed(move |dialog| {
+                    if let Some(ui) = weak_ui.upgrade()
+                        && ui
+                            .settings_prompt
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|current| current == dialog)
+                    {
+                        ui.settings_prompt.take();
+                    }
+                });
+                ui.settings_prompt.replace(Some(dialog.clone()));
+                dialog.present(Some(&ui.window));
+            });
+            SettingsPanel::request_save(&ui, "合并恢复备份", ready);
+        });
+        let weak = Rc::downgrade(self);
+        let saved = settings.clone();
         let read = Rc::new(move || {
             let next = model::Settings {
                 font_size: model::FONT_SIZE_MIN + font_size.selected(),
@@ -441,6 +866,8 @@ impl Ui {
                 sniff: sniff.is_active(),
                 dns_hijack: hijack.is_active(),
                 dns_cache: cache.is_active(),
+                direct_dns: direct_dns.text().trim().into(),
+                remote_dns: remote_dns.text().trim().into(),
                 auto_detect_ip: detect_ip.is_active(),
                 hardware_acceleration: acceleration.is_active(),
                 update_subscriptions_on_start: update_subs.is_active(),
@@ -549,6 +976,172 @@ fn combo(title: &str, choices: &[&str], selected: u32) -> adw::ComboRow {
         .build()
 }
 
+pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
+    use anyhow::ensure;
+    fn action(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
+        let row = descendants(&ui.body)
+            .iter()
+            .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
+            .find(|row| row.title().as_str() == title)
+            .with_context(|| format!("缺少设置项 {title}"))?;
+        descendants(&row)
+            .iter()
+            .filter_map(|widget| widget.clone().downcast::<gtk::Button>().ok())
+            .next()
+            .with_context(|| format!("设置项 {title} 没有操作按钮"))
+    }
+    match step {
+        0 => {
+            smoke_edit(ui)?;
+            let before = ui.service.snapshot().settings;
+            ensure!(
+                before.font_size != model::FONT_SIZE_MAX,
+                "测试基线字体不应已是最大值"
+            );
+            action(ui, "导出备份")?.emit_clicked();
+            let prompt = ui
+                .settings_prompt
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("有未保存修改时导出没有提示")?;
+            prompt.emit_by_name::<()>("response", &[&"save"]);
+            ensure!(ui.jobs.get() > 0, "保存并继续没有启动保存");
+        }
+        1 => {
+            ensure!(ui.jobs.get() == 0, "保存并导出未完成");
+            ensure!(
+                ui.settings_prompt.borrow().is_none(),
+                "保存后仍有未保存提示"
+            );
+            let settings = ui.service.snapshot().settings;
+            ensure!(
+                settings.font_size == model::FONT_SIZE_MAX
+                    && settings.direct_dns == "tcp://223.5.5.5:5353"
+                    && settings.remote_dns == "tls://one.one.one.one",
+                "保存并导出覆盖了其他设置"
+            );
+            let path = ui
+                .smoke_dir
+                .borrow()
+                .as_ref()
+                .context("缺少备份自检目录")?
+                .join("smoke-backup.json");
+            let backup: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            ensure!(
+                backup["format"] == "aerobox-linux-backup"
+                    && backup["version"] == 1
+                    && backup["settings"]["remote_dns"] == settings.remote_dns
+                    && backup["subscriptions"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty()),
+                "保存并导出没有生成有效备份"
+            );
+            ensure!(
+                backup["format"] != "aerobox-android-backup",
+                "不应读取旧项目备份"
+            );
+        }
+        2 => {
+            let before = ui.service.snapshot();
+            action(ui, "恢复默认设置")?.emit_clicked();
+            let prompt = ui
+                .settings_prompt
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("恢复默认设置没有确认提示")?;
+            prompt.emit_by_name::<()>("response", &[&"reset"]);
+            ensure!(before.subscriptions.len() == ui.service.snapshot().subscriptions.len());
+        }
+        3 => {
+            ensure!(ui.jobs.get() == 0, "恢复默认设置尚未完成");
+            ensure!(
+                ui.settings_prompt.borrow().is_none(),
+                "恢复默认确认框未关闭"
+            );
+            let after = ui.service.snapshot();
+            let defaults = model::Settings::default();
+            ensure!(
+                after.settings.font_size == defaults.font_size
+                    && after.settings.direct_dns == defaults.direct_dns
+                    && after.settings.remote_dns == defaults.remote_dns,
+                "恢复默认没有持久化"
+            );
+            ensure!(
+                !after.settings.active_subscription.is_empty(),
+                "恢复默认清空了当前订阅"
+            );
+        }
+        4 => {
+            action(ui, "合并恢复备份")?.emit_clicked();
+            let prompt = ui
+                .settings_prompt
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("合并恢复没有确认提示")?;
+            prompt.emit_by_name::<()>("response", &[&"restore"]);
+            ensure!(ui.jobs.get() > 0, "选择备份后没有执行合并恢复");
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_scroll_dns(ui: &Rc<Ui>) -> Result<bool> {
+    let remote = descendants(&ui.body)
+        .iter()
+        .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("远程 DNS"))
+        .context("缺少 DNS 输入")?;
+    if remote.height() <= 10 {
+        return Ok(false);
+    }
+    let adjustment = ui.scroll.vadjustment();
+    adjustment.set_value(adjustment.upper());
+    Ok(true)
+}
+
+pub(super) fn smoke_network(ui: &Rc<Ui>) -> Result<()> {
+    let widgets = descendants(&ui.body);
+    for (title, expected) in [
+        ("直连 DNS", "tcp://223.5.5.5:5353"),
+        ("远程 DNS", "tls://one.one.one.one"),
+    ] {
+        let entry = widgets
+            .iter()
+            .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
+            .find(|entry| entry.placeholder_text().as_deref() == Some(title))
+            .with_context(|| format!("缺少 DNS 输入 {title}"))?;
+        anyhow::ensure!(WidgetExt::is_visible(&entry), "{title} 不可见");
+        anyhow::ensure!(entry.text() == expected, "{title} 未恢复备份值");
+        let bounds = entry
+            .compute_bounds(&ui.scroll)
+            .with_context(|| format!("{title} 没有位置"))?;
+        anyhow::ensure!(
+            bounds.y() >= 0.0
+                && f64::from(bounds.y()) + f64::from(bounds.height()) <= ui.scroll.height() as f64,
+            "{title} 不在可见区域内"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
+    let row = descendants(&ui.body)
+        .iter()
+        .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
+        .find(|row| row.title().as_str() == "网络权限")
+        .context("缺少网络权限行")?;
+    anyhow::ensure!(row.is_visible(), "网络权限行不可见");
+    anyhow::ensure!(
+        matches!(row.subtitle().as_deref(), Some(text) if text != "读取中…" && !text.is_empty()),
+        "权限状态仍停留在读取中"
+    );
+    Ok(())
+}
+
 /// Height of the first settings row, used to prove that a font change moves
 /// layout and not just glyph size.
 pub(super) fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
@@ -560,6 +1153,10 @@ pub(super) fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
             .cloned()
             .context("离开未保存设置时没有确认提示")?;
         anyhow::ensure!(ui.page.get() == Page::Settings, "确认前已离开设置页");
+        anyhow::ensure!(
+            ui.pending_leave.borrow().is_some(),
+            "离开确认没有保存目标页面"
+        );
         prompt.emit_by_name::<()>("response", &[&response]);
         return Ok(());
     }
@@ -637,7 +1234,14 @@ pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     let widgets = descendants(&ui.body);
     for (title, selected) in [
         ("字体大小", saved.font_size - model::FONT_SIZE_MIN),
-        ("外观", 1),
+        (
+            "外观",
+            match saved.theme.as_str() {
+                "light" => 1,
+                "dark" => 2,
+                _ => 0,
+            },
+        ),
     ] {
         let actual = widgets
             .iter()
@@ -693,7 +1297,9 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.tun_enabled
                 && settings.hardware_acceleration
                 && settings.tun_stack == "gvisor"
-                && settings.tun_mtu == 1400,
+                && settings.tun_mtu == 1400
+                && settings.direct_dns == "tcp://223.5.5.5:5353"
+                && settings.remote_dns == "tls://one.one.one.one",
             "设置控件没有持久化"
         );
         ensure!(!ui.service.status().running, "设置测试意外启动了内核");
@@ -744,6 +1350,17 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .find(|row| row.title() == "字体大小")
         .context("缺少字体大小控件")?
         .set_selected(model::FONT_SIZE_MAX - model::FONT_SIZE_MIN);
+    for (title, text) in [
+        ("直连 DNS", "tcp://223.5.5.5:5353"),
+        ("远程 DNS", "tls://one.one.one.one"),
+    ] {
+        widgets
+            .iter()
+            .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
+            .find(|entry| entry.placeholder_text().as_deref() == Some(title))
+            .with_context(|| format!("缺少 DNS 输入 {title}"))?
+            .set_text(text);
+    }
     save.emit_clicked();
     ensure!(!save.is_sensitive(), "保存期间没有禁用按钮");
     ensure!(

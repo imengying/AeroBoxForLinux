@@ -54,6 +54,8 @@ pub struct Settings {
     pub sniff: bool,
     pub dns_hijack: bool,
     pub dns_cache: bool,
+    pub direct_dns: String,
+    pub remote_dns: String,
     pub bypass_lan: bool,
     pub auto_detect_ip: bool,
     pub update_subscriptions_on_start: bool,
@@ -87,6 +89,8 @@ impl Default for Settings {
             sniff: true,
             dns_hijack: true,
             dns_cache: true,
+            direct_dns: "udp://223.5.5.5".into(),
+            remote_dns: "https://cloudflare-dns.com/dns-query".into(),
             bypass_lan: true,
             auto_detect_ip: true,
             update_subscriptions_on_start: false,
@@ -132,6 +136,7 @@ impl Settings {
             ),
             "无效的日志级别"
         );
+        crate::config::validate_dns_settings(self)?;
         Ok(())
     }
 }
@@ -398,8 +403,7 @@ impl State {
         profile.config["experimental"]["clash_api"]["external_controller"] =
             json!(format!("127.0.0.1:{}", self.settings.api_port));
         profile.config["experimental"]["clash_api"]["secret"] = json!(sub.id);
-        profile.config["dns"]["servers"].as_array_mut().unwrap().push(json!({"type":"https","tag":"dns-remote","server":"1.1.1.1","path":"/dns-query","detour":"proxy"}));
-        profile.config["dns"]["final"] = json!("dns-remote");
+        profile.config["dns"]["final"] = json!("aerobox-dns-proxy");
         let mut routes = vec![];
         let mut dns = vec![];
         // Reject policy precedes domestic direct rules. Mode overrides are
@@ -414,7 +418,7 @@ impl State {
             });
             if matches!(rule.id.as_str(), BUILTIN_DOMESTIC_ID | BUILTIN_ADS_ID) {
                 dns.push(if rule.action == "reject" { json!({"rule_set":rule.name,"action":"reject"}) } else {
-                    json!({"rule_set":rule.name,"action":"route","server":if rule.action == "direct" {"dns-local"} else {"dns-remote"}})
+                    json!({"rule_set":rule.name,"action":"route","server":if rule.action == "direct" {"aerobox-dns-direct"} else {"aerobox-dns-proxy"}})
                 });
             }
         }

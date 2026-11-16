@@ -32,6 +32,7 @@ export XDG_CACHE_HOME="$test_dir/cache"
 export WAYLAND_DISPLAY=aerobox-for-linux-test
 export GDK_BACKEND=wayland
 export GSK_RENDERER=cairo
+export GTK_ANIMATIONS=0
 export G_DEBUG=fatal-criticals
 export GTK_A11Y=none
 # Opt-in regression check for desktops without SVG/Pixbuf loader packages.

@@ -33,6 +33,125 @@ fn unique_tag(items: &[Value], base: &str) -> String {
     tag
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsServerSpec {
+    pub kind: String,
+    pub server: String,
+    pub port: u16,
+    pub path: Option<String>,
+}
+
+/// Parse the same UDP/TCP/TLS/HTTPS/QUIC endpoint forms as the Android app.
+/// A bootstrap resolver is added to hostname-based endpoints by the caller.
+pub fn parse_dns_server(value: &str) -> Result<DnsServerSpec> {
+    use std::net::IpAddr;
+    let value = value.trim();
+    ensure!(!value.is_empty(), "DNS 地址不能为空");
+    let (kind, raw) = value
+        .split_once("://")
+        .map_or(("udp", value), |(scheme, raw)| (scheme, raw));
+    ensure!(
+        matches!(kind, "udp" | "tcp" | "tls" | "https" | "quic"),
+        "DNS 仅支持 UDP、TCP、TLS、HTTPS 或 QUIC"
+    );
+    let default_port = match kind {
+        "https" => 443,
+        "tls" | "quic" => 853,
+        _ => 53,
+    };
+    let (server, port, path) = if kind == "https" {
+        let url = url::Url::parse(value).context("HTTPS DNS 地址无效")?;
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "HTTPS DNS 不能包含凭据、查询参数或片段"
+        );
+        (
+            url.host_str().context("DNS 缺少主机名")?.to_owned(),
+            url.port().unwrap_or(default_port),
+            Some(if url.path().is_empty() {
+                "/dns-query".into()
+            } else {
+                url.path().into()
+            }),
+        )
+    } else {
+        ensure!(
+            !raw.contains(['/', '?', '#', '@']) && !raw.chars().any(char::is_whitespace),
+            "DNS 地址只能包含主机名和可选端口"
+        );
+        // A bracketed IP may include a port too. Handle it before the generic
+        // host parser so IPv6's colons cannot be mistaken for a port separator.
+        if let Ok(address) = raw.trim_matches(['[', ']']).parse::<std::net::SocketAddr>() {
+            (address.ip().to_string(), address.port(), None)
+        } else if let Ok(ip) = raw.trim_matches(['[', ']']).parse::<IpAddr>() {
+            (ip.to_string(), default_port, None)
+        } else {
+            let url = url::Url::parse(&format!("{kind}://{raw}")).context("DNS 地址无效")?;
+            ensure!(
+                url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path().is_empty()
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "DNS 地址无效"
+            );
+            (
+                url.host_str().context("DNS 缺少主机名")?.to_owned(),
+                url.port().unwrap_or(default_port),
+                None,
+            )
+        }
+    };
+    let server = server.trim_matches(['[', ']']);
+    ensure!(
+        server.parse::<IpAddr>().is_ok()
+            || (server.len() <= 253
+                && server.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                })),
+        "DNS 主机名或 IP 地址无效"
+    );
+    Ok(DnsServerSpec {
+        kind: kind.into(),
+        server: server.into(),
+        port,
+        path,
+    })
+}
+
+pub fn dns_server_json(tag: &str, address: &str, resolver: &str) -> Result<Value> {
+    use std::net::IpAddr;
+    let spec = parse_dns_server(address)?;
+    let mut server = json!({
+        "type": spec.kind,
+        "tag": tag,
+        "server": spec.server,
+        "server_port": spec.port,
+    });
+    if let Some(path) = spec.path {
+        server["path"] = json!(path);
+    }
+    if spec.server.parse::<IpAddr>().is_err() {
+        server["domain_resolver"] = json!({"server":resolver,"strategy":"prefer_ipv4"});
+    }
+    Ok(server)
+}
+
+pub fn validate_dns_settings(settings: &Settings) -> Result<()> {
+    parse_dns_server(&settings.direct_dns).context("直连 DNS 地址无效")?;
+    parse_dns_server(&settings.remote_dns).context("远程 DNS 地址无效")?;
+    Ok(())
+}
+
 /// Apply the app's network controls to a generated copy. The editable profile
 /// stays intact; unrelated inbound, outbound, DNS and route fields are preserved.
 pub fn apply_settings(config: &mut Value, settings: &Settings) -> Result<()> {
@@ -186,18 +305,18 @@ pub fn apply_profile_settings(
     }
     let servers = array(dns, "servers")?;
     let direct_dns = unique_tag(servers, DIRECT_DNS);
-    let mut direct_server = json!({"type":"udp","tag":direct_dns,"server":"223.5.5.5"});
+    let mut direct_server = dns_server_json(&direct_dns, &settings.direct_dns, "dns-local")?;
     if direct_has_options {
         direct_server["detour"] = json!(direct);
     }
     servers.push(direct_server);
     let proxy_dns = unique_tag(servers, PROXY_DNS);
-    let mut proxy_server =
-        json!({"type":"https","tag":proxy_dns,"server":"1.1.1.1","path":"/dns-query"});
+    let mut proxy_server = dns_server_json(&proxy_dns, &settings.remote_dns, &direct_dns)?;
     if proxy != direct || direct_has_options {
         proxy_server["detour"] = json!(proxy);
     }
     servers.push(proxy_server);
+    dns["final"] = json!(proxy_dns);
     let strategy = if settings.ipv6 {
         "prefer_ipv4"
     } else {
@@ -216,9 +335,6 @@ pub fn apply_profile_settings(
             .filter(|r| r.get("clash_mode").is_none()),
     );
     dns["rules"] = json!(dns_rules);
-    if dns["final"].as_str().is_none_or(str::is_empty) {
-        dns["final"] = json!(direct_dns);
-    }
 
     let route = object(config, "route")?;
     route["auto_detect_interface"] = json!(true);
@@ -369,5 +485,66 @@ mod tests {
             ..Settings::default()
         };
         assert!(apply_settings(&mut config, &settings).is_err());
+    }
+
+    #[test]
+    fn custom_dns_servers_preserve_protocols_bootstrap_and_routing() {
+        for address in [
+            "223.5.5.5",
+            "tcp://223.5.5.5:5353",
+            "tls://dns.alidns.com",
+            "https://dns.alidns.com/dns-query",
+            "quic://dns.adguard-dns.com",
+            "udp://[2400:3200::1]:53",
+        ] {
+            let spec = parse_dns_server(address).unwrap();
+            assert!(!spec.server.is_empty());
+        }
+        for invalid in [
+            "",
+            "http://1.1.1.1",
+            "https://user:password@1.1.1.1/dns-query",
+            "udp://example.com/path",
+            "udp://-invalid.example",
+        ] {
+            assert!(parse_dns_server(invalid).is_err(), "accepted {invalid}");
+        }
+        let settings = Settings {
+            direct_dns: "https://dns.alidns.com/dns-query".into(),
+            remote_dns: "tls://one.one.one.one".into(),
+            ..Settings::default()
+        };
+        let mut config = Profile::new("dns").config;
+        config["route"]["final"] = json!("proxy");
+        apply_settings(&mut config, &settings).unwrap();
+        let direct = config["dns"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["tag"] == "aerobox-dns-direct")
+            .unwrap()
+            .clone();
+        let remote = config["dns"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["tag"] == "aerobox-dns-proxy")
+            .unwrap()
+            .clone();
+        assert_eq!(direct["type"], "https");
+        assert_eq!(direct["domain_resolver"]["server"], "dns-local");
+        assert_eq!(remote["type"], "tls");
+        assert_eq!(remote["server_port"], 853);
+        assert_eq!(remote["domain_resolver"]["server"], "aerobox-dns-direct");
+        assert_eq!(remote["detour"], "proxy");
+        assert_eq!(config["dns"]["final"], "aerobox-dns-proxy");
+        assert!(
+            config["dns"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|rule| rule["clash_mode"] == "global"
+                    && rule["server"] == "aerobox-dns-proxy")
+        );
     }
 }
