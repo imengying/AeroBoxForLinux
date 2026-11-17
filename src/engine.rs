@@ -12,6 +12,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read, Write},
+    mem::DropGuard,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -1403,42 +1404,29 @@ impl Service {
                 );
             }
         }
-        let mut installed: Vec<PathBuf> = Vec::new();
+        let mut installed = DropGuard::new(Vec::<PathBuf>::new(), |paths| {
+            for path in paths {
+                let _ = fs::remove_file(path);
+            }
+        });
         for rule in &candidate.rulesets {
             if let Some(bytes) = files.get(&rule.id) {
                 let path = store.rule_path(rule);
-                let result = if path.exists() {
-                    Err(anyhow::anyhow!("规则集缓存已存在：{}", rule.name))
-                } else {
-                    crate::model::atomic_write(&path, bytes, 0o600)
-                        .with_context(|| format!("无法写入规则集「{}」", rule.name))
-                };
-                if let Err(error) = result {
-                    for path in installed {
-                        let _ = fs::remove_file(path);
-                    }
-                    return Err(error);
-                }
+                ensure!(!path.exists(), "规则集缓存已存在：{}", rule.name);
+                crate::model::atomic_write(&path, bytes, 0o600)
+                    .with_context(|| format!("无法写入规则集「{}」", rule.name))?;
                 installed.push(path);
             }
         }
         drop(store);
-        match self.commit_state(&before, candidate) {
-            Ok(()) => {
-                let counts = (
-                    self.snapshot().subscriptions.len() - before.subscriptions.len(),
-                    self.snapshot().rulesets.len() - before.rulesets.len(),
-                );
-                self.log("备份已合并恢复");
-                Ok(counts)
-            }
-            Err(error) => {
-                for path in installed {
-                    let _ = fs::remove_file(path);
-                }
-                Err(error)
-            }
-        }
+        self.commit_state(&before, candidate)?;
+        DropGuard::dismiss(installed);
+        let counts = (
+            self.snapshot().subscriptions.len() - before.subscriptions.len(),
+            self.snapshot().rulesets.len() - before.rulesets.len(),
+        );
+        self.log("备份已合并恢复");
+        Ok(counts)
     }
 
     pub fn apply_settings_form(&self, previous: Settings, settings: Settings) -> Result<()> {
@@ -2676,8 +2664,8 @@ pub fn run_command(mut cmd: Command, timeout: Duration) -> Result<String> {
         };
         thread::sleep(Duration::from_millis(20))
     };
-    let text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    let errors = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
+    let text = String::from_utf8_lossy_owned(out.join().unwrap_or_default());
+    let errors = String::from_utf8_lossy_owned(err.join().unwrap_or_default());
     ensure!(status.success(), "{text}{errors}");
     Ok(text)
 }

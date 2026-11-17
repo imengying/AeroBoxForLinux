@@ -277,6 +277,68 @@ fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() 
 }
 
 #[test]
+fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() {
+    let (_dir, target) = service();
+    let existing = RuleSet {
+        name: "原有规则".into(),
+        binary: true,
+        enabled: false,
+        ..Default::default()
+    };
+    let rules_dir = target.dir().join("rules");
+    fs::create_dir_all(&rules_dir).unwrap();
+    let existing_path = rules_dir.join(format!("{}.srs", existing.id));
+    fs::write(&existing_path, b"SRS existing cache").unwrap();
+    target
+        .update(|state| {
+            state.rulesets.push(existing);
+            Ok(())
+        })
+        .unwrap();
+    let before = target.snapshot();
+    let mut imported = state();
+    imported.rulesets = ["新增规则一", "新增规则二"]
+        .into_iter()
+        .map(|name| RuleSet {
+            name: name.into(),
+            binary: true,
+            enabled: false,
+            ..Default::default()
+        })
+        .collect();
+    let backup_path = target.dir().join("backup.json");
+    backup::export(&backup_path, &imported, |_| {
+        Some(b"SRS imported cache".to_vec())
+    })
+    .unwrap();
+
+    // Rule writes succeed, but the final atomic state replacement must fail.
+    // Using a directory also works when the tests run with root privileges.
+    let state_path = target.dir().join("state.json");
+    let saved_path = target.dir().join("state.saved");
+    let saved_bytes = fs::read(&state_path).unwrap();
+    fs::rename(&state_path, &saved_path).unwrap();
+    fs::create_dir(&state_path).unwrap();
+    let result = target.restore_backup(&backup_path);
+    fs::remove_dir(&state_path).unwrap();
+    fs::rename(&saved_path, &state_path).unwrap();
+
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::IsADirectory
+    );
+    assert_eq!(json_eq(&target.snapshot()), json_eq(&before));
+    assert_eq!(fs::read(&state_path).unwrap(), saved_bytes);
+    assert_eq!(fs::read(&existing_path).unwrap(), b"SRS existing cache");
+    let remaining = fs::read_dir(&rules_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, vec![existing_path]);
+}
+
+#[test]
 fn stale_settings_form_cannot_overwrite_newer_state() {
     let (_dir, service) = service();
     let previous = service.snapshot().settings;

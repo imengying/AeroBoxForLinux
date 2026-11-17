@@ -29,6 +29,9 @@ tar = "0.4.46"
 libc = "0.2.191"
 tempfile = "3.27.0"
 
+[lints.cargo]
+unused_dependencies = "deny"
+
 [profile.dev]
 debug = 0
 
