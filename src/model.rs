@@ -38,7 +38,6 @@ pub struct Settings {
     /// Base UI font size in points. Row heights and paddings derive from it,
     /// so text and layout scale together instead of only the glyphs.
     pub font_size: u32,
-    pub hardware_acceleration: bool,
     pub core_path: String,
     pub active_subscription: String,
     pub mixed_port: u16,
@@ -71,7 +70,6 @@ impl Default for Settings {
         Self {
             theme: "system".into(),
             font_size: 11,
-            hardware_acceleration: false,
             core_path: String::new(),
             active_subscription: String::new(),
             mixed_port: 2080,
@@ -675,18 +673,14 @@ mod tests {
         assert_eq!(state.schema, 2);
         assert!(state.settings.system_proxy);
         assert_eq!(state.settings.log_level, "error");
-        assert!(!state.settings.hardware_acceleration);
         assert!(state.current_profile().is_err());
         let value = serde_json::to_value(&state).unwrap();
         assert!(value.get("profiles").is_none());
         assert!(value["settings"].get("active_profile").is_none());
         for level in ["info", "debug", "warn", "error"] {
-            let saved: Settings = serde_json::from_value(
-                json!({"log_level":level,"hardware_acceleration":true,"system_proxy":false}),
-            )
-            .unwrap();
+            let saved: Settings =
+                serde_json::from_value(json!({"log_level":level,"system_proxy":false})).unwrap();
             assert_eq!(saved.log_level, level);
-            assert!(saved.hardware_acceleration);
             assert!(!saved.system_proxy);
         }
     }

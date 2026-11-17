@@ -342,9 +342,6 @@ impl Ui {
         appearance.add(&update_subs);
         let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
         appearance.add(&detect_ip);
-        let acceleration = switch_row("硬件加速", "重启应用后生效", settings.hardware_acceleration);
-        acceleration.set_tooltip_text(Some("开启后使用系统图形加速，可能增加内存占用"));
-        appearance.add(&acceleration);
         general_page.append(&appearance);
 
         let network = group("代理");
@@ -847,7 +844,6 @@ impl Ui {
                     direct_dns: direct_dns.text().trim().into(),
                     remote_dns: remote_dns.text().trim().into(),
                     auto_detect_ip: detect_ip.is_active(),
-                    hardware_acceleration: acceleration.is_active(),
                     update_subscriptions_on_start: update_subs.is_active(),
                     tun_enabled: tun.is_active(),
                     tun_stack: match stack.selected() {
@@ -1371,7 +1367,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.allow_lan
                 && !settings.dns_cache
                 && settings.tun_enabled
-                && settings.hardware_acceleration
                 && settings.tun_stack == "gvisor"
                 && settings.tun_mtu == 1400
                 && settings.direct_dns == "tcp://223.5.5.5:5353"
@@ -1395,7 +1390,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ("允许局域网访问", true),
         ("DNS 缓存", false),
         ("启用 TUN", true),
-        ("硬件加速", true),
     ] {
         let row = body
             .iter()
