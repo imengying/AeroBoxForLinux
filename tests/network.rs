@@ -116,7 +116,6 @@ fn service(dir: &Path, binary: &str) -> Arc<Service> {
             state.settings.ipv6 = false;
             state.settings.routing_mode = "global".into();
             state.settings.mixed_port = free_port();
-            state.settings.api_port = free_port();
             state.rulesets.clear();
             Ok(())
         })

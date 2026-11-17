@@ -28,6 +28,9 @@ pub fn pretty(value: &impl Serialize) -> String {
 pub const FONT_SIZE_MIN: u32 = 9;
 pub const FONT_SIZE_MAX: u32 = 18;
 
+pub const UPDATE_INTERVAL_DEFAULT_MINUTES: u32 = 1440;
+pub const UPDATE_INTERVAL_MAX_MINUTES: u32 = 10_080;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -35,12 +38,10 @@ pub struct Settings {
     /// Base UI font size in points. Row heights and paddings derive from it,
     /// so text and layout scale together instead of only the glyphs.
     pub font_size: u32,
-    pub crisp_text: bool,
     pub hardware_acceleration: bool,
     pub core_path: String,
     pub active_subscription: String,
     pub mixed_port: u16,
-    pub api_port: u16,
     pub auto_start: bool,
     pub auto_restart: bool,
     pub system_proxy: bool,
@@ -70,12 +71,10 @@ impl Default for Settings {
         Self {
             theme: "system".into(),
             font_size: 11,
-            crisp_text: true,
             hardware_acceleration: false,
             core_path: String::new(),
             active_subscription: String::new(),
             mixed_port: 2080,
-            api_port: 9090,
             auto_start: false,
             auto_restart: false,
             system_proxy: true,
@@ -97,18 +96,15 @@ impl Default for Settings {
             log_level: "error".into(),
             test_url: "https://www.gstatic.com/generate_204".into(),
             test_timeout: 5000,
-            width: 1180,
-            height: 800,
+            width: 1000,
+            height: 680,
         }
     }
 }
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.mixed_port > 0 && self.api_port > 0 && self.mixed_port != self.api_port,
-            "本地代理与控制端口须为不同的非零端口"
-        );
+        ensure!(self.mixed_port > 0, "本地代理端口须为非零端口");
         ensure!(
             (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
             "字体大小须在 {FONT_SIZE_MIN} 到 {FONT_SIZE_MAX} 之间"
@@ -189,13 +185,13 @@ impl Profile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Subscription {
     pub id: String,
     pub name: String,
     pub source: String,
     pub auto_update: bool,
-    pub update_interval_hours: u32,
+    pub update_interval_minutes: u32,
     pub nodes: Vec<Value>,
     pub selected_node: Option<String>,
     pub updated: u64,
@@ -211,7 +207,7 @@ impl Default for Subscription {
             name: "新订阅".into(),
             source: String::new(),
             auto_update: true,
-            update_interval_hours: 24,
+            update_interval_minutes: UPDATE_INTERVAL_DEFAULT_MINUTES,
             nodes: vec![],
             selected_node: None,
             updated: 0,
@@ -224,7 +220,7 @@ impl Default for Subscription {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RuleSet {
     pub id: String,
     pub name: String,
@@ -234,20 +230,20 @@ pub struct RuleSet {
     pub action: String,
     pub content: Value,
     pub updated: u64,
-    pub update_interval_hours: u32,
+    pub update_interval_minutes: u32,
 }
 impl Default for RuleSet {
     fn default() -> Self {
         Self {
             id: id(),
-            name: "新规则集".into(),
+            name: "新规则".into(),
             source: String::new(),
             binary: false,
             enabled: true,
             action: "direct".into(),
             content: json!({"version":3,"rules":[]}),
             updated: 0,
-            update_interval_hours: 24,
+            update_interval_minutes: UPDATE_INTERVAL_DEFAULT_MINUTES,
         }
     }
 }
@@ -324,7 +320,7 @@ pub fn add_builtin_resources(state: &mut State) -> Result<usize> {
         if !state.rulesets.iter().any(|r| r.id == rule.id) {
             ensure!(
                 !state.rulesets.iter().any(|r| r.name == rule.name),
-                "已有同名规则集：{}",
+                "已有同名规则：{}",
                 rule.name
             );
             state.rulesets.push(rule);
@@ -409,8 +405,7 @@ impl State {
             .map(|r| r.id.clone())
             .collect();
         profile.config["inbounds"][0]["listen_port"] = json!(self.settings.mixed_port);
-        profile.config["experimental"]["clash_api"]["external_controller"] =
-            json!(format!("127.0.0.1:{}", self.settings.api_port));
+        // The Clash API endpoint is private runtime state, selected by Service.
         profile.config["experimental"]["clash_api"]["secret"] = json!(sub.id);
         profile.config["dns"]["final"] = json!("aerobox-dns-proxy");
         let mut routes = vec![];
@@ -464,8 +459,8 @@ impl State {
         );
         for s in &self.subscriptions {
             ensure!(
-                (1..=168).contains(&s.update_interval_hours),
-                "订阅更新间隔必须在 1 到 168 小时之间"
+                (1..=UPDATE_INTERVAL_MAX_MINUTES).contains(&s.update_interval_minutes),
+                "订阅更新间隔必须在 1 到 10080 分钟之间"
             );
             validate_nodes(&s.nodes)?;
             ensure!(
@@ -477,20 +472,20 @@ impl State {
         }
         let mut rule_tags = HashSet::new();
         for rule in &self.rulesets {
-            ensure!(rule_tags.insert(&rule.name), "规则集名称重复");
+            ensure!(rule_tags.insert(&rule.name), "规则名称重复");
             ensure!(
                 matches!(rule.action.as_str(), "direct" | "proxy" | "reject"),
-                "规则集动作无效"
+                "规则动作无效"
             );
             ensure!(
-                (1..=168).contains(&rule.update_interval_hours),
-                "规则集更新间隔须在 1 到 168 小时之间"
+                (1..=UPDATE_INTERVAL_MAX_MINUTES).contains(&rule.update_interval_minutes),
+                "规则更新间隔须在 1 到 10080 分钟之间"
             );
             if rule.source.contains("://") {
-                let url = url::Url::parse(&rule.source).context("规则集地址无效")?;
+                let url = url::Url::parse(&rule.source).context("规则地址无效")?;
                 ensure!(
                     matches!(url.scheme(), "https" | "http") && url.host().is_some(),
-                    "规则集地址须为 HTTP 或 HTTPS"
+                    "规则地址须为 HTTP 或 HTTPS"
                 );
             }
         }
@@ -728,7 +723,7 @@ mod tests {
         assert!(
             store
                 .update(|s| {
-                    s.settings.mixed_port = s.settings.api_port;
+                    s.settings.mixed_port = 0;
                     Ok(())
                 })
                 .is_err()

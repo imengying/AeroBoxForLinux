@@ -20,7 +20,8 @@
 .nav-item { min-height: 3.18em; font-weight: normal; }
 /* Icons follow the discrete font setting, but use a slightly quieter visual
  * weight than the old, oversized navigation glyphs. */
-.brand-mark { -gtk-icon-size: 2.82em; }
+.brand-mark { -gtk-icon-size: 1.64em; }
+.header-brand .brand { font-size: 1em; font-weight: 700; letter-spacing: .01em; }
 .nav-icon { -gtk-icon-size: 1.45em; }
 .nav-list row:selected .nav-item { font-weight: 600; }
 
@@ -31,7 +32,7 @@
 /* One type scale for the whole app: page titles lead, card titles follow,
  * and body text remains the reference size. */
 .brand { font-size: 1.22em; font-weight: 700; letter-spacing: .01em; }
-.page-title { font-size: 1.12em; font-weight: 700; }
+.page-title { font-size: 1.06em; font-weight: 700; }
 .section-title, .resource-name { font-size: 1em; font-weight: 600; }
 .empty-title { font-size: 1.04em; font-weight: 600; }
 .small { font-size: 0.90em; }
@@ -40,6 +41,10 @@
 .metric-value { font-size: 1.30em; font-feature-settings: "tnum"; font-weight: 600; }
 .metric-icon { color: #6888b4; }
 .primary-action { border-radius: 9px; padding: 0.55em 1.18em; font-weight: 600; }
+/* Floating corner action: opaque surface with a soft shadow so it stays
+ * readable over scrolled content, matching the home start button. */
+.floating-save { border-radius: 12px; padding: 0.73em 1.45em; margin: 18px; box-shadow: 0 6px 18px alpha(#183b50,.22); }
+.dark .floating-save { box-shadow: 0 6px 18px alpha(#000000,.45); }
 .compact-action { border-radius: 8px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
 .row-icon { background: #edf2fb; color: #4c77ae; border-radius: 9px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
 .dark .row-icon { background: #29364c; color: #a4bfe4; }
@@ -147,9 +152,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
-.settings-page row { min-height: 3.82em; }
+.settings-page row { min-height: 3.55em; }
 .settings-dirty-mark { color: #b47716; font-size: 0.75em; }
-.settings-dirty-label { color: alpha(@window_fg_color, .70); }
 .aerobox-window .boxed-list { border-radius: 12px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
 .aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .70); }
@@ -204,8 +208,3 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .aerobox-window .settings-page row,
 .editor-root row { min-height: 3.55em; }
 .editor-root preferencesgroup .boxed-list > row { min-height: 3.55em; }
-.import-dialog .import-sources { margin-bottom: 0.18em; }
-.import-dialog .import-source { border: 1px solid #d9dfe8; border-radius: 9px; background: #ffffff; }
-.dark .import-dialog .import-source { border-color: #363c47; background: #24282f; }
-.import-dialog .import-source text { font-size: 0.95em; }
-.import-dialog preferencesgroup .boxed-list > row { min-height: 3.36em; }

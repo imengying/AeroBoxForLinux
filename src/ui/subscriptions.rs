@@ -96,7 +96,7 @@ impl Ui {
         // Subscription cards stay at two columns at most: they carry a name,
         // expiry, progress bar and usage figures that a third column would
         // squeeze below a readable width.
-        follow_width(&list, 360, 16, 2, self.typography.preview().0 >= 16);
+        follow_width(&list, 360, 16, 2, self.typography.preview() >= 16);
         let ids: Vec<_> = state
             .subscriptions
             .iter()
@@ -332,15 +332,6 @@ impl Ui {
         form.set_margin_end(20);
         form.set_margin_top(12);
         form.set_margin_bottom(20);
-        let sources = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let paste = gtk::Button::with_label("从剪贴板导入");
-        let file = gtk::Button::with_label("从文件导入");
-        sources.add_css_class("import-sources");
-        paste.add_css_class("compact-action");
-        file.add_css_class("compact-action");
-        sources.append(&paste);
-        sources.append(&file);
-        form.append(&sources);
         let name = LabeledEntry::new("名称（可选）", "");
         form.append(&name.root);
         let source_title = gtk::Label::new(Some("订阅链接或节点内容"));
@@ -378,9 +369,10 @@ impl Ui {
         hint.add_css_class("small");
         form.append(&hint);
         let auto_update = switch_row("自动更新", "", true);
-        let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
-        interval.set_title("更新间隔（小时）");
-        interval.set_value(24.0);
+        let interval =
+            adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
+        interval.set_title("更新间隔（分钟）");
+        interval.set_value(model::UPDATE_INTERVAL_DEFAULT_MINUTES as f64);
         let interval_toggle = interval.clone();
         auto_update
             .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
@@ -456,103 +448,6 @@ impl Ui {
             buffer.connect_changed(move |buffer| changed(buffer));
             refresh
         };
-        let clipboard = window.clipboard();
-        let paste_error = error.clone();
-        let paste_busy = busy.clone();
-        paste.connect_clicked(move |_| {
-            if paste_busy.get() {
-                return;
-            }
-            let buffer = buffer.clone();
-            let error = paste_error.clone();
-            let busy = paste_busy.clone();
-            clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
-                if busy.get() {
-                    return;
-                }
-                match result {
-                    Ok(Some(text)) => {
-                        buffer.set_text(&text);
-                        error.set_visible(false);
-                    }
-                    _ => {
-                        error.set_text("剪贴板没有可导入的文本");
-                        error.set_visible(true);
-                    }
-                }
-            });
-        });
-        let weak_window = window.downgrade();
-        let weak = Rc::downgrade(self);
-        let file_source = source.buffer();
-        let file_name = name.clone();
-        let file_error = error.clone();
-        let file_busy = busy.clone();
-        file.connect_clicked(move |button| {
-            if file_busy.get() {
-                return;
-            }
-            let (Some(parent), Some(ui)) = (weak_window.upgrade(), weak.upgrade()) else {
-                return;
-            };
-            let buffer = file_source.clone();
-            let name = file_name.clone();
-            let error = file_error.clone();
-            let button = button.clone();
-            let weak = Rc::downgrade(&ui);
-            let busy = file_busy.clone();
-            gtk::FileDialog::builder()
-                .title("导入订阅文件")
-                .build()
-                .open(Some(&parent), None::<&gio::Cancellable>, move |result| {
-                    if busy.get() {
-                        return;
-                    }
-                    let (Ok(file), Some(ui)) = (result, weak.upgrade()) else {
-                        return;
-                    };
-                    let Some(path) = file.path() else {
-                        return;
-                    };
-                    let filename = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    ui.button_task(
-                        &button,
-                        "读取中…",
-                        move |_| {
-                            anyhow::ensure!(
-                                std::fs::metadata(&path)?.len() <= 8 * 1024 * 1024,
-                                "文件超过 8 MiB"
-                            );
-                            Ok((
-                                std::fs::read_to_string(path).context("无法读取订阅文件")?,
-                                filename,
-                            ))
-                        },
-                        move |_, result| {
-                            if busy.get() {
-                                return;
-                            }
-                            match result {
-                                Ok((text, filename)) => {
-                                    buffer.set_text(&text);
-                                    if name.text().is_empty() {
-                                        name.set_text(&filename);
-                                    }
-                                    error.set_visible(false);
-                                }
-                                Err(e) => {
-                                    error.set_text(&format!("{e:#}"));
-                                    error.set_visible(true);
-                                }
-                            }
-                        },
-                    );
-                });
-        });
         let weak = Rc::downgrade(self);
         let weak_window = window.downgrade();
         let close_guard = busy.clone();
@@ -593,7 +488,7 @@ impl Ui {
                         sub.name = name;
                     }
                     sub.auto_update = auto_update && !sub.source.is_empty();
-                    sub.update_interval_hours = interval;
+                    sub.update_interval_minutes = interval;
                     s.import_subscription(sub)
                 },
                 move |ui, result| {
@@ -710,7 +605,7 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
                     .unwrap()
                     .compute_bounds(&list)
                     .unwrap();
-                let large_text = ui.typography.preview().0 >= 16;
+                let large_text = ui.typography.preview() >= 16;
                 if ui.window.width() >= 1100 && !large_text {
                     ensure!(
                         (bounds.y() - first.y()).abs() < 1.0 && bounds.x() > first.x(),
@@ -830,6 +725,28 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         .find(|w| w.title().as_deref() == Some("导入订阅"))
         .context("导入窗口不存在")?;
     let widgets = descendants(&window);
+    ensure!(
+        widgets
+            .iter()
+            .filter_map(|w| w.downcast_ref::<gtk::Button>())
+            .all(|button| {
+                !matches!(
+                    button.label().as_deref(),
+                    Some("从剪贴板导入" | "从文件导入")
+                )
+            }),
+        "导入窗口仍有已删除的剪贴板或文件入口"
+    );
+    let interval = widgets
+        .iter()
+        .filter_map(|w| w.downcast_ref::<adw::SpinRow>())
+        .find(|row| row.title() == "更新间隔（分钟）")
+        .context("缺少分钟更新间隔")?;
+    ensure!(
+        interval.value() == model::UPDATE_INTERVAL_DEFAULT_MINUTES as f64
+            && interval.adjustment().upper() == model::UPDATE_INTERVAL_MAX_MINUTES as f64,
+        "导入窗口的默认更新间隔无效"
+    );
     let source = widgets
         .iter()
         .find(|w| w.widget_name() == "subscription-import-source")

@@ -24,13 +24,13 @@ cd AeroBoxForLinux-linux-amd64
 ## 使用
 
 1. 在设置中下载 sing-box 1.14 或更新的内核，或指定已有内核路径。内置安装器从 sing-box 官方 GitHub Release 下载并校验 SHA256。
-2. 通过链接、剪贴板或本地文件导入订阅，成功后自动设为当前订阅。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS（含 2022）/ VMess / VLESS / Trojan / AnyTLS / Hysteria2 / TUIC / Naive / ShadowTLS / Snell / SOCKS / HTTP 节点链接。VMess / VLESS 支持 WebSocket、gRPC、HTTP/2 与 HTTPUpgrade 传输；Naive 支持 http/https 与 quic 两种模式；ShadowTLS 使用 v3，Snell 使用 v6（当前内核版本）。SS 的 shadow-tls 插件会自动展开为“Shadowsocks → ShadowTLS”链路，ShadowTLS 传输层不占用节点列表。Clash Shadowsocks 的受支持插件参数会保留，不支持的插件和传输方式明确报错。
+2. 在导入订阅窗口中粘贴订阅链接或节点内容，成功后自动设为当前订阅。支持 sing-box JSON、常见 Clash YAML、Base64 及 SS（含 2022）/ VMess / VLESS / Trojan / AnyTLS / Hysteria2 / TUIC / Naive / ShadowTLS / Snell / SOCKS / HTTP 节点链接。VMess / VLESS 支持 WebSocket、gRPC、HTTP/2 与 HTTPUpgrade 传输；Naive 支持 http/https 与 quic 两种模式；ShadowTLS 使用 v3，Snell 使用 v6（当前内核版本）。SS 的 shadow-tls 插件会自动展开为“Shadowsocks → ShadowTLS”链路，ShadowTLS 传输层不占用节点列表。Clash Shadowsocks 的受支持插件参数会保留，不支持的插件和传输方式明确报错。
 3. 点击订阅卡片即可切换当前订阅；节点页只显示它的实际节点。点击节点卡片选择，成功后高亮并打勾，各订阅分别记住所选节点。运行中切换会先校验并应用，失败恢复原连接。
 4. 在首页选择规则、全局或直连，然后点击右下角「启动」。默认启用系统代理；需要时可切换 TUN。节点卡片底部的测速图标只测试该节点；页面顶部「测速」测试当前订阅，测速不会改变所选节点。连接页可查看和断开连接。
 
 系统代理支持 GNOME 和 KDE Plasma，停止代理时恢复本次修改前的设置。Brave / Chromium 使用系统设置时无需另填代理地址；浏览器扩展或启动参数若指定了代理，会覆盖桌面设置。Sway / Hyprland 等窗口管理器可使用 TUN，或在各应用中填写本地 HTTP / SOCKS 代理。关闭主窗口会停止本程序启动的内核并恢复代理。
 
-网络设置控制 IPv6、代理与控制端口、局域网访问、私网绕行、流量嗅探、DNS 劫持及缓存。「直连 DNS」和「远程 DNS」支持 `udp://`、`tcp://`、`tls://`、`https://`、`quic://`，可填写主机名或 IP、可选端口，例如 `udp://223.5.5.5`、`tls://dns.alidns.com`、`https://cloudflare-dns.com/dns-query`。HTTPS 地址不能附带账号、查询参数或片段；不带端口时使用协议默认端口（53、443 或 853）。节点域名使用直连 DNS 解析。远程 DNS 经当前所选节点查询，其域名由直连 DNS 解析；直连 DNS 自身的域名通过 223.5.5.5 引导解析，避免循环依赖。运行中修改设置会先检查生成配置，启动失败时尝试恢复原连接。广告拦截由规则集中的开关控制。
+网络设置控制 IPv6、代理端口、局域网访问、私网绕行、流量嗅探、DNS 劫持及缓存。内部 Clash API 仅监听本机回环地址，端口由程序分配，不提供设置项。「直连 DNS」和「远程 DNS」支持 `udp://`、`tcp://`、`tls://`、`https://`、`quic://`，可填写主机名或 IP、可选端口，例如 `udp://223.5.5.5`、`tls://dns.alidns.com`、`https://cloudflare-dns.com/dns-query`。HTTPS 地址不能附带账号、查询参数或片段；不带端口时使用协议默认端口（53、443 或 853）。节点域名使用直连 DNS 解析。远程 DNS 经当前所选节点查询，其域名由直连 DNS 解析；直连 DNS 自身的域名通过 223.5.5.5 引导解析，避免循环依赖。运行中修改设置会先检查生成配置，启动失败时尝试恢复原连接。广告拦截由规则页面的开关控制。
 
 「规则 / 全局 / 直连」只在首页切换，无需重启内核。全局使用当前选中的节点，规则模式按启用的规则分流，未匹配的连接使用所选节点，直连模式全部直连。全局和直连优先于普通分流及广告拦截；IPv6 禁用等网络限制仍生效。切换模式与节点时确认内核实际状态，并断开旧连接。节点页没有代理组、搜索、订阅选择器或模式控件。
 
@@ -38,13 +38,13 @@ cd AeroBoxForLinux-linux-amd64
 
 日志级别默认为 `error`，已有数据中明确保存的其他等级会保留。默认使用软件绘制以降低启动内存；需要图形加速时可在设置中开启「硬件加速」，重启应用后生效。已有的 `GSK_RENDERER` 环境变量优先。
 
-界面遵循 [GNOME 排版规范](https://developer.gnome.org/hig/guidelines/typography.html)：标题、正文和辅助文字采用统一的相对层级，弹窗与编辑器跟随同一套比例。设置中的「字体大小」提供 9–18 pt 的档位，修改即时预览、保存后保留，默认 11 pt；行高、内边距和图标随字体同比变化，因此调大字体不会把文字挤进固定的行高里，也不需要调整桌面缩放。「清晰文字」开启字形像素对齐，可关闭以使用系统的渲染设置。
+界面遵循 [GNOME 排版规范](https://developer.gnome.org/hig/guidelines/typography.html)：标题、正文和辅助文字采用统一的相对层级，弹窗与编辑器跟随同一套比例。设置中的「字体大小」提供 9–18 pt 的档位，修改即时预览、保存后保留，默认 11 pt；行高、内边距和图标随字体同比变化，因此调大字体不会把文字挤进固定的行高里，也不需要调整桌面缩放。文字渲染跟随 GTK 与桌面设置。应用品牌位于标题栏，默认窗口为 1000 × 680；普通窗口调整后的尺寸会在本机保存并在下次启动时恢复，最大化和全屏不会覆盖保存的尺寸。
 
 首页内存汇总 AeroBox 与正在运行的内核，优先使用按比例分摊共享页的 PSS；权限受限时统一回退 RSS，口径显示在提示中。它表示应用整体占用，不是整机内存使用量。
 
-内置与本地 AeroBoxForAndroid 相同来源的三个规则集：中国大陆 IP、中国大陆域名和广告拦截，来自 [SagerNet/sing-geoip](https://github.com/SagerNet/sing-geoip/tree/rule-set) 与 [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite/tree/rule-set)。安装包附带初始 SRS 文件，首次离线启动也可使用；内核运行时在线自动更新并缓存，默认间隔 24 小时。中国大陆规则默认直连，广告拦截默认关闭，可在规则集页面开启。规则集可设置直连、代理或拦截动作，修改 URL、JSON / SRS 格式和 1–168 小时更新间隔；自建本地规则支持编辑。来源及许可见 [resources/rules/README.md](resources/rules/README.md)。
+内置与本地 AeroBoxForAndroid 相同来源的三个规则：中国大陆 IP、中国大陆域名和广告拦截，来自 [SagerNet/sing-geoip](https://github.com/SagerNet/sing-geoip/tree/rule-set) 与 [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite/tree/rule-set)。安装包附带初始 SRS 文件，首次离线启动也可使用；内核运行时在线自动更新并缓存，默认间隔 1440 分钟。中国大陆规则默认直连，广告拦截默认关闭，可在规则页面开启。规则可设置直连、代理或拦截动作，修改 URL、JSON / SRS 格式和 1–10080 分钟更新间隔；自建本地规则支持编辑。来源及许可见 [resources/rules/README.md](resources/rules/README.md)。
 
-订阅、规则集和内核下载在连接时自动使用当前内核的代理入口，停止时直连，不读取独立下载代理设置。出口检测也使用同一路径，分别显示 IPv4 和 IPv6；无法连接相应检测服务时显示不可用。
+订阅、规则和内核下载在连接时自动使用当前内核的代理入口，停止时直连，不读取独立下载代理设置。出口检测也使用同一路径，分别显示 IPv4 和 IPv6；无法连接相应检测服务时显示不可用。
 
 TUN 在设置或首页中启用，支持 System、gVisor 和 Mixed 协议栈、MTU 与严格路由。「虚拟网卡 → 网络权限」显示当前内核的实际授权状态，成功授权后自动刷新。需要为 **sing-box 内核**授予网络管理权限，可点击「授权」（需要 polkit 和 libcap），或手动运行：
 
@@ -56,23 +56,23 @@ sudo setcap cap_net_admin,cap_net_bind_service=+ep /实际路径/sing-box
 
 ## 数据与订阅
 
-配置默认保存在 `${XDG_CONFIG_HOME:-~/.config}/AeroBoxForLinux/state.json`，内核、规则集和生成配置位于同一目录。可使用 `AeroBox --data-dir /目录` 指定独立目录。
+配置默认保存在 `${XDG_CONFIG_HOME:-~/.config}/AeroBoxForLinux/state.json`，内核、规则和生成配置位于同一目录。可使用 `AeroBox --data-dir /目录` 指定独立目录。
 
 写入使用原子替换，配置目录仅当前用户可访问。只读取当前配置结构；不符合结构或损坏的数据会显示读取失败，原文件不会被静默覆盖。启动提示可选择备份并重置，重新导入订阅后使用。已安装的内核保留。
 
-订阅支持普通 HTTP / HTTPS 地址、Hiddify / sing-box / Clash 导入链接，以及本地 JSON、YAML、Base64 或节点链接内容。文件导入后保存解析结果，无需保留原文件；远程订阅默认每 24 小时自动更新，可在订阅设置中关闭或调整为 1–168 小时。卡片显示更新时间、流量额度和有效期；流量与有效期以服务端提供的信息为准。
+订阅支持普通 HTTP / HTTPS 地址、Hiddify / sing-box / Clash 导入链接，以及粘贴的本地 JSON、YAML、Base64 或节点链接内容。内容导入后保存解析结果，无需保留原文件；远程订阅默认每 1440 分钟自动更新，可在订阅设置中关闭或调整为 1–10080 分钟。卡片显示更新时间、流量额度和有效期；流量与有效期以服务端提供的信息为准。
 
-自动更新仅在应用运行时执行，失败后保留原节点并延后重试；更新正在使用的订阅时，会先校验生成配置，再重载，失败则恢复原连接。导入成功后直接选中该订阅，已有订阅点击卡片切换。设置按常规、网络、虚拟网卡和内核分组，修改后使用右上角「保存」。字体和主题为即时预览；切换页面、关闭窗口或执行数据操作前有未保存内容，会要求保存、放弃或继续编辑。保存不会覆盖其他页面刚更新的当前订阅或首页模式；其他设置若已变化，则拒绝过期表单并提示重新打开。
+自动更新仅在应用运行时执行，失败后保留原节点并延后重试；更新正在使用的订阅时，会先校验生成配置，再重载，失败则恢复原连接。导入成功后直接选中该订阅，已有订阅点击卡片切换。设置按常规、网络、虚拟网卡和内核分组，修改后使用右下角悬浮的「保存」，仅在有未保存修改时显示。字体和主题为即时预览；切换页面、关闭窗口或执行数据操作前有未保存内容，会要求保存、放弃或继续编辑。保存不会覆盖其他页面刚更新的当前订阅或首页模式；其他设置若已变化，则拒绝过期表单并提示重新打开。
 
 「常规 → 数据管理」提供备份和恢复：
 
-- **导出备份**包含当前设置、全部订阅及节点、当前选择和规则集；SRS 二进制内容也内嵌到 JSON，因此可迁移到另一台机器。文件权限为仅当前用户可读写，但内容是未加密的 JSON，**节点密码、认证信息和订阅地址以明文保存**，不要把备份公开分享或放在不可信的位置。
+- **导出备份**包含当前设置、全部订阅及节点、当前选择和规则；SRS 二进制内容也内嵌到 JSON，因此可迁移到另一台机器。文件权限为仅当前用户可读写，但内容是未加密的 JSON，**节点密码、认证信息和订阅地址以明文保存**，不要把备份公开分享或放在不可信的位置。
 - **合并恢复备份**不会覆盖或删除已有订阅和规则，而是分配新 ID、为同名资源添加“（备份 N）”并加入副本；当前设置随备份恢复，所选订阅和首页运行模式随备份恢复，登录启动和窗口尺寸保留本机值。远程规则保留其更新地址，本地规则直接使用备份内嵌的 SRS。缺少 SRS、字段不完整或配置无效时明确失败，不写入半份状态。
 - **恢复默认设置**只重置外观、网络、虚拟网卡和内核偏好，保留全部订阅、节点、规则、当前选择和窗口尺寸；它不会删除内核文件。
 - 仅接受当前 `aerobox-linux-backup`、`version: 1` 备份；其他文件由通用格式校验直接拒绝，不会把任意 sing-box 配置误当备份导入。
 
 
-界面参考 [FlClash](https://github.com/chen08209/FlClash)，统一首页、节点、订阅和设置的卡片边框、圆角、间距、字体及选中样式。订阅在常规窗口每行两张卡片：顶部显示名称和有效期，中间显示流量进度条，底部显示已用 / 总量和更新时间；操作位于卡片右上角菜单。窄窗口自动单列，支持 Wayland 的 1.25 倍缩放及放大文字。订阅导入流程、更新信息和设置分组参考 [Hiddify](https://github.com/hiddify/hiddify-app)。规则集支持直接填写域名、IP 网段、进程名或端口生成匹配条件，复杂规则仍可用 JSON 编辑。
+界面参考 [FlClash](https://github.com/chen08209/FlClash)，统一首页、节点、订阅和设置的卡片边框、圆角、间距、字体及选中样式。订阅在常规窗口每行两张卡片：顶部显示名称和有效期，中间显示流量进度条，底部显示已用 / 总量和更新时间；操作位于卡片右上角菜单。窄窗口自动单列，支持 Wayland 的 1.25 倍缩放及放大文字。订阅导入流程、更新信息和设置分组参考 [Hiddify](https://github.com/hiddify/hiddify-app)。规则支持直接填写域名、IP 网段、进程名或端口生成匹配条件，复杂规则仍可用 JSON 编辑。
 
 ## 从源码构建
 
@@ -93,7 +93,7 @@ make package  # target/packages/ 下的 tar.gz
 make clean    # 清理 target/ 中的构建、打包和测试产物
 ```
 
-已有 sing-box 内核时，可运行 `SINGBOX_TEST_CORE=/内核路径/sing-box cargo test`，额外验证三种出站模式、IPv6 与 TUN 配置组合、启动与恢复、HTTP/H2 订阅节点连接、自定义 DNS 解析节点、Clash API 和 SRS 规则集编译 / 反编译。测试使用隔离目录和临时端口，不启动 TUN 或修改主机路由。
+已有 sing-box 内核时，可运行 `SINGBOX_TEST_CORE=/内核路径/sing-box cargo test`，额外验证三种出站模式、IPv6 与 TUN 配置组合、启动与恢复、HTTP/H2 订阅节点连接、自定义 DNS 解析节点、Clash API 和 SRS 规则编译 / 反编译。测试使用隔离目录和临时端口，不启动 TUN 或修改主机路由。
 
 `make wayland` 还需要 Weston 和 `dbus-run-session`，Arch Linux 可安装 `weston dbus`。界面测试使用隔离的 XDG 目录和 D-Bus 会话，截图及日志保存在 `target/wayland/`。`AEROBOX_TEST_SCALE=2 make wayland` 可检查 2 倍显示缩放。额外安装 `sway` 后，`AEROBOX_TEST_SCALE=1.25 make wayland` 在独立的 headless Sway 中验证真实的 1.25 倍 Wayland surface，检查首页、窄窗口、设置和弹窗布局。截图按实际缩放保存到 `target/wayland/scale-2/` 或 `scale-1.25/`。可用 `CARGO_TARGET_DIR=/其他目录 make package` 或 `make wayland` 将所有生成文件放到仓库外。
 

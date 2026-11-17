@@ -51,7 +51,7 @@ impl Page {
             Self::Home => "首页",
             Self::Nodes => "节点",
             Self::Subscriptions => "订阅",
-            Self::Rules => "规则集",
+            Self::Rules => "规则",
             Self::Connections => "连接",
             Self::Logs => "日志",
             Self::Settings => "设置",
@@ -194,9 +194,12 @@ struct Ui {
     /// instead of stacking a second one underneath and clipping both.
     active_toast: RefCell<Option<adw::Toast>>,
     body: gtk::Box,
+    window_size: RefCell<(i32, i32)>,
+    window_size_generation: Cell<u64>,
     scroll: gtk::ScrolledWindow,
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
+    settings_action: RefCell<Option<gtk::Button>>,
     nav: gtk::ListBox,
     nav_scroll: gtk::ScrolledWindow,
     syncing_navigation: Cell<bool>,
@@ -220,14 +223,14 @@ impl Ui {
     fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
         let settings = service.snapshot().settings;
         apply_theme(&settings.theme);
-        let typography = typography::Typography::new(settings.font_size, settings.crisp_text);
+        let typography = typography::Typography::new(settings.font_size);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("AeroBox")
             .width_request(480)
             .height_request(400)
             .default_width(settings.width.max(700))
-            .default_height(settings.height.max(600))
+            .default_height(settings.height.max(560))
             .build();
         window.add_css_class("aerobox-window");
         window.set_icon_name(Some(platform::APP_ID));
@@ -252,20 +255,6 @@ impl Ui {
         side_header.set_show_end_title_buttons(false);
         side_header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
         sidebar.append(&side_header);
-        let brand = gtk::Box::new(gtk::Orientation::Horizontal, 11);
-        margin(&brand, 20, 18, 2, 24);
-        brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
-        let data = glib::Bytes::from_static(include_bytes!(
-            "../../resources/io.github.imengying.AeroBoxForLinux.png"
-        ));
-        let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
-        let mark = gtk::Image::from_paintable(Some(&texture));
-        mark.add_css_class("brand-mark");
-        let name = label("AeroBox", "brand");
-        name.set_valign(gtk::Align::Center);
-        brand.append(&mark);
-        brand.append(&name);
-        sidebar.append(&brand);
         let nav_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(false)
@@ -299,7 +288,20 @@ impl Ui {
         split.set_sidebar_width_fraction(0.2);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = adw::HeaderBar::new();
-        header.add_css_class("transparent-header");
+        header.add_css_class("transparent-header app-header");
+        let brand = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        brand.add_css_class("header-brand");
+        brand.set_valign(gtk::Align::Center);
+        brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
+        let data = glib::Bytes::from_static(include_bytes!(
+            "../../resources/io.github.imengying.AeroBoxForLinux.png"
+        ));
+        let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
+        let mark = gtk::Image::from_paintable(Some(&texture));
+        mark.add_css_class("brand-mark");
+        brand.append(&mark);
+        brand.append(&label("AeroBox", "brand"));
+        header.pack_start(&brand);
         header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
         let sidebar_button = icon_button("sidebar-show-symbolic", "显示导航");
         sidebar_button.set_visible(false);
@@ -320,7 +322,7 @@ impl Ui {
         let body = gtk::Box::new(gtk::Orientation::Vertical, 16);
         body.set_hexpand(true);
         body.add_css_class("page-content");
-        margin(&body, 24, 24, 12, 24);
+        margin(&body, 20, 20, 10, 18);
         let clamp = adw::Clamp::builder()
             .maximum_size(1030)
             .tightening_threshold(850)
@@ -354,9 +356,12 @@ impl Ui {
             toast,
             active_toast: RefCell::new(None),
             body,
+            window_size: RefCell::new((settings.width, settings.height)),
+            window_size_generation: Cell::new(0),
             scroll,
             floating,
             home_action: RefCell::new(None),
+            settings_action: RefCell::new(None),
             nav,
             nav_scroll,
             syncing_navigation: Cell::new(false),
@@ -401,11 +406,34 @@ impl Ui {
         let weak = Rc::downgrade(&ui);
         ui.window.connect_close_request(move |_| {
             if let Some(ui) = weak.upgrade() {
+                ui.save_window_size();
                 return ui.confirm_close();
             }
             glib::Propagation::Proceed
         });
         ui.refresh(Page::Home);
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.window.connect_default_width_notify(move |window| {
+                if let Some(ui) = weak.upgrade() {
+                    if window.is_maximized() || window.is_fullscreen() {
+                        return;
+                    }
+                    ui.observe_window_size();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.window.connect_default_height_notify(move |window| {
+                if let Some(ui) = weak.upgrade() {
+                    if window.is_maximized() || window.is_fullscreen() {
+                        return;
+                    }
+                    ui.observe_window_size();
+                }
+            });
+        }
         let weak = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_secs(1), move || {
             let Some(ui) = weak.upgrade() else {
@@ -556,12 +584,63 @@ impl Ui {
     }
     /// Apply a font size to the window and the pieces whose width is measured
     /// in pixels rather than em, so a live preview stays internally consistent.
-    fn apply_font_size(&self, font_size: u32, crisp: bool) {
-        self.typography.apply(font_size, crisp);
+    fn apply_font_size(&self, font_size: u32) {
+        self.typography.apply(font_size);
         let width = sidebar_width(font_size);
         self.split.set_min_sidebar_width(width);
         self.split.set_max_sidebar_width(width);
     }
+
+    /// Resize notifications are frequent. Keep the latest size in memory while
+    /// dragging and persist it only once the user has paused.
+    fn observe_window_size(self: &Rc<Self>) {
+        if self.window.is_maximized() || self.window.is_fullscreen() {
+            return;
+        }
+        // A default-size notification can arrive before the compositor has
+        // allocated the new surface. Read the actual size after the debounce,
+        // rather than caching the previous allocation here.
+        let generation = self.window_size_generation.get().wrapping_add(1);
+        self.window_size_generation.set(generation);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(Duration::from_millis(350), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.window_size_generation.get() != generation
+                || ui.window.is_maximized()
+                || ui.window.is_fullscreen()
+            {
+                return;
+            }
+            let (width, height) = (ui.window.width(), ui.window.height());
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            ui.window_size.replace((width, height));
+            let _ = ui.service.update(|state| {
+                state.settings.width = width;
+                state.settings.height = height;
+                Ok(())
+            });
+        });
+    }
+
+    /// Persist the size that was actually on screen when closing, so a resize
+    /// immediately followed by a close cannot restore the previous geometry.
+    fn save_window_size(&self) {
+        self.window_size_generation
+            .set(self.window_size_generation.get().wrapping_add(1));
+        let (width, height) = (self.window.width(), self.window.height());
+        if width > 0 && height > 0 && !self.window.is_maximized() && !self.window.is_fullscreen() {
+            self.window_size.replace((width, height));
+        }
+        let (width, height) = *self.window_size.borrow();
+        let _ = self.service.update(|state| {
+            state.settings.width = width;
+            state.settings.height = height;
+            Ok(())
+        });
+    }
+
     fn show(self: &Rc<Self>, page: Page) {
         if let Some(dialog) = self.settings_prompt.take() {
             dialog.force_close();
@@ -571,7 +650,7 @@ impl Ui {
             // form's baseline. Revert previews to the persisted appearance.
             let settings = self.service.snapshot().settings;
             panel.discard_preview();
-            self.apply_font_size(settings.font_size, settings.crisp_text);
+            self.apply_font_size(settings.font_size);
             apply_theme(&settings.theme);
         }
         self.pending_leave.take();
@@ -582,11 +661,14 @@ impl Ui {
         self.node_panel.replace(None);
         self.body.remove_css_class("settings-page");
         self.body.remove_css_class("home-page");
-        self.body.set_spacing(16);
-        self.body.set_margin_bottom(24);
+        self.body.set_spacing(12);
+        self.body.set_margin_bottom(18);
         self.scroll.vadjustment().set_value(0.0);
         self.scroll.set_margin_bottom(0);
         if let Some(button) = self.home_action.borrow_mut().take() {
+            self.floating.remove_overlay(&button);
+        }
+        if let Some(button) = self.settings_action.borrow_mut().take() {
             self.floating.remove_overlay(&button);
         }
         self.log_buffer.replace(None);
@@ -595,7 +677,7 @@ impl Ui {
         }
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         heading.set_valign(gtk::Align::Center);
-        let titles = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        let titles = gtk::Box::new(gtk::Orientation::Vertical, 2);
         titles.set_hexpand(true);
         titles.append(&label(page.title(), "page-title"));
         heading.append(&titles);
@@ -677,7 +759,7 @@ impl Ui {
         panel.confirm_leave(self, Rc::new(leave))
     }
     fn rules(self: &Rc<Self>, heading: &gtk::Box) {
-        let add = primary("新建规则集", "list-add-symbolic");
+        let add = primary("新建规则", "list-add-symbolic");
         heading.append(&add);
         let weak = Rc::downgrade(self);
         add.connect_clicked(move |_| {
@@ -693,7 +775,7 @@ impl Ui {
         let state = self.service.snapshot();
         if state.rulesets.is_empty() {
             self.body
-                .append(&empty("view-list-bullet-symbolic", "暂无规则集", ""));
+                .append(&empty("view-list-bullet-symbolic", "暂无规则", ""));
             return;
         }
         let list = card(gtk::Orientation::Vertical, 0);
@@ -704,7 +786,7 @@ impl Ui {
                 _ => "直连",
             };
             let meta = if item.is_remote() {
-                format!("{action} · 每 {} 小时更新", item.update_interval_hours)
+                format!("{action} · 每 {} 分钟更新", item.update_interval_minutes)
             } else {
                 format!("{action} · 本地 · {}", updated(item.updated))
             };
@@ -783,7 +865,7 @@ impl Ui {
                                 move |s| s.update_ruleset(&id),
                                 |ui, result| match result {
                                     Ok(()) => {
-                                        ui.notify("规则集已更新");
+                                        ui.notify("规则已更新");
                                         ui.refresh(Page::Rules);
                                     }
                                     Err(error) => ui.error("更新失败", format!("{error:#}")),
@@ -1334,9 +1416,6 @@ impl LabeledEntry {
     pub(super) fn text(&self) -> String {
         self.entry.text().to_string()
     }
-    pub(super) fn set_text(&self, text: &str) {
-        self.entry.set_text(text);
-    }
 }
 fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
@@ -1383,7 +1462,7 @@ fn urlpart(text: &str) -> String {
 }
 fn seed_smoke(service: &Service) -> Result<()> {
     service.update(|state| {
-        state.settings.theme="light".into();state.settings.width=1180;state.settings.height=800;state.settings.auto_detect_ip=false;
+        state.settings.theme="light".into();state.settings.auto_detect_ip=false;
         let subscription=Subscription {name:"日常连接".into(),selected_node:Some("日本 · 01".into()),nodes:vec![
             json!({"type":"shadowsocks","tag":"香港 · 01","server":"hk.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
             json!({"type":"trojan","tag":"日本 · 01","server":"jp.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
@@ -1547,7 +1626,15 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 floating_y.set(Some(bounds.y()));
             }
             match current {
-                0 => ui.navigate(Page::Subscriptions),
+                0 => {
+                    let settings = ui.service.snapshot().settings;
+                    anyhow::ensure!(
+                        (settings.width, settings.height) == (1000, 680)
+                            && (ui.window.width(), ui.window.height()) == (1000, 680),
+                        "默认窗口尺寸未生效"
+                    );
+                    ui.navigate(Page::Subscriptions);
+                }
                 1 => {
                     subscriptions::smoke_selection(&ui, 0, None)?;
                     ui.import_subscription();
@@ -1602,10 +1689,27 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     adjustment.set_value(adjustment.upper());
                 }
                 14 => {
-                    ui.window.set_default_size(1180, 800);
+                    let settings = ui.service.snapshot().settings;
+                    anyhow::ensure!(
+                        (settings.width, settings.height) == (700, 600)
+                            && (ui.window.width(), ui.window.height()) == (700, 600),
+                        "窗口调整后没有保存实际大小: 配置 {}x{}，窗口 {}x{}",
+                        settings.width,
+                        settings.height,
+                        ui.window.width(),
+                        ui.window.height()
+                    );
+                    ui.window.set_default_size(1000, 680);
+                    ui.observe_window_size();
                     ui.navigate(Page::Rules);
                 }
                 15 => {
+                    let settings = ui.service.snapshot().settings;
+                    anyhow::ensure!(
+                        (settings.width, settings.height) == (1000, 680)
+                            && (ui.window.width(), ui.window.height()) == (1000, 680),
+                        "恢复默认窗口大小后没有持久化"
+                    );
                     let rule = ui
                         .service
                         .snapshot()
@@ -1695,11 +1799,14 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 28 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
-                    ui.window.set_default_size(1180, 800);
+                    ui.window.set_default_size(1000, 680);
                     ui.navigate(Page::Settings);
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                29 => settings::smoke_unsaved(&ui, Some("cancel"))?,
+                29 => {
+                    settings::smoke_save_bounds(&ui)?;
+                    settings::smoke_unsaved(&ui, Some("cancel"))?;
+                }
                 30 => {
                     anyhow::ensure!(
                         !settings::SettingsPanel::smoke_has_prompt(&ui),

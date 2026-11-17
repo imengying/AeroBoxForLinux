@@ -28,7 +28,6 @@ fn service(binary: &str, source: String) -> (tempfile::TempDir, Arc<Service>) {
             state.settings.system_proxy = false;
             state.settings.routing_mode = "direct".into();
             state.settings.mixed_port = free_port();
-            state.settings.api_port = free_port();
             state.rulesets.clear();
             Ok(())
         })

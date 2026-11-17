@@ -256,9 +256,9 @@ pub fn subscription(
     form.append(&source_group);
     let updates = group("更新", "");
     let auto_update = switch("自动更新", "", item.auto_update);
-    let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
-    interval.set_title("更新间隔（小时）");
-    interval.set_value(item.update_interval_hours as f64);
+    let interval = adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
+    interval.set_title("更新间隔（分钟）");
+    interval.set_value(item.update_interval_minutes as f64);
     interval.set_sensitive(item.auto_update);
     let interval_toggle = interval.clone();
     auto_update.connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
@@ -316,7 +316,7 @@ pub fn subscription(
         let name = name.text().trim().to_owned();
         let input = source.text().trim().to_owned();
         let auto_update = auto_update.is_active();
-        let update_interval_hours = interval.value() as u32;
+        let update_interval_minutes = interval.value() as u32;
         let saving = saving.clone();
         let button = button.downgrade();
         let (tx, rx) = mpsc::channel();
@@ -334,7 +334,7 @@ pub fn subscription(
                 };
                 next.source = updated_source;
                 next.auto_update = auto_update && !next.source.is_empty();
-                next.update_interval_hours = update_interval_hours;
+                next.update_interval_minutes = update_interval_minutes;
                 service.save_subscription(&original, next)
             })();
             let _ = tx.send(result);
@@ -427,18 +427,18 @@ pub fn ruleset(
     item: RuleSet,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑规则集", "");
+    let editor = EditorWindow::new(parent, "编辑规则", "");
     let stack = tabs(&editor.body);
     stack.set_widget_name("ruleset-tabs");
     let (scroll, form) = form_page();
-    let basic = group("规则集", "");
+    let basic = group("规则", "");
     let name = LabeledEntry::new("名称", &item.name);
     let source = LabeledEntry::new("在线地址或本地文件", &item.source);
     let name_row = name.root.clone();
     let source_row = source.root.clone();
-    let interval = adw::SpinRow::with_range(1.0, 168.0, 1.0);
-    interval.set_title("自动更新间隔（小时）");
-    interval.set_value(item.update_interval_hours as f64);
+    let interval = adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
+    interval.set_title("自动更新间隔（分钟）");
+    interval.set_value(item.update_interval_minutes as f64);
     interval.set_visible(item.is_remote());
     let format_model = gtk::StringList::new(&["JSON 源文件", "SRS 二进制文件"]);
     let format = adw::ComboRow::builder()
@@ -542,7 +542,7 @@ pub fn ruleset(
     let saving = editor.saving.clone();
     editor.save.connect_clicked(move |button| {
         let result = (|| -> Result<RuleSet> {
-            ensure!(!name.text().trim().is_empty(), "请填写规则集名称");
+            ensure!(!name.text().trim().is_empty(), "请填写规则名称");
             let binary = format.selected() == 1;
             let source_text = source.text().trim().to_owned();
             let online = model::is_online_source(&source_text);
@@ -561,7 +561,7 @@ pub fn ruleset(
                 .unwrap_or_else(|| item.clone());
             next.name = name.text().trim().into();
             next.source = source_text;
-            next.update_interval_hours = interval.value() as u32;
+            next.update_interval_minutes = interval.value() as u32;
             next.binary = binary;
             next.action = actions[action.selected() as usize].into();
             next.enabled = enabled.is_active();
@@ -1009,12 +1009,9 @@ fn parse_json_buffer(buffer: &sourceview::Buffer) -> Result<Value> {
 fn validate_rules(value: &Value) -> Result<()> {
     ensure!(
         value.is_object() && value["rules"].is_array(),
-        "规则集需要包含 rules 数组"
+        "规则需要包含 rules 数组"
     );
-    ensure!(
-        value["version"].as_u64().is_some(),
-        "规则集需要填写 version"
-    );
+    ensure!(value["version"].as_u64().is_some(), "规则需要填写 version");
     Ok(())
 }
 
@@ -1032,7 +1029,7 @@ pub(super) fn smoke_ruleset(
             .context("缺少规则")?;
         ensure!(
             rule.is_remote()
-                && rule.update_interval_hours == 12
+                && rule.update_interval_minutes == 120
                 && rule.action == "direct"
                 && rule.enabled,
             "规则保存没有生效"
@@ -1055,7 +1052,7 @@ pub(super) fn smoke_ruleset(
         .active_window()
         .context("规则编辑器未打开")?;
     ensure!(
-        window.title().as_deref() == Some("编辑规则集"),
+        window.title().as_deref() == Some("编辑规则"),
         "规则编辑器未打开"
     );
     let widgets = descendants(&window);
@@ -1070,7 +1067,7 @@ pub(super) fn smoke_ruleset(
     let interval = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<adw::SpinRow>())
-        .find(|r| r.title() == "自动更新间隔（小时）")
+        .find(|r| r.title() == "自动更新间隔（分钟）")
         .context("缺少规则更新间隔")?;
     let source = widgets
         .iter()
@@ -1088,7 +1085,7 @@ pub(super) fn smoke_ruleset(
         "本地规则编辑不可用"
     );
     source.set_text(&original_source);
-    interval.set_value(12.0);
+    interval.set_value(120.0);
     let save = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<gtk::Button>())

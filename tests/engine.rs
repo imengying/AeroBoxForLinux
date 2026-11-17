@@ -34,7 +34,6 @@ fn service() -> (tempfile::TempDir, Arc<Service>) {
         .update(|state| {
             state.settings.system_proxy = false;
             state.settings.mixed_port = free_port();
-            state.settings.api_port = free_port();
             state.settings.bypass_lan = false;
             state.settings.sniff = false;
             state.rulesets.clear();
@@ -329,7 +328,7 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
     let state = service.snapshot();
     assert_eq!(state.subscriptions.len(), 1);
     assert_eq!(state.subscriptions[0].name, "Example");
-    assert_eq!(state.subscriptions[0].update_interval_hours, 12);
+    assert_eq!(state.subscriptions[0].update_interval_minutes, 720);
     assert_eq!(
         state.settings.active_subscription,
         state.subscriptions[0].id
@@ -387,16 +386,13 @@ fn real_core_terminates_when_the_application_is_killed() {
         return;
     };
     let (dir, service) = service();
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
     let proxy_address = proxy.local_addr().unwrap();
-    drop((api, proxy));
+    drop(proxy);
     service
         .update(|state| {
             state.settings.core_path = binary;
             state.settings.mixed_port = proxy_address.port();
-            state.settings.api_port = api_address.port();
             Ok(())
         })
         .unwrap();
@@ -583,7 +579,7 @@ fn subscription_form_preserves_live_download_data_and_rejects_stale_edits() {
     form.name = "新名称".into();
     form.source = "new.json".into();
     form.auto_update = false;
-    form.update_interval_hours = 12;
+    form.update_interval_minutes = 720;
     form.nodes.clear();
     form.selected_node = None;
     form.updated = 0;
@@ -596,7 +592,7 @@ fn subscription_form_preserves_live_download_data_and_rejects_stale_edits() {
     assert_eq!(saved.name, "新名称");
     assert_eq!(saved.source, "new.json");
     assert!(!saved.auto_update);
-    assert_eq!(saved.update_interval_hours, 12);
+    assert_eq!(saved.update_interval_minutes, 720);
     assert_eq!(saved.nodes[0]["tag"], "fresh");
     assert_eq!(saved.selected_node.as_deref(), Some("fresh"));
     assert_eq!(saved.updated, 0, "a changed source must be refreshed");
@@ -732,7 +728,7 @@ fn automatic_updates_obey_intervals_preserve_failed_nodes_and_back_off() {
         source: source.to_string_lossy().into_owned(),
         nodes: old_nodes.clone(),
         updated: model::now() - 3601,
-        update_interval_hours: 1,
+        update_interval_minutes: 60,
         ..Subscription::default()
     };
     let id = due.id.clone();

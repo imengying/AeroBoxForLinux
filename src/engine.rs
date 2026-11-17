@@ -96,6 +96,7 @@ pub struct Service {
     operation: Mutex<()>,
     logs: Arc<Mutex<VecDeque<String>>>,
     proxy: Mutex<Option<platform::ProxySnapshot>>,
+    control_port: Mutex<Option<u16>>,
     proxy_active: AtomicBool,
     closing: AtomicBool,
     desired_running: AtomicBool,
@@ -116,6 +117,7 @@ impl Service {
             operation: Mutex::new(()),
             logs: Arc::new(Mutex::new(VecDeque::new())),
             proxy: Mutex::new(None),
+            control_port: Mutex::new(None),
             proxy_active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             desired_running: AtomicBool::new(false),
@@ -271,6 +273,26 @@ impl Service {
     pub fn generate_profile(&self, state: &State, profile: &Profile) -> Result<Value> {
         Ok(self.prepare_profile(state, profile)?.config)
     }
+    fn control_port(&self, mixed_port: u16) -> Result<u16> {
+        let mut slot = self.control_port.lock().unwrap();
+        if let Some(port) = *slot
+            && port != mixed_port
+        {
+            return Ok(port);
+        }
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).context("无法分配内部控制端口")?;
+        let port = listener
+            .local_addr()
+            .map(|address| address.port())
+            .context("无法读取内部控制端口")?;
+        // Binding port zero skips a mixed listener that is already active.
+        // Before startup no listener exists, so explicitly exclude its port.
+        ensure!(port != mixed_port, "内部控制端口与代理端口冲突，请重试");
+        *slot = Some(port);
+        Ok(port)
+    }
+
     fn prepare_profile(&self, state: &State, profile: &Profile) -> Result<PreparedConfig> {
         let mut config = profile.config.clone();
         ensure!(config.is_object(), "配置必须是 JSON 对象");
@@ -435,7 +457,7 @@ impl Service {
                 None
             };
             if remote {
-                let mut rule = json!({"type":"remote","tag":r.name,"format":if r.binary{"binary"}else{"source"},"url":r.source,"update_interval":format!("{}h",r.update_interval_hours)});
+                let mut rule = json!({"type":"remote","tag":r.name,"format":if r.binary{"binary"}else{"source"},"url":r.source,"update_interval":format!("{}m",r.update_interval_minutes)});
                 if let Some(path) = path {
                     rule["initial_path"] = json!(path);
                 }
@@ -492,6 +514,10 @@ impl Service {
         let lan_tag = None;
         let ads_tag = rule_tag(model::BUILTIN_ADS_ID);
         crate::config::apply_profile_settings(&mut config, &state.settings, lan_tag, ads_tag)?;
+        config["experimental"]["clash_api"]["external_controller"] = json!(format!(
+            "127.0.0.1:{}",
+            self.control_port(state.settings.mixed_port)?
+        ));
         if !nodes.is_empty() {
             // Global always follows the application node picker, independently
             // of the profile's default in rule mode. Its DNS transport must use
@@ -1770,7 +1796,7 @@ impl Service {
             current.name == original.name
                 && current.source == original.source
                 && current.auto_update == original.auto_update
-                && current.update_interval_hours == original.update_interval_hours,
+                && current.update_interval_minutes == original.update_interval_minutes,
             "订阅在编辑期间已被修改，请重新打开编辑器"
         );
         let mut candidate = before.clone();
@@ -1996,7 +2022,7 @@ impl Service {
             && (!subscription.auto_update
                 || subscription.source.trim().is_empty()
                 || now().saturating_sub(subscription.updated)
-                    < u64::from(subscription.update_interval_hours) * 3600
+                    < u64::from(subscription.update_interval_minutes) * 60
                 || attempt
                     .failed_at
                     .is_some_and(|at| at.elapsed() < Duration::from_secs(300)))
@@ -2061,14 +2087,14 @@ impl Service {
                         sub.name = title.to_owned();
                     }
                 }
-                if sub.update_interval_hours == 24
+                if sub.update_interval_minutes == model::UPDATE_INTERVAL_DEFAULT_MINUTES
                     && let Some(hours) = headers
                         .get("profile-update-interval")
                         .and_then(|value| value.to_str().ok())
                         .and_then(|value| value.parse::<u32>().ok())
                         .filter(|hours| (1..=168).contains(hours))
                 {
-                    sub.update_interval_hours = hours;
+                    sub.update_interval_minutes = hours * 60;
                 }
             }
             if let Some(info) = headers

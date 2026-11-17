@@ -129,11 +129,9 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
             .unwrap(),
     );
     thread::sleep(Duration::from_millis(150));
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    let api_address = api.local_addr().unwrap();
     let mixed = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy_address = mixed.local_addr().unwrap();
-    drop((api, mixed));
+    drop(mixed);
     service
         .update(|state| {
             state.settings.core_path = binary;
@@ -158,9 +156,8 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
             ads.id = aerobox_for_linux::model::id();
             ads.source = source;
             ads.content = json!({"version":3,"rules":[]});
-            ads.update_interval_hours = 6;
+            ads.update_interval_minutes = 360;
             state.settings.mixed_port = proxy_address.port();
-            state.settings.api_port = api_address.port();
             state.subscriptions[0].nodes[0]["server_port"] = json!(remote_port);
             Ok(())
         })
@@ -172,7 +169,7 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
         .iter()
         .find(|r| r["type"] == "remote")
         .unwrap();
-    assert_eq!(remote["update_interval"], "6h");
+    assert_eq!(remote["update_interval"], "360m");
     assert!(std::path::Path::new(remote["initial_path"].as_str().unwrap()).is_file());
     service.check(&generated).unwrap();
     let started = Instant::now();
@@ -272,6 +269,48 @@ fn real_core_remote_rules_start_from_seed_update_in_background_and_reuse_cache()
 }
 
 #[test]
+fn control_endpoint_is_internal_stable_and_independent_of_the_proxy_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    setup(&service);
+    let initial = service.generate_current().unwrap();
+    let initial_endpoint = initial["experimental"]["clash_api"]["external_controller"]
+        .as_str()
+        .unwrap();
+    let initial_port: u16 = initial_endpoint
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(initial_endpoint.starts_with("127.0.0.1:"));
+    assert_ne!(initial_port, Settings::default().mixed_port);
+    assert_eq!(
+        service.generate_current().unwrap()["experimental"]["clash_api"]["external_controller"],
+        initial_endpoint,
+        "checking settings must not allocate a different control port"
+    );
+
+    let mut settings = service.snapshot().settings;
+    settings.mixed_port = initial_port;
+    service.apply_settings(settings).unwrap();
+    let moved = service.generate_current().unwrap();
+    let endpoint = moved["experimental"]["clash_api"]["external_controller"]
+        .as_str()
+        .unwrap();
+    let port: u16 = endpoint.rsplit(':').next().unwrap().parse().unwrap();
+    assert!(endpoint.starts_with("127.0.0.1:"));
+    assert_ne!(
+        port, initial_port,
+        "a proxy-port change must relocate the internal endpoint when necessary"
+    );
+    assert_ne!(
+        port,
+        moved["inbounds"][0]["listen_port"].as_u64().unwrap() as u16
+    );
+}
+
+#[test]
 fn android_builtins_have_binary_seeds_and_only_enabled_policies_are_generated() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
@@ -285,7 +324,7 @@ fn android_builtins_have_binary_seeds_and_only_enabled_policies_are_generated() 
     for rule in generated["route"]["rule_set"].as_array().unwrap() {
         assert_eq!(rule["format"], "binary");
         assert_eq!(rule["type"], "remote");
-        assert_eq!(rule["update_interval"], "24h");
+        assert_eq!(rule["update_interval"], "1440m");
         let path = std::path::Path::new(rule["initial_path"].as_str().unwrap());
         assert!(std::fs::read(path).unwrap().starts_with(b"SRS"));
     }

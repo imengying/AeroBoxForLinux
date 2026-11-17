@@ -6,7 +6,6 @@ pub(super) struct SettingsPanel {
     save: gtk::Button,
     stack: gtk::Stack,
     tabs: gtk::StackSwitcher,
-    dirty: gtk::Label,
     autostart: adw::SwitchRow,
     read: Rc<dyn Fn() -> (model::Settings, bool)>,
     baseline: RefCell<(model::Settings, bool)>,
@@ -50,7 +49,7 @@ impl SettingsPanel {
                 match result {
                     Ok(()) => {
                         panel.is_dirty.set(false);
-                        panel.dirty.set_visible(false);
+                        panel.save.set_visible(false);
                         panel.save.set_sensitive(false);
                         panel
                             .baseline
@@ -70,7 +69,7 @@ impl SettingsPanel {
                     }
                     Err(error) => {
                         panel.is_dirty.set(true);
-                        panel.dirty.set_visible(true);
+                        panel.save.set_visible(true);
                         panel.save.set_sensitive(true);
                         ui.pending_leave.replace(after);
                         panel.autostart.set_active(ui.service.autostart_enabled());
@@ -85,7 +84,7 @@ impl SettingsPanel {
         let current = (self.read)();
         let dirty = current != *self.baseline.borrow();
         self.is_dirty.set(dirty);
-        self.dirty.set_visible(dirty);
+        self.save.set_visible(dirty && !self.saving.get());
         self.save.set_sensitive(dirty && !self.saving.get());
     }
 
@@ -121,7 +120,7 @@ impl SettingsPanel {
             match response {
                 "discard" => {
                     let settings = panel.saved_settings();
-                    ui.apply_font_size(settings.font_size, settings.crisp_text);
+                    ui.apply_font_size(settings.font_size);
                     apply_theme(&settings.theme);
                     panel.is_dirty.set(false);
                     if let Some(after) = after {
@@ -163,7 +162,7 @@ impl SettingsPanel {
     }
     pub(super) fn discard_preview(&self) {
         self.is_dirty.set(false);
-        self.dirty.set_visible(false);
+        self.save.set_visible(false);
         self.save.set_sensitive(false);
     }
 
@@ -180,6 +179,7 @@ impl SettingsPanel {
         self.saving.set(active);
         self.stack.set_sensitive(!active);
         self.tabs.set_sensitive(!active);
+        self.save.set_visible(!active && self.is_dirty.get());
         self.save.set_sensitive(!active && self.is_dirty.get());
     }
 
@@ -220,7 +220,7 @@ impl SettingsPanel {
                 "discard" => {
                     let saved = panel.saved_settings();
                     let login = panel.baseline.borrow().1;
-                    ui.apply_font_size(saved.font_size, saved.crisp_text);
+                    ui.apply_font_size(saved.font_size);
                     apply_theme(&saved.theme);
                     ui.refresh(Page::Settings);
                     on_ready(&ui, login);
@@ -256,16 +256,20 @@ impl SettingsPanel {
 }
 
 impl Ui {
-    pub(super) fn settings(self: &Rc<Self>, heading: &gtk::Box) {
+    pub(super) fn settings(self: &Rc<Self>, _heading: &gtk::Box) {
         self.body.add_css_class("settings-page");
         let settings = self.service.snapshot().settings;
         let save = primary("保存", "object-select-symbolic");
         save.set_widget_name("settings-save");
-        let dirty = label("未保存", "settings-dirty-label");
-        dirty.set_widget_name("settings-unsaved");
-        dirty.set_valign(gtk::Align::Center);
-        heading.append(&dirty);
-        heading.append(&save);
+        save.add_css_class("floating-save");
+        save.set_halign(gtk::Align::End);
+        save.set_valign(gtk::Align::End);
+        save.set_margin_end(4);
+        save.set_margin_bottom(4);
+        save.set_visible(false);
+        save.set_sensitive(false);
+        self.floating.add_overlay(&save);
+        self.settings_action.replace(Some(save.clone()));
         let stack = gtk::Stack::builder()
             .hhomogeneous(false)
             .vhomogeneous(false)
@@ -315,21 +319,10 @@ impl Ui {
             )
             .build();
         appearance.add(&font_size);
-        let crisp_text = switch_row("清晰文字", "", settings.crisp_text);
-        crisp_text.set_tooltip_text(Some("将字形对齐到像素；关闭后跟随系统文字渲染"));
-        appearance.add(&crisp_text);
         let weak = Rc::downgrade(self);
-        let crisp = crisp_text.downgrade();
         font_size.connect_selected_notify(move |row| {
-            if let (Some(ui), Some(crisp)) = (weak.upgrade(), crisp.upgrade()) {
-                ui.apply_font_size(model::FONT_SIZE_MIN + row.selected(), crisp.is_active());
-            }
-        });
-        let weak = Rc::downgrade(self);
-        let size = font_size.downgrade();
-        crisp_text.connect_active_notify(move |row| {
-            if let (Some(ui), Some(size)) = (weak.upgrade(), size.upgrade()) {
-                ui.apply_font_size(model::FONT_SIZE_MIN + size.selected(), row.is_active());
+            if let Some(ui) = weak.upgrade() {
+                ui.apply_font_size(model::FONT_SIZE_MIN + row.selected());
             }
         });
         theme.connect_selected_notify(|row| {
@@ -366,10 +359,6 @@ impl Ui {
         mixed_port.set_title("代理端口");
         mixed_port.set_value(settings.mixed_port as f64);
         network.add(&mixed_port);
-        let api_port = adw::SpinRow::with_range(1.0, 65535.0, 1.0);
-        api_port.set_title("控制端口");
-        api_port.set_value(settings.api_port as f64);
-        network.add(&api_port);
         network_page.append(&network);
         let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
@@ -624,7 +613,7 @@ impl Ui {
                         return;
                     };
                     let previous = panel.saved_settings();
-                    ui.apply_font_size(settings.font_size, settings.crisp_text);
+                    ui.apply_font_size(settings.font_size);
                     apply_theme(&settings.theme);
                     panel.busy(true);
                     ui.button_task(
@@ -638,7 +627,7 @@ impl Ui {
                             }
                             Err(error) => {
                                 let saved = ui.service.snapshot().settings;
-                                ui.apply_font_size(saved.font_size, saved.crisp_text);
+                                ui.apply_font_size(saved.font_size);
                                 apply_theme(&saved.theme);
                                 ui.error("恢复默认失败", format!("{error:#}"));
                                 if let Some(panel) = ui.settings_panel.borrow().as_ref() {
@@ -766,9 +755,9 @@ impl Ui {
                         }
                         match result {
                             Ok((subscriptions, rules)) => {
-                                ui.notify(&format!("已恢复 {subscriptions} 个订阅、{rules} 个规则集"));
+                                ui.notify(&format!("已恢复 {subscriptions} 个订阅、{rules} 个规则"));
                                 let settings = ui.service.snapshot().settings;
-                                ui.apply_font_size(settings.font_size, settings.crisp_text);
+                                ui.apply_font_size(settings.font_size);
                                 apply_theme(&settings.theme);
                                 ui.refresh(Page::Settings);
                             }
@@ -838,7 +827,6 @@ impl Ui {
             move || {
                 let next = model::Settings {
                     font_size: model::FONT_SIZE_MIN + font_size.selected(),
-                    crisp_text: crisp_text.is_active(),
                     theme: match theme.selected() {
                         1 => "light",
                         2 => "dark",
@@ -852,7 +840,6 @@ impl Ui {
                     ipv6: ipv6.is_active(),
                     allow_lan: lan.is_active(),
                     mixed_port: mixed_port.value() as u16,
-                    api_port: api_port.value() as u16,
                     bypass_lan: bypass.is_active(),
                     sniff: sniff.is_active(),
                     dns_hijack: hijack.is_active(),
@@ -897,7 +884,6 @@ impl Ui {
                 .and_then(|widget| widget.next_sibling())
                 .and_then(|widget| widget.downcast::<gtk::StackSwitcher>().ok())
                 .expect("settings tabs"),
-            dirty,
             autostart: autostart.clone(),
             read: read.clone(),
             baseline,
@@ -1226,6 +1212,32 @@ pub(super) fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn smoke_save_bounds(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    let save = descendants(&ui.floating)
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|button| button.widget_name() == "settings-save")
+        .context("缺少悬浮保存按钮")?;
+    ensure!(
+        save.is_visible() && save.is_sensitive(),
+        "修改后没有显示悬浮保存按钮"
+    );
+    let bounds = save
+        .compute_bounds(&ui.floating)
+        .context("悬浮保存按钮没有位置")?;
+    ensure!(
+        bounds.x() > ui.floating.width() as f32 - bounds.width() - 56.0
+            && bounds.x() + bounds.width() <= ui.floating.width() as f32
+            && bounds.y() > ui.floating.height() as f32 - bounds.height() - 56.0
+            && bounds.y() + bounds.height() <= ui.floating.height() as f32,
+        "保存按钮不在右下角: bounds={bounds:?}, overlay={}x{}",
+        ui.floating.width(),
+        ui.floating.height(),
+    );
+    Ok(())
+}
+
 pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui
@@ -1283,7 +1295,7 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
 pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     let saved = ui.service.snapshot().settings;
     anyhow::ensure!(
-        ui.typography.preview() == (saved.font_size, saved.crisp_text),
+        ui.typography.preview() == saved.font_size,
         "界面字体与已保存的设置不一致"
     );
     anyhow::ensure!(
@@ -1341,7 +1353,8 @@ pub(super) fn smoke_row_height(ui: &Rc<Ui>) -> Option<i32> {
 
 pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     use anyhow::ensure;
-    let widgets = descendants(&ui.body);
+    // The save button floats over the page overlay, outside `ui.body`.
+    let widgets = descendants(&ui.floating);
     let saves: Vec<_> = widgets
         .iter()
         .filter_map(|w| w.clone().downcast::<gtk::Button>().ok())
@@ -1355,7 +1368,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ensure!(
             !settings.ipv6
                 && settings.font_size == model::FONT_SIZE_MAX
-                && settings.crisp_text
                 && settings.allow_lan
                 && !settings.dns_cache
                 && settings.tun_enabled
@@ -1368,12 +1380,8 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         );
         ensure!(!ui.service.status().running, "设置测试意外启动了内核");
         ensure!(
-            !save.is_sensitive()
-                && descendants(&ui.body)
-                    .iter()
-                    .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
-                    .all(|label| label.widget_name() != "settings-unsaved" || !label.is_visible()),
-            "保存完成后仍显示未保存状态"
+            !save.is_visible() && !save.is_sensitive(),
+            "保存完成后仍显示悬浮保存按钮"
         );
         ensure!(
             !descendants(save).iter().any(|w| w.is::<gtk::Spinner>()),
@@ -1381,6 +1389,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         );
         return Ok(());
     }
+    let body = descendants(&ui.body);
     for (title, value) in [
         ("IPv6", false),
         ("允许局域网访问", true),
@@ -1388,28 +1397,26 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ("启用 TUN", true),
         ("硬件加速", true),
     ] {
-        let row = widgets
+        let row = body
             .iter()
             .filter_map(|w| w.clone().downcast::<adw::SwitchRow>().ok())
             .find(|row| row.title() == title)
             .with_context(|| format!("缺少开关 {title}"))?;
         row.set_active(value);
     }
-    let stack = widgets
+    let stack = body
         .iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
         .find(|row| row.title() == "协议栈")
         .context("缺少 TUN 协议栈")?;
     ensure!(stack.is_sensitive(), "启用 TUN 后无法选择协议栈");
     stack.set_selected(1);
-    widgets
-        .iter()
+    body.iter()
         .filter_map(|w| w.clone().downcast::<adw::SpinRow>().ok())
         .find(|row| row.title() == "MTU")
         .context("缺少 MTU 控件")?
         .set_value(1400.0);
-    widgets
-        .iter()
+    body.iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
         .find(|row| row.title() == "字体大小")
         .context("缺少字体大小控件")?
@@ -1418,8 +1425,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ("直连 DNS", "tcp://223.5.5.5:5353"),
         ("远程 DNS", "tls://one.one.one.one"),
     ] {
-        widgets
-            .iter()
+        body.iter()
             .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
             .find(|entry| entry.placeholder_text().as_deref() == Some(title))
             .with_context(|| format!("缺少 DNS 输入 {title}"))?
@@ -1434,8 +1440,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
             .any(|spinner| spinner.is_spinning()),
         "进度指示器不在保存按钮中"
     );
-    widgets
-        .iter()
+    body.iter()
         .filter_map(|w| w.clone().downcast::<gtk::Stack>().ok())
         .find(|stack| stack.widget_name() == "settings-sections")
         .context("缺少设置分组")?
