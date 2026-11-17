@@ -29,7 +29,7 @@ pub const FONT_SIZE_MIN: u32 = 9;
 pub const FONT_SIZE_MAX: u32 = 18;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub theme: String,
     /// Base UI font size in points. Row heights and paddings derive from it,
@@ -555,8 +555,8 @@ pub struct Store {
     pub state: State,
 }
 impl Store {
-    /// Explicit user action only: archive the entire old state without parsing
-    /// or migrating it. Restore it if creating the new state fails.
+    /// Archive the current state file without interpreting its contents. Restore
+    /// it if creating the new state fails.
     pub fn reset(dir: Option<PathBuf>) -> Result<(Self, Option<PathBuf>)> {
         let dir = match dir {
             Some(dir) => dir,
@@ -592,21 +592,7 @@ impl Store {
         let path = dir.join("state.json");
         let state = if path.exists() {
             let bytes = fs::read(&path)?;
-            let value: Value =
-                serde_json::from_slice(&bytes).context("无法读取 AeroBox 数据；原文件未更改")?;
-            ensure!(
-                value["schema"] == 2 && value.get("profiles").is_none(),
-                "不支持旧版数据结构；请使用新的数据目录，原文件未更改"
-            );
-            // The percentage text scale was replaced by an absolute font size.
-            // Silently defaulting it would leave every existing install at a
-            // size the user never picked, so say so instead of guessing.
-            ensure!(
-                value["settings"].get("text_scale").is_none(),
-                "旧版的「文字大小（%）」设置已改为「字体大小」；请删除 {} 后重新打开，原文件未更改",
-                path.display()
-            );
-            serde_json::from_value::<State>(value).context("无法读取 AeroBox 数据；原文件未更改")?
+            serde_json::from_slice(&bytes).context("无法读取 AeroBox 数据；原文件未更改")?
         } else {
             State::default()
         };
@@ -673,16 +659,16 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn explicit_reset_archives_legacy_state_without_touching_the_core() {
+    fn explicit_reset_archives_invalid_state_without_touching_the_core() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = br#"{"schema":1,"profiles":[]}"#;
-        fs::write(dir.path().join("state.json"), legacy).unwrap();
+        let invalid = br#"{"schema":2,"profiles":[]}"#;
+        fs::write(dir.path().join("state.json"), invalid).unwrap();
         fs::create_dir(dir.path().join("core")).unwrap();
         fs::write(dir.path().join("core/sing-box"), b"core fixture").unwrap();
         let (store, backup) = Store::reset(Some(dir.path().into())).unwrap();
         assert_eq!(store.state.schema, 2);
         assert!(store.state.subscriptions.is_empty());
-        assert_eq!(fs::read(backup.unwrap()).unwrap(), legacy);
+        assert_eq!(fs::read(backup.unwrap()).unwrap(), invalid);
         assert_eq!(
             fs::read(dir.path().join("core/sing-box")).unwrap(),
             b"core fixture"
@@ -721,9 +707,9 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_and_corrupt_data_are_rejected_without_overwriting() {
+    fn invalid_data_is_rejected_without_overwriting() {
         for original in [
-            br#"{"schema":1,"settings":{},"profiles":[],"subscriptions":[],"rulesets":[]}"#
+            br#"{"schema":2,"settings":{},"profiles":[],"subscriptions":[],"rulesets":[]}"#
                 .as_slice(),
             b"not-json",
         ] {

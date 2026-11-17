@@ -593,21 +593,21 @@ fn real_core_accepts_converted_shadowsocks_sip003_plugins() {
 }
 
 #[test]
-fn legacy_percentage_text_scale_is_rejected_instead_of_silently_defaulted() {
+fn unknown_configuration_fields_are_rejected_without_overwriting() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("state.json"),
-        br#"{"schema":2,"settings":{"text_scale":120},"subscriptions":[],"rulesets":[]}"#,
-    )
-    .unwrap();
+    let path = dir.path().join("state.json");
+    let data =
+        br#"{"schema":2,"settings":{"unknown_option":120},"subscriptions":[],"rulesets":[]}"#;
+    std::fs::write(&path, data).unwrap();
     let error = match aerobox_for_linux::model::Store::open(Some(dir.path().to_path_buf())) {
-        Ok(_) => panic!("旧版的百分比字号设置应当被拒绝"),
+        Ok(_) => panic!("不符合当前结构的配置应当被拒绝"),
         Err(error) => error,
     };
     assert!(
-        format!("{error:#}").contains("文字大小"),
+        format!("{error:#}").contains("无法读取 AeroBox 数据"),
         "unexpected error: {error:#}"
     );
+    assert_eq!(std::fs::read(path).unwrap(), data);
 }
 
 /// Mirrors the protocol set of the Android app: SS, VMess, VLESS, Trojan,
