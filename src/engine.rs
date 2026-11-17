@@ -1340,15 +1340,6 @@ impl Service {
     /// TUN cannot start, restore both persisted settings and the old process.
     pub fn apply_settings(&self, settings: Settings) -> Result<()> {
         settings.validate()?;
-        let url = url::Url::parse(&settings.test_url).context("测速地址无效")?;
-        ensure!(
-            matches!(url.scheme(), "http" | "https"),
-            "测速地址必须使用 HTTP 或 HTTPS"
-        );
-        ensure!(
-            (500..=60_000).contains(&settings.test_timeout),
-            "测速超时必须在 500 到 60000 毫秒之间"
-        );
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
         let mut candidate = before.clone();
@@ -1449,6 +1440,30 @@ impl Service {
             ..Settings::default()
         };
         self.commit_state(&before, candidate)
+    }
+
+    pub fn autostart_enabled(&self) -> bool {
+        platform::autostart_enabled()
+    }
+
+    pub fn save_form(&self, previous: Settings, settings: Settings, login: bool) -> Result<()> {
+        // Change the machine-local setting first. If it fails, neither the
+        // form baseline nor the portable application state has moved.
+        platform::set_autostart(login)?;
+        self.apply_settings_form(previous, settings)
+            .map_err(|error| error.context("设置未保存；登录启动状态可能已更改，请检查设置页"))
+    }
+
+    pub fn reset_form(&self, previous: Settings, login: bool) -> Result<()> {
+        platform::set_autostart(login)?;
+        self.reset_settings(previous)
+            .map_err(|error| error.context("未恢复默认设置；登录启动状态可能已更改，请检查设置页"))
+    }
+
+    pub fn restore_backup_form(&self, path: &Path, login: bool) -> Result<(usize, usize)> {
+        platform::set_autostart(login)?;
+        self.restore_backup(path)
+            .map_err(|error| error.context("备份未恢复；登录启动状态可能已更改，请检查设置页"))
     }
 
     pub fn network_info(&self) -> Result<network::NetworkInfo> {
@@ -1715,6 +1730,48 @@ impl Service {
     pub fn update_subscription(&self, id: &str) -> Result<()> {
         ensure!(self.begin_subscription_update(id, false)?, "订阅正在更新");
         self.finish_subscription_update(id)
+    }
+
+    pub fn save_subscription(
+        &self,
+        original: &model::Subscription,
+        next: model::Subscription,
+    ) -> Result<()> {
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let current = before
+            .subscriptions
+            .iter()
+            .find(|sub| sub.id == original.id)
+            .context("订阅已被删除，请重新打开编辑器")?;
+        // Downloaded nodes and quota are live data, not form fields. Preserve
+        // them while still rejecting a source/settings edit from an old form.
+        ensure!(
+            current.name == original.name
+                && current.source == original.source
+                && current.auto_update == original.auto_update
+                && current.update_interval_hours == original.update_interval_hours,
+            "订阅在编辑期间已被修改，请重新打开编辑器"
+        );
+        let mut candidate = before.clone();
+        let target = candidate
+            .subscriptions
+            .iter_mut()
+            .find(|sub| sub.id == original.id)
+            .context("订阅已被删除")?;
+        let mut next = next;
+        next.nodes = current.nodes.clone();
+        next.selected_node = current.selected_node.clone();
+        next.updated = current.updated;
+        next.upload = current.upload;
+        next.download = current.download;
+        next.total = current.total;
+        next.expires = current.expires;
+        if next.source != current.source {
+            next.updated = 0;
+        }
+        *target = next;
+        self.commit_state(&before, candidate)
     }
 
     pub fn save_subscription_nodes(
@@ -2090,28 +2147,47 @@ impl Service {
         } else {
             fs::read(&r.source)?
         };
+        let original_content = r.content.clone();
         if r.binary {
             ensure!(bytes.starts_with(b"SRS"), "文件不是有效 SRS 规则集")
         } else {
             r.content = serde_json::from_slice(&bytes)?;
             ensure!(r.content["rules"].is_array(), "规则集缺少 rules 数组")
         };
-        let path = self.rule_path(&r);
-        self.update(|state| {
-            let target = state
-                .rulesets
-                .iter_mut()
-                .find(|s| s.id == id)
-                .context("规则集已被删除")?;
-            ensure!(
-                target.source == r.source && target.binary == r.binary,
-                "规则集更新期间被编辑，请重试"
-            );
-            atomic_write(&path, &bytes, 0o600)?;
-            target.content = r.content;
-            target.updated = now();
-            Ok(())
-        })?;
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let current = before
+            .rulesets
+            .iter()
+            .find(|rule| rule.id == id)
+            .context("规则集已被删除")?;
+        ensure!(
+            current.source == r.source
+                && current.binary == r.binary
+                && current.content == original_content
+                && current.updated == r.updated,
+            "规则集更新期间被编辑，请重试"
+        );
+        let mut candidate = before.clone();
+        let target = candidate
+            .rulesets
+            .iter_mut()
+            .find(|rule| rule.id == id)
+            .context("规则集已被删除")?;
+        target.content = r.content;
+        target.updated = now();
+        candidate.validate()?;
+        let path = self.store.lock().unwrap().rule_path(current);
+        let original_file = fs::read(&path).ok();
+        atomic_write(&path, &bytes, 0o600)?;
+        if let Err(error) = self.commit_state(&before, candidate) {
+            if let Some(bytes) = original_file {
+                atomic_write(&path, &bytes, 0o600).context("恢复规则文件失败")?;
+            } else {
+                let _ = fs::remove_file(&path);
+            }
+            return Err(error);
+        }
         self.log(format!("规则集「{}」更新完成", r.name));
         Ok(())
     }
@@ -2140,13 +2216,14 @@ impl Service {
     pub fn save_rule_source(&self, id: &str, text: &str) -> Result<()> {
         let value: Value = serde_json::from_str(text)?;
         ensure!(value["rules"].is_array(), "缺少 rules 数组");
-        let r = self
-            .snapshot()
+        let _op = self.operation.lock().unwrap();
+        let before = self.snapshot();
+        let r = before
             .rulesets
-            .into_iter()
-            .find(|r| r.id == id)
+            .iter()
+            .find(|rule| rule.id == id)
             .context("规则集不存在")?;
-        let path = self.rule_path(&r);
+        let path = self.rule_path(r);
         let compiled = if r.binary {
             let dir = tempfile::tempdir()?;
             let src = dir.path().join("rules.json");
@@ -2161,8 +2238,6 @@ impl Service {
         } else {
             None
         };
-        let _op = self.operation.lock().unwrap();
-        let before = self.snapshot();
         let mut candidate = before.clone();
         let target = candidate
             .rulesets

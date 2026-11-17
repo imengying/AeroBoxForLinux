@@ -1,4 +1,9 @@
-use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use super::LabeledEntry;
 use adw::prelude::*;
@@ -287,51 +292,96 @@ pub fn subscription(
     editor.body.append(&scroll);
     let weak = editor.window.downgrade();
     let error = editor.error.clone();
-    editor.save.connect_clicked(move |_| {
-        let result = (|| -> Result<()> {
-            ensure!(!name.text().trim().is_empty(), "请填写订阅名称");
-            service.update(|state| {
-                // Keep freshly downloaded nodes and quota information if a
-                // background update completed while the form was open.
-                let mut next = state
-                    .subscriptions
-                    .iter()
-                    .find(|s| s.id == item.id)
-                    .cloned()
-                    .unwrap_or_else(|| item.clone());
-                next.name = name.text().trim().into();
-                let input = source.text();
-                let input = input.trim();
+    let saving = editor.saving.clone();
+    let cancel = editor.cancel.downgrade();
+    let body = editor.body.downgrade();
+    editor.save.connect_clicked(move |button| {
+        if saving.replace(true) {
+            return;
+        }
+        error.set_visible(false);
+        let spinner = gtk::Spinner::builder().spinning(true).build();
+        let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        progress.append(&spinner);
+        progress.append(&gtk::Label::new(Some("保存中…")));
+        button.set_child(Some(&progress));
+        button.set_sensitive(false);
+        if let Some(cancel) = cancel.upgrade() {
+            cancel.set_sensitive(false);
+        }
+        if let Some(body) = body.upgrade() {
+            body.set_sensitive(false);
+        }
+        let service = service.clone();
+        let original = item.clone();
+        let name = name.text().trim().to_owned();
+        let input = source.text().trim().to_owned();
+        let auto_update = auto_update.is_active();
+        let update_interval_hours = interval.value() as u32;
+        let saving = saving.clone();
+        let button = button.downgrade();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                ensure!(!name.is_empty(), "请填写订阅名称");
+                let mut next = original.clone();
+                next.name = name;
                 let updated_source = if input.contains("://") {
-                    let parsed = aerobox_for_linux::subscription::import_input(input)?;
+                    let parsed = aerobox_for_linux::subscription::import_input(&input)?;
                     ensure!(!parsed.source.is_empty(), "这里需要订阅地址");
                     parsed.source
                 } else {
-                    input.to_owned()
+                    input
                 };
-                if next.source != updated_source {
-                    next.updated = 0;
-                }
                 next.source = updated_source;
-                next.auto_update = auto_update.is_active() && !next.source.is_empty();
-                next.update_interval_hours = interval.value() as u32;
-                if let Some(old) = state.subscriptions.iter_mut().find(|s| s.id == next.id) {
-                    *old = next;
-                } else {
-                    state.subscriptions.push(next);
+                next.auto_update = auto_update && !next.source.is_empty();
+                next.update_interval_hours = update_interval_hours;
+                service.save_subscription(&original, next)
+            })();
+            let _ = tx.send(result);
+        });
+        let weak = weak.clone();
+        let saving = saving.clone();
+        let error = error.clone();
+        let cancel = cancel.clone();
+        let body = body.clone();
+        let on_saved = on_saved.clone();
+        glib::timeout_add_local(Duration::from_millis(40), move || {
+            let result = match rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => {
+                    return if weak.upgrade().is_some() {
+                        glib::ControlFlow::Continue
+                    } else {
+                        glib::ControlFlow::Break
+                    };
                 }
-                Ok(())
-            })
-        })();
-        match result {
-            Ok(()) => {
-                on_saved();
-                if let Some(w) = weak.upgrade() {
-                    w.close();
-                }
+                Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
+            };
+            let Some(window) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            saving.set(false);
+            spinner.stop();
+            if let Some(button) = button.upgrade() {
+                button.set_label("保存");
+                button.set_sensitive(true);
             }
-            Err(err) => show_error(&error, err),
-        }
+            if let Some(cancel) = cancel.upgrade() {
+                cancel.set_sensitive(true);
+            }
+            if let Some(body) = body.upgrade() {
+                body.set_sensitive(true);
+            }
+            match result {
+                Ok(()) => {
+                    on_saved();
+                    window.close();
+                }
+                Err(error_text) => show_error(&error, error_text),
+            }
+            glib::ControlFlow::Break
+        });
     });
     editor.window.present();
 }
@@ -558,7 +608,11 @@ pub fn ruleset(
                     let result = match rx.try_recv() {
                         Ok(result) => result,
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            return glib::ControlFlow::Continue;
+                            return if weak.upgrade().is_some() {
+                                glib::ControlFlow::Continue
+                            } else {
+                                glib::ControlFlow::Break
+                            };
                         }
                         Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
                     };
@@ -721,8 +775,8 @@ pub fn code(
     let err = editor.error.clone();
     if let Some((save, on_saved)) = on_save {
         let saving = editor.saving.clone();
-        let cancel = editor.cancel.clone();
-        let body = editor.body.clone();
+        let cancel = editor.cancel.downgrade();
+        let body = editor.body.downgrade();
         editor.save.connect_clicked(move |button| {
             if saving.replace(true) {
                 return;
@@ -734,8 +788,12 @@ pub fn code(
             progress.append(&gtk::Label::new(Some("保存中…")));
             button.set_child(Some(&progress));
             button.set_sensitive(false);
-            cancel.set_sensitive(false);
-            body.set_sensitive(false);
+            if let Some(cancel) = cancel.upgrade() {
+                cancel.set_sensitive(false);
+            }
+            if let Some(body) = body.upgrade() {
+                body.set_sensitive(false);
+            }
             let text = source.text();
             let work = save.clone();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -753,7 +811,11 @@ pub fn code(
                 let result = match rx.try_recv() {
                     Ok(result) => result,
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        return glib::ControlFlow::Continue;
+                        return if weak.upgrade().is_some() {
+                            glib::ControlFlow::Continue
+                        } else {
+                            glib::ControlFlow::Break
+                        };
                     }
                     Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
                 };
@@ -761,8 +823,12 @@ pub fn code(
                 spinner.stop();
                 button.set_label("保存");
                 button.set_sensitive(true);
-                cancel.set_sensitive(true);
-                body.set_sensitive(true);
+                if let Some(cancel) = cancel.upgrade() {
+                    cancel.set_sensitive(true);
+                }
+                if let Some(body) = body.upgrade() {
+                    body.set_sensitive(true);
+                }
                 match result {
                     Ok(()) => {
                         on_saved();
@@ -876,44 +942,46 @@ pub fn rule_content(
                                 let _ = send.send(work.save_rule_source(&id, &text));
                             });
                             let weak = weak.clone();
-                            let error = error.clone();
-                            let button = button.clone();
-                            let on_saved = on_saved.clone();
-                            let cancel = cancel.clone();
+                            let error_label = error.clone();
+                            let button = button.downgrade();
+                            let cancel = cancel.downgrade();
+                            let source_root = source.root.downgrade();
                             let saving = saving.clone();
-                            let source_root = source.root.clone();
-                            glib::timeout_add_local(Duration::from_millis(30), move || match recv
-                                .try_recv()
-                            {
-                                Ok(result) => {
-                                    saving.set(false);
+                            let on_saved = on_saved.clone();
+                            glib::timeout_add_local(Duration::from_millis(30), move || {
+                                let result = match recv.try_recv() {
+                                    Ok(result) => result,
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        return if weak.upgrade().is_some() {
+                                            glib::ControlFlow::Continue
+                                        } else {
+                                            glib::ControlFlow::Break
+                                        };
+                                    }
+                                    Err(_) => Err(anyhow::anyhow!("编译任务意外结束")),
+                                };
+                                let Some(window) = weak.upgrade() else {
+                                    return glib::ControlFlow::Break;
+                                };
+                                saving.set(false);
+                                if let Some(button) = button.upgrade() {
                                     button.set_sensitive(true);
                                     button.set_label("保存");
+                                }
+                                if let Some(cancel) = cancel.upgrade() {
                                     cancel.set_sensitive(true);
+                                }
+                                if let Some(source_root) = source_root.upgrade() {
                                     source_root.set_sensitive(true);
-                                    match result {
-                                        Ok(()) => {
-                                            on_saved();
-                                            if let Some(w) = weak.upgrade() {
-                                                w.close()
-                                            }
-                                        }
-                                        Err(e) => show_error(&error, e),
-                                    };
-                                    glib::ControlFlow::Break
                                 }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
+                                match result {
+                                    Ok(()) => {
+                                        on_saved();
+                                        window.close();
+                                    }
+                                    Err(error) => show_error(&error_label, error),
                                 }
-                                Err(_) => {
-                                    saving.set(false);
-                                    button.set_sensitive(true);
-                                    button.set_label("保存");
-                                    cancel.set_sensitive(true);
-                                    source_root.set_sensitive(true);
-                                    show_error(&error, "编译任务意外结束");
-                                    glib::ControlFlow::Break
-                                }
+                                glib::ControlFlow::Break
                             });
                         });
                     }

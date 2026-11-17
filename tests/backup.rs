@@ -49,6 +49,7 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
     let mut original = state();
     original.settings.direct_dns = "tcp://223.5.5.5:5353".into();
     original.settings.remote_dns = "quic://dns.adguard-dns.com".into();
+    original.settings.auto_start = true;
     original.rulesets = vec![
         RuleSet {
             name: "本地规则".into(),
@@ -87,6 +88,7 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
     assert_eq!(original_files.get(&original.rulesets[0].id), Some(&bytes));
 
     let mut current = state();
+    current.settings.auto_start = false;
     current.settings.width = 1320;
     current.settings.height = 860;
     let (merged, mapped_files) =
@@ -104,6 +106,7 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
         merged.subscriptions[1].id
     );
     assert_eq!((merged.settings.width, merged.settings.height), (1320, 860));
+    assert!(!merged.settings.auto_start);
     assert_eq!(mapped_files.len(), 1);
     let (merged_twice, _) = backup::merge(&merged, imported, original_files).unwrap();
     assert_eq!(merged_twice.subscriptions.len(), 3);
@@ -398,6 +401,11 @@ fn running_restore_failure_rolls_back_new_rule_files_and_preserves_the_core() {
     )
     .unwrap();
     source.start().unwrap();
+    source
+        .api("PATCH", "/configs", Some(&json!({"mode":"direct"})))
+        .unwrap();
+    assert_eq!(source.runtime_mode().unwrap(), "direct");
+    assert_eq!(source.snapshot().settings.routing_mode, "global");
     let pid = source.status().pid;
     let before = source.snapshot();
     let path = dir.path().join("running-backup.json");
@@ -407,6 +415,7 @@ fn running_restore_failure_rolls_back_new_rule_files_and_preserves_the_core() {
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     source.restore_backup(&path).unwrap_err();
     assert_eq!(source.status().pid, pid);
+    assert_eq!(source.runtime_mode().unwrap(), "direct");
     assert_eq!(json_eq(&source.snapshot()), json_eq(&before));
     assert_eq!(fs::read_dir(source.dir().join("rules")).unwrap().count(), 1);
     assert_eq!(

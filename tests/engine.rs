@@ -525,8 +525,185 @@ fn offline_settings_save_without_an_installed_core() {
     assert!(s.snapshot().settings.tun_enabled);
     assert!(!s.status().running);
     let mut invalid = s.snapshot().settings;
-    invalid.test_url = "file:///tmp/not-a-network-test".into();
-    assert!(s.apply_settings(invalid).is_err());
+    for url in [
+        "file:///tmp/not-a-network-test",
+        "http://user@:80",
+        "not a URL",
+    ] {
+        invalid.test_url = url.into();
+        assert!(s.apply_settings(invalid.clone()).is_err(), "accepted {url}");
+    }
+    invalid.test_url = "https://www.gstatic.com/generate_204".into();
+    for timeout in [0, 499, 60_001] {
+        invalid.test_timeout = timeout;
+        assert!(
+            s.apply_settings(invalid.clone()).is_err(),
+            "accepted {timeout}"
+        );
+    }
+    invalid.test_timeout = 60_000;
+    s.apply_settings(invalid).unwrap();
+    assert_eq!(s.snapshot().settings.test_timeout, 60_000);
+}
+
+#[test]
+fn subscription_form_preserves_live_download_data_and_rejects_stale_edits() {
+    let (_dir, service) = service();
+    let sub = Subscription {
+        name: "原始名称".into(),
+        source: "original.json".into(),
+        nodes: vec![json!({"type":"socks","tag":"old","server":"127.0.0.1","server_port":1080})],
+        selected_node: Some("old".into()),
+        updated: 10,
+        ..Subscription::default()
+    };
+    let id = sub.id.clone();
+    service
+        .update(|state| {
+            state.subscriptions.push(sub);
+            Ok(())
+        })
+        .unwrap();
+    let original = service.snapshot().subscriptions[0].clone();
+    service
+        .update(|state| {
+            let current = &mut state.subscriptions[0];
+            current.nodes =
+                vec![json!({"type":"socks","tag":"fresh","server":"127.0.0.1","server_port":1081})];
+            current.selected_node = Some("fresh".into());
+            current.updated = 20;
+            current.upload = 1;
+            current.download = 2;
+            current.total = 3;
+            current.expires = 4;
+            Ok(())
+        })
+        .unwrap();
+    let mut form = original.clone();
+    form.name = "新名称".into();
+    form.source = "new.json".into();
+    form.auto_update = false;
+    form.update_interval_hours = 12;
+    form.nodes.clear();
+    form.selected_node = None;
+    form.updated = 0;
+    form.upload = 0;
+    form.download = 0;
+    form.total = 0;
+    form.expires = 0;
+    service.save_subscription(&original, form).unwrap();
+    let saved = &service.snapshot().subscriptions[0];
+    assert_eq!(saved.name, "新名称");
+    assert_eq!(saved.source, "new.json");
+    assert!(!saved.auto_update);
+    assert_eq!(saved.update_interval_hours, 12);
+    assert_eq!(saved.nodes[0]["tag"], "fresh");
+    assert_eq!(saved.selected_node.as_deref(), Some("fresh"));
+    assert_eq!(saved.updated, 0, "a changed source must be refreshed");
+    assert_eq!(
+        (saved.upload, saved.download, saved.total, saved.expires),
+        (1, 2, 3, 4)
+    );
+    let mut stale = original.clone();
+    stale.name = "过期表单".into();
+    assert!(
+        service
+            .save_subscription(&original, stale)
+            .unwrap_err()
+            .to_string()
+            .contains("重新打开编辑器")
+    );
+    service.delete_resource("subscriptions", &id).unwrap();
+    assert!(
+        service
+            .save_subscription(&original, original.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("已被删除")
+    );
+}
+
+#[test]
+fn stale_subscription_source_edits_cannot_replace_a_newer_download() {
+    let (_dir, service) = service();
+    let sub = Subscription {
+        nodes: vec![json!({"type":"socks","tag":"one","server":"127.0.0.1","server_port":1080})],
+        selected_node: Some("one".into()),
+        updated: 10,
+        ..Subscription::default()
+    };
+    service
+        .update(|state| {
+            state.subscriptions.push(sub);
+            Ok(())
+        })
+        .unwrap();
+    let original = service.snapshot().subscriptions[0].clone();
+    service
+        .update(|state| {
+            let sub = &mut state.subscriptions[0];
+            sub.nodes =
+                vec![json!({"type":"socks","tag":"two","server":"127.0.0.1","server_port":1081})];
+            sub.selected_node = Some("two".into());
+            sub.updated = 20;
+            Ok(())
+        })
+        .unwrap();
+    let before = service.snapshot();
+    assert!(
+        service
+            .save_subscription_nodes(
+                &original,
+                vec![json!({"type":"socks","tag":"stale","server":"127.0.0.1","server_port":1082})]
+            )
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(service.snapshot()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[test]
+fn failed_rule_commit_restores_the_previous_cached_file() {
+    let (_dir, service) = service();
+    let source = service.dir().join("source.json");
+    fs::write(
+        &source,
+        r#"{"version":3,"rules":[{"domain":"new.example"}]}"#,
+    )
+    .unwrap();
+    let rule = RuleSet {
+        name: "回滚规则".into(),
+        source: source.to_string_lossy().into_owned(),
+        content: json!({"version":3,"rules":[{"domain":"old.example"}]}),
+        enabled: false,
+        ..RuleSet::default()
+    };
+    let id = rule.id.clone();
+    service
+        .update(|state| {
+            state.rulesets.push(rule);
+            Ok(())
+        })
+        .unwrap();
+    let cache = service.dir().join("rules").join(format!("{id}.json"));
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(&cache, b"original cache").unwrap();
+    let before = service.snapshot();
+    let state = service.dir().join("state.json");
+    let saved = service.dir().join("state.saved");
+    fs::rename(&state, &saved).unwrap();
+    fs::create_dir(&state).unwrap();
+    let result = service.update_ruleset(&id);
+    fs::remove_dir(&state).unwrap();
+    fs::rename(&saved, &state).unwrap();
+    assert!(result.is_err());
+    assert_eq!(fs::read(&cache).unwrap(), b"original cache");
+    assert_eq!(
+        serde_json::to_value(service.snapshot()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
 }
 
 #[test]
@@ -671,6 +848,62 @@ fn concurrent_manual_and_automatic_updates_do_not_override_an_edit() {
     server_worker.join().unwrap();
     assert!(service.snapshot().subscriptions[0].nodes.is_empty());
     assert_eq!(service.snapshot().subscriptions[0].source, "edited.json");
+}
+
+#[test]
+fn isolated_autostart_form_failure_helper() {
+    let Ok(directory) = std::env::var("AEROBOX_TEST_AUTOSTART_DIRECTORY") else {
+        return;
+    };
+    let service = Service::new(Store::open(Some(directory.clone().into())).unwrap());
+    let previous = service.snapshot().settings;
+    let mut next = previous.clone();
+    next.font_size = 15;
+    service.save_form(previous.clone(), next, true).unwrap_err();
+    assert!(!aerobox_for_linux::platform::autostart_enabled());
+    assert_eq!(service.snapshot().settings, previous);
+    fs::remove_file(
+        std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap()).join("autostart"),
+    )
+    .unwrap();
+    let saved = service.dir().join("state.json");
+    let copy = service.dir().join("state.saved");
+    fs::rename(&saved, &copy).unwrap();
+    fs::create_dir(&saved).unwrap();
+    let result = service.save_form(previous.clone(), previous.clone(), true);
+    fs::remove_dir(&saved).unwrap();
+    fs::rename(&copy, &saved).unwrap();
+    assert!(result.is_err());
+    assert_eq!(service.snapshot().settings, previous);
+    assert!(aerobox_for_linux::platform::autostart_enabled());
+    println!("autostart failures preserve application state; partial startup changes are visible");
+}
+
+#[test]
+fn autostart_form_failures_do_not_change_application_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let config = dir.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("autostart"), b"not a directory").unwrap();
+    let service = Service::new(Store::open(Some(data.clone())).unwrap());
+    service
+        .update(|state| {
+            state.settings.system_proxy = false;
+            Ok(())
+        })
+        .unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "isolated_autostart_form_failure_helper",
+            "--nocapture",
+        ])
+        .env("AEROBOX_TEST_AUTOSTART_DIRECTORY", data)
+        .env("XDG_CONFIG_HOME", config)
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[test]

@@ -7,6 +7,7 @@ pub(super) struct SettingsPanel {
     stack: gtk::Stack,
     tabs: gtk::StackSwitcher,
     dirty: gtk::Label,
+    autostart: adw::SwitchRow,
     read: Rc<dyn Fn() -> (model::Settings, bool)>,
     baseline: RefCell<(model::Settings, bool)>,
     is_dirty: Cell<bool>,
@@ -32,23 +33,12 @@ impl SettingsPanel {
             ui.error("设置无效", error);
             return;
         }
-        let valid_url = url::Url::parse(&next.test_url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some());
-        if !valid_url {
-            ui.pending_leave.replace(after);
-            ui.error("设置无效", "测速地址须为 HTTP 或 HTTPS 地址");
-            return;
-        }
         self.busy(true);
         let weak = Rc::downgrade(self);
         ui.button_task(
             &self.save,
             "保存中…",
-            move |service| {
-                service
-                    .apply_settings_form(previous.clone(), next)
-                    .and_then(|_| platform::set_autostart(login))
-            },
+            move |service| service.save_form(previous.clone(), next, login),
             move |ui, result| {
                 let Some(panel) = weak.upgrade() else {
                     ui.pending_leave.replace(after);
@@ -82,7 +72,8 @@ impl SettingsPanel {
                         panel.is_dirty.set(true);
                         panel.dirty.set_visible(true);
                         panel.save.set_sensitive(true);
-                        ui.pending_leave.take();
+                        ui.pending_leave.replace(after);
+                        panel.autostart.set_active(ui.service.autostart_enabled());
                         ui.error("保存失败", format!("{error:#}"));
                     }
                 }
@@ -178,6 +169,11 @@ impl SettingsPanel {
 
     pub(super) fn saved_settings(&self) -> model::Settings {
         self.baseline.borrow().0.clone()
+    }
+
+    fn sync_autostart(&self, service: &Service) {
+        self.autostart.set_active(service.autostart_enabled());
+        self.update_dirty();
     }
 
     fn busy(&self, active: bool) {
@@ -545,7 +541,7 @@ impl Ui {
         let testing = group("测速");
         let test_url = LabeledEntry::new("测试地址", &settings.test_url);
         testing.add(&test_url.root);
-        let timeout = adw::SpinRow::with_range(500.0, 30000.0, 500.0);
+        let timeout = adw::SpinRow::with_range(500.0, 60_000.0, 500.0);
         timeout.set_title("超时（毫秒）");
         timeout.set_value(settings.test_timeout as f64);
         testing.add(&timeout);
@@ -634,11 +630,7 @@ impl Ui {
                     ui.button_task(
                         &panel.save,
                         "恢复中…",
-                        move |service| {
-                            service
-                                .reset_settings(previous)
-                                .and_then(|_| platform::set_autostart(login))
-                        },
+                        move |service| service.reset_form(previous, login),
                         |ui, result| match result {
                             Ok(()) => {
                                 ui.notify("已恢复默认设置");
@@ -766,15 +758,11 @@ impl Ui {
                 ui.button_task(
                     &button,
                     "恢复中…",
-                    move |service| {
-                        service
-                            .restore_backup(&path)
-                            .and_then(|counts| platform::set_autostart(login).map(|()| counts))
-                    },
+                    move |service| service.restore_backup_form(&path, login),
                     |ui, result| {
                         if let Some(panel) = ui.settings_panel.borrow().as_ref() {
                             panel.busy(false);
-                            panel.update_dirty();
+                            panel.sync_autostart(&ui.service);
                         }
                         match result {
                             Ok((subscriptions, rules)) => {
@@ -797,6 +785,7 @@ impl Ui {
                 dialog.add_response("cancel", "取消");
                 dialog.add_response("restore", "选择备份");
                 dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
+                dialog.set_body("备份含明文节点凭据与订阅地址，请只选择可信的本机备份。\n合并恢复保留现有资源；登录启动和窗口尺寸保留本机设置。");
                 dialog.set_close_response("cancel");
                 let weak = Rc::downgrade(ui);
                 let restore_file = restore_file.clone();
@@ -844,48 +833,51 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         let saved = settings.clone();
-        let read = Rc::new(move || {
-            let next = model::Settings {
-                font_size: model::FONT_SIZE_MIN + font_size.selected(),
-                crisp_text: crisp_text.is_active(),
-                theme: match theme.selected() {
-                    1 => "light",
-                    2 => "dark",
-                    _ => "system",
-                }
-                .into(),
-                core_path: core_path.text().trim().into(),
-                auto_start: auto_core.is_active(),
-                auto_restart: restart.is_active(),
-                system_proxy: proxy.is_active(),
-                ipv6: ipv6.is_active(),
-                allow_lan: lan.is_active(),
-                mixed_port: mixed_port.value() as u16,
-                api_port: api_port.value() as u16,
-                bypass_lan: bypass.is_active(),
-                sniff: sniff.is_active(),
-                dns_hijack: hijack.is_active(),
-                dns_cache: cache.is_active(),
-                direct_dns: direct_dns.text().trim().into(),
-                remote_dns: remote_dns.text().trim().into(),
-                auto_detect_ip: detect_ip.is_active(),
-                hardware_acceleration: acceleration.is_active(),
-                update_subscriptions_on_start: update_subs.is_active(),
-                tun_enabled: tun.is_active(),
-                tun_stack: match stack.selected() {
-                    1 => "gvisor",
-                    2 => "mixed",
-                    _ => "system",
-                }
-                .into(),
-                tun_mtu: mtu.value() as u32,
-                strict_route: strict.is_active(),
-                log_level: levels[log.selected() as usize].into(),
-                test_url: test_url.text().trim().into(),
-                test_timeout: timeout.value() as u32,
-                ..saved.clone()
-            };
-            (next, autostart.is_active())
+        let read = Rc::new({
+            let autostart = autostart.clone();
+            move || {
+                let next = model::Settings {
+                    font_size: model::FONT_SIZE_MIN + font_size.selected(),
+                    crisp_text: crisp_text.is_active(),
+                    theme: match theme.selected() {
+                        1 => "light",
+                        2 => "dark",
+                        _ => "system",
+                    }
+                    .into(),
+                    core_path: core_path.text().trim().into(),
+                    auto_start: auto_core.is_active(),
+                    auto_restart: restart.is_active(),
+                    system_proxy: proxy.is_active(),
+                    ipv6: ipv6.is_active(),
+                    allow_lan: lan.is_active(),
+                    mixed_port: mixed_port.value() as u16,
+                    api_port: api_port.value() as u16,
+                    bypass_lan: bypass.is_active(),
+                    sniff: sniff.is_active(),
+                    dns_hijack: hijack.is_active(),
+                    dns_cache: cache.is_active(),
+                    direct_dns: direct_dns.text().trim().into(),
+                    remote_dns: remote_dns.text().trim().into(),
+                    auto_detect_ip: detect_ip.is_active(),
+                    hardware_acceleration: acceleration.is_active(),
+                    update_subscriptions_on_start: update_subs.is_active(),
+                    tun_enabled: tun.is_active(),
+                    tun_stack: match stack.selected() {
+                        1 => "gvisor",
+                        2 => "mixed",
+                        _ => "system",
+                    }
+                    .into(),
+                    tun_mtu: mtu.value() as u32,
+                    strict_route: strict.is_active(),
+                    log_level: levels[log.selected() as usize].into(),
+                    test_url: test_url.text().trim().into(),
+                    test_timeout: timeout.value() as u32,
+                    ..saved.clone()
+                };
+                (next, autostart.is_active())
+            }
         });
         let baseline = RefCell::new({
             let mut current = read();
@@ -906,6 +898,7 @@ impl Ui {
                 .and_then(|widget| widget.downcast::<gtk::StackSwitcher>().ok())
                 .expect("settings tabs"),
             dirty,
+            autostart: autostart.clone(),
             read: read.clone(),
             baseline,
             is_dirty: Cell::new(false),

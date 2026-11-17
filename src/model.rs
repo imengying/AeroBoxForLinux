@@ -136,6 +136,15 @@ impl Settings {
             ),
             "无效的日志级别"
         );
+        let test_url = url::Url::parse(&self.test_url).context("测速地址无效")?;
+        ensure!(
+            matches!(test_url.scheme(), "http" | "https") && test_url.host().is_some(),
+            "测速地址须为 HTTP 或 HTTPS 地址"
+        );
+        ensure!(
+            (500..=60_000).contains(&self.test_timeout),
+            "测速超时必须在 500 到 60000 毫秒之间"
+        );
         crate::config::validate_dns_settings(self)?;
         Ok(())
     }

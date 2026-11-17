@@ -115,7 +115,8 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
 }
 
 /// Merge resources under fresh IDs, retaining current subscriptions and rules.
-/// Restored selection follows the backup where possible, just as on Android.
+/// Restored selection follows the backup. Login autostart and window dimensions
+/// remain local to this desktop.
 pub fn merge(
     current: &State,
     imported: State,
@@ -196,7 +197,9 @@ pub fn merge(
                 .map(|s| s.id.clone())
         })
         .unwrap_or_default();
-    // Preserve runtime-only window dimensions from this desktop.
+    // Preserve machine-local startup and window behavior from this desktop.
+    // A backup must not make another login session start AeroBox or its core.
+    settings.auto_start = current.settings.auto_start;
     settings.width = current.settings.width;
     settings.height = current.settings.height;
     next.settings = settings;
