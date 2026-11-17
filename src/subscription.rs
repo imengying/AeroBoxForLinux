@@ -757,13 +757,42 @@ fn clash(v: &Value) -> Result<Value> {
             n["transport"] =
                 json!({"type":"grpc","service_name":v["grpc-opts"]["grpc-service-name"]})
         }
-        "http" | "h2" => {
+        network @ ("http" | "h2") => {
             let mut transport = json!({"type":"http"});
-            if let Some(path) = v["h2-opts"]["path"].as_str() {
+            let options = &v[if network == "h2" {
+                "h2-opts"
+            } else {
+                "http-opts"
+            }];
+            // Clash allows a list of HTTP paths; sing-box accepts one path.
+            if let Some(path) = options["path"]
+                .as_str()
+                .or_else(|| options["path"].as_array()?.first()?.as_str())
+            {
                 transport["path"] = json!(path)
             }
-            if let Some(host) = v["h2-opts"]["host"].as_str() {
-                transport["host"] = json!(host)
+            if network == "http" {
+                transport["method"] = json!(options["method"].as_str().unwrap_or("GET"));
+            } else if let Some(method) = options.get("method") {
+                transport["method"] = method.clone();
+            }
+            if let Some(headers) = options["headers"].as_object() {
+                let mut extra = headers.clone();
+                // Go's HTTP client reads Host from the dedicated field.
+                extra.retain(|name, value| {
+                    if name.eq_ignore_ascii_case("host") {
+                        transport["host"] = value.clone();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if !extra.is_empty() {
+                    transport["headers"] = json!(extra);
+                }
+            }
+            if let Some(host) = options.get("host") {
+                transport["host"] = host.clone();
             }
             n["transport"] = transport
         }
@@ -789,6 +818,47 @@ fn clash(v: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clash_http_and_h2_keep_host_path_and_headers() {
+        let nodes = parse(
+            r#"
+proxies:
+  - name: h2
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000001
+    tls: true
+    network: h2
+    h2-opts:
+      host: [front.example.com, second.example.com]
+      path: /secret
+  - name: http
+    type: vmess
+    server: example.com
+    port: 80
+    uuid: 00000000-0000-4000-8000-000000000001
+    network: http
+    http-opts:
+      method: POST
+      path: [/video, /fallback]
+      headers:
+        hOsT: [front.example.com]
+        X-Token: [fixture]
+        User-Agent: AeroBox-test
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nodes[0]["transport"],
+            json!({"type":"http","host":["front.example.com","second.example.com"],"path":"/secret"})
+        );
+        assert_eq!(
+            nodes[1]["transport"],
+            json!({"type":"http","host":["front.example.com"],"path":"/video","method":"POST","headers":{"X-Token":["fixture"],"User-Agent":"AeroBox-test"}})
+        );
+    }
+
     #[test]
     fn shadowsocks_clash_plugins_and_network_flags_survive_conversion() {
         let source = json!({"proxies":[{"name":"fixture","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret","udp":false,"plugin":"obfs","plugin-opts":{"mode":"http","host":"example.com"},"udp-over-tcp":true,"udp-over-tcp-version":2}]});

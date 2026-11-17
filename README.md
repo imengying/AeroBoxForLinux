@@ -30,7 +30,7 @@ cd AeroBoxForLinux-linux-amd64
 
 系统代理支持 GNOME 和 KDE Plasma，停止代理时恢复本次修改前的设置。Brave / Chromium 使用系统设置时无需另填代理地址；浏览器扩展或启动参数若指定了代理，会覆盖桌面设置。Sway / Hyprland 等窗口管理器可使用 TUN，或在各应用中填写本地 HTTP / SOCKS 代理。关闭主窗口会停止本程序启动的内核并恢复代理。
 
-网络设置控制 IPv6、代理与控制端口、局域网访问、私网绕行、流量嗅探、DNS 劫持及缓存。「直连 DNS」和「远程 DNS」支持 `udp://`、`tcp://`、`tls://`、`https://`、`quic://`，可填写主机名或 IP、可选端口，例如 `udp://223.5.5.5`、`tls://dns.alidns.com`、`https://cloudflare-dns.com/dns-query`。HTTPS 地址不能附带账号、查询参数或片段；不带端口时使用协议默认端口（53、443 或 853）。远程 DNS 经当前所选节点查询，域名型服务器由直连 DNS 引导解析，避免循环依赖。运行中修改设置会先检查生成配置，启动失败时尝试恢复原连接。广告拦截由规则集中的开关控制。
+网络设置控制 IPv6、代理与控制端口、局域网访问、私网绕行、流量嗅探、DNS 劫持及缓存。「直连 DNS」和「远程 DNS」支持 `udp://`、`tcp://`、`tls://`、`https://`、`quic://`，可填写主机名或 IP、可选端口，例如 `udp://223.5.5.5`、`tls://dns.alidns.com`、`https://cloudflare-dns.com/dns-query`。HTTPS 地址不能附带账号、查询参数或片段；不带端口时使用协议默认端口（53、443 或 853）。节点域名使用直连 DNS 解析。远程 DNS 经当前所选节点查询，其域名由直连 DNS 解析；直连 DNS 自身的域名通过 223.5.5.5 引导解析，避免循环依赖。运行中修改设置会先检查生成配置，启动失败时尝试恢复原连接。广告拦截由规则集中的开关控制。
 
 「规则 / 全局 / 直连」只在首页切换，无需重启内核。全局使用当前选中的节点，规则模式按启用的规则分流，未匹配的连接使用所选节点，直连模式全部直连。全局和直连优先于普通分流及广告拦截；IPv6 禁用等网络限制仍生效。切换模式与节点时确认内核实际状态，并断开旧连接。节点页没有代理组、搜索、订阅选择器或模式控件。
 
@@ -93,7 +93,7 @@ make package  # target/packages/ 下的 tar.gz
 make clean    # 清理 target/ 中的构建、打包和测试产物
 ```
 
-已有 sing-box 内核时，可运行 `SINGBOX_TEST_CORE=/内核路径/sing-box cargo test`，额外验证三种出站模式、IPv6 与 TUN 配置组合、启动与恢复、Clash API 和 SRS 规则集编译 / 反编译。测试使用隔离目录和临时端口，不启动 TUN 或修改主机路由。
+已有 sing-box 内核时，可运行 `SINGBOX_TEST_CORE=/内核路径/sing-box cargo test`，额外验证三种出站模式、IPv6 与 TUN 配置组合、启动与恢复、HTTP/H2 订阅节点连接、自定义 DNS 解析节点、Clash API 和 SRS 规则集编译 / 反编译。测试使用隔离目录和临时端口，不启动 TUN 或修改主机路由。
 
 `make wayland` 还需要 Weston 和 `dbus-run-session`，Arch Linux 可安装 `weston dbus`。界面测试使用隔离的 XDG 目录和 D-Bus 会话，截图及日志保存在 `target/wayland/`。`AEROBOX_TEST_SCALE=2 make wayland` 可检查 2 倍显示缩放。额外安装 `sway` 后，`AEROBOX_TEST_SCALE=1.25 make wayland` 在独立的 headless Sway 中验证真实的 1.25 倍 Wayland surface，检查首页、窄窗口、设置和弹窗布局。截图按实际缩放保存到 `target/wayland/scale-2/` 或 `scale-1.25/`。可用 `CARGO_TARGET_DIR=/其他目录 make package` 或 `make wayland` 将所有生成文件放到仓库外。
 

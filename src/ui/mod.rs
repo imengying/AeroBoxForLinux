@@ -567,7 +567,9 @@ impl Ui {
             dialog.force_close();
         }
         if let Some(panel) = self.settings_panel.borrow().as_ref() {
-            let settings = panel.saved_settings();
+            // Reset or restore may have committed settings newer than this
+            // form's baseline. Revert previews to the persisted appearance.
+            let settings = self.service.snapshot().settings;
             panel.discard_preview();
             self.apply_font_size(settings.font_size, settings.crisp_text);
             apply_theme(&settings.theme);
@@ -1811,6 +1813,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     settings::smoke_data_action(&ui, 4)?;
                 }
                 44 => {
+                    settings::smoke_restored(&ui)?;
                     let state = ui.service.snapshot();
                     let before = resources_before_reset
                         .borrow()
@@ -1863,6 +1866,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 48 => {
                     settings::smoke_tun_permission(&ui)?;
                 }
+                49..=55 => settings::smoke_autostart(&ui, current - 49)?,
                 _ => {}
             }
             Ok(())
@@ -1883,7 +1887,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 48 {
+        if current == 55 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

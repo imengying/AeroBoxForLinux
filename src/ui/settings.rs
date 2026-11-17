@@ -230,7 +230,7 @@ impl SettingsPanel {
                     let on_ready = on_ready.clone();
                     ui.pending_leave.replace(Some(Rc::new(move || {
                         if let Some(ui) = weak_ui.upgrade() {
-                            on_ready(&ui, login);
+                            on_ready(&ui, ui.service.autostart_enabled());
                         }
                     })));
                     panel.save(&ui);
@@ -905,8 +905,12 @@ impl Ui {
             saving: Cell::new(false),
         });
         let update_dirty = {
-            let panel = panel.clone();
-            Rc::new(move || panel.update_dirty())
+            let panel = Rc::downgrade(&panel);
+            Rc::new(move || {
+                if let Some(panel) = panel.upgrade() {
+                    panel.update_dirty();
+                }
+            })
         };
         for row in descendants(&self.body)
             .iter()
@@ -938,8 +942,9 @@ impl Ui {
         }
         panel.update_dirty();
         self.settings_panel.replace(Some(panel.clone()));
+        let panel = Rc::downgrade(&panel);
         save.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
+            if let (Some(ui), Some(panel)) = (weak.upgrade(), panel.upgrade()) {
                 panel.save(&ui);
             }
         });
@@ -969,20 +974,21 @@ fn combo(title: &str, choices: &[&str], selected: u32) -> adw::ComboRow {
         .build()
 }
 
+fn smoke_data_button(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
+    let row = descendants(&ui.body)
+        .iter()
+        .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
+        .find(|row| row.title().as_str() == title)
+        .with_context(|| format!("缺少设置项 {title}"))?;
+    descendants(&row)
+        .iter()
+        .filter_map(|widget| widget.clone().downcast::<gtk::Button>().ok())
+        .next()
+        .with_context(|| format!("设置项 {title} 没有操作按钮"))
+}
+
 pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
-    fn action(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
-        let row = descendants(&ui.body)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
-            .find(|row| row.title().as_str() == title)
-            .with_context(|| format!("缺少设置项 {title}"))?;
-        descendants(&row)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<gtk::Button>().ok())
-            .next()
-            .with_context(|| format!("设置项 {title} 没有操作按钮"))
-    }
     match step {
         0 => {
             smoke_edit(ui)?;
@@ -991,7 +997,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
                 before.font_size != model::FONT_SIZE_MAX,
                 "测试基线字体不应已是最大值"
             );
-            action(ui, "导出备份")?.emit_clicked();
+            smoke_data_button(ui, "导出备份")?.emit_clicked();
             let prompt = ui
                 .settings_prompt
                 .borrow()
@@ -1037,7 +1043,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
         }
         2 => {
             let before = ui.service.snapshot();
-            action(ui, "恢复默认设置")?.emit_clicked();
+            smoke_data_button(ui, "恢复默认设置")?.emit_clicked();
             let prompt = ui
                 .settings_prompt
                 .borrow()
@@ -1049,6 +1055,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
         }
         3 => {
             ensure!(ui.jobs.get() == 0, "恢复默认设置尚未完成");
+            smoke_restored(ui)?;
             ensure!(
                 ui.settings_prompt.borrow().is_none(),
                 "恢复默认确认框未关闭"
@@ -1067,7 +1074,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             );
         }
         4 => {
-            action(ui, "合并恢复备份")?.emit_clicked();
+            smoke_data_button(ui, "合并恢复备份")?.emit_clicked();
             let prompt = ui
                 .settings_prompt
                 .borrow()
@@ -1077,6 +1084,61 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             prompt.emit_by_name::<()>("response", &[&"restore"]);
             ensure!(ui.jobs.get() > 0, "选择备份后没有执行合并恢复");
         }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
+    use anyhow::ensure;
+    fn respond(ui: &Rc<Ui>, response: &str) -> Result<()> {
+        let dialog = ui
+            .settings_prompt
+            .borrow()
+            .clone()
+            .context("缺少设置操作确认框")?;
+        dialog.emit_by_name::<()>("response", &[&response]);
+        Ok(())
+    }
+    ensure!(ui.jobs.get() == 0, "设置操作尚未完成");
+    if step == 0 {
+        // Only Weak handles survive navigation, including all signal closures.
+        for _ in 0..10 {
+            let panel = Rc::downgrade(ui.settings_panel.borrow().as_ref().context("缺少设置页")?);
+            ui.navigate(Page::Home);
+            ensure!(panel.upgrade().is_none(), "离开设置页后控制器未释放");
+            ui.navigate(Page::Settings);
+        }
+    }
+    let expected_login = matches!(step, 1 | 2);
+    ensure!(
+        ui.service.autostart_enabled() == expected_login,
+        "设置操作错误地改变了登录自启动: step={step}"
+    );
+    match step {
+        0 | 2 | 4 => {
+            let panel = ui
+                .settings_panel
+                .borrow()
+                .as_ref()
+                .cloned()
+                .context("缺少设置页")?;
+            panel.autostart.set_active(!expected_login);
+            ensure!(panel.is_dirty.get(), "修改登录自启动没有标记未保存");
+            smoke_data_button(
+                ui,
+                if step == 2 {
+                    "合并恢复备份"
+                } else {
+                    "恢复默认设置"
+                },
+            )?
+            .emit_clicked();
+            respond(ui, if step == 4 { "discard" } else { "save" })?;
+        }
+        1 | 5 => respond(ui, "reset")?,
+        3 => respond(ui, "restore")?,
+        6 => smoke_restored(ui)?,
         _ => unreachable!(),
     }
     Ok(())
@@ -1222,7 +1284,16 @@ pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     let saved = ui.service.snapshot().settings;
     anyhow::ensure!(
         ui.typography.preview() == (saved.font_size, saved.crisp_text),
-        "放弃更改没有恢复字体预览"
+        "界面字体与已保存的设置不一致"
+    );
+    anyhow::ensure!(
+        adw::StyleManager::default().color_scheme()
+            == match saved.theme.as_str() {
+                "light" => adw::ColorScheme::ForceLight,
+                "dark" => adw::ColorScheme::ForceDark,
+                _ => adw::ColorScheme::Default,
+            },
+        "界面主题与已保存的设置不一致"
     );
     let widgets = descendants(&ui.body);
     for (title, selected) in [

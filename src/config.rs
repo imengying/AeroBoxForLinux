@@ -305,7 +305,13 @@ pub fn apply_profile_settings(
     }
     let servers = array(dns, "servers")?;
     let direct_dns = unique_tag(servers, DIRECT_DNS);
-    let mut direct_server = dns_server_json(&direct_dns, &settings.direct_dns, "dns-local")?;
+    let bootstrap_dns = unique_tag(servers, "aerobox-dns-bootstrap");
+    let mut direct_server = dns_server_json(&direct_dns, &settings.direct_dns, &bootstrap_dns)?;
+    if direct_server.get("domain_resolver").is_some() {
+        // Only the DNS endpoint itself needs this fixed IP resolver. Using the
+        // default resolver here would recurse back into the direct DNS server.
+        servers.push(json!({"type":"udp","tag":bootstrap_dns,"server":"223.5.5.5"}));
+    }
     if direct_has_options {
         direct_server["detour"] = json!(direct);
     }
@@ -338,18 +344,16 @@ pub fn apply_profile_settings(
 
     let route = object(config, "route")?;
     route["auto_detect_interface"] = json!(true);
-    // The node hostname resolver must also obey the IPv6 preference.
-    let resolver = route
+    // Resolve node hostnames through the user's direct DNS, independently of
+    // the proxy and traffic mode, while keeping other resolver options.
+    let mut resolver = route
         .get("default_domain_resolver")
+        .filter(|resolver| resolver.is_object())
         .cloned()
-        .unwrap_or(json!(direct_dns));
-    route["default_domain_resolver"] = if resolver.is_object() {
-        let mut resolver = resolver;
-        resolver["strategy"] = json!(strategy);
-        resolver
-    } else {
-        json!({"server":resolver.as_str().unwrap_or(&direct_dns),"strategy":strategy})
-    };
+        .unwrap_or(json!({}));
+    resolver["server"] = json!(direct_dns);
+    resolver["strategy"] = json!(strategy);
+    route["default_domain_resolver"] = resolver;
     let previous = std::mem::take(array(route, "rules")?);
     let mut rules = vec![];
     if !settings.ipv6 {
@@ -532,7 +536,11 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(direct["type"], "https");
-        assert_eq!(direct["domain_resolver"]["server"], "dns-local");
+        assert_eq!(direct["domain_resolver"]["server"], "aerobox-dns-bootstrap");
+        assert_eq!(
+            config["route"]["default_domain_resolver"]["server"],
+            "aerobox-dns-direct"
+        );
         assert_eq!(remote["type"], "tls");
         assert_eq!(remote["server_port"], 853);
         assert_eq!(remote["domain_resolver"]["server"], "aerobox-dns-direct");
@@ -545,6 +553,71 @@ mod tests {
                 .iter()
                 .any(|rule| rule["clash_mode"] == "global"
                     && rule["server"] == "aerobox-dns-proxy")
+        );
+    }
+
+    #[test]
+    fn node_dns_overrides_stale_resolvers_without_losing_options_or_colliding_tags() {
+        for ipv6 in [false, true] {
+            let mut config = Profile::new("dns").config;
+            config["dns"]["servers"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"udp","tag":DIRECT_DNS,"server":"192.0.2.1"}));
+            config["route"]["default_domain_resolver"] =
+                json!({"server":"dns-local","rewrite_ttl":60});
+            let settings = Settings {
+                ipv6,
+                direct_dns: "tcp://127.0.0.1:5353".into(),
+                ..Settings::default()
+            };
+            apply_settings(&mut config, &settings).unwrap();
+            assert_eq!(
+                config["route"]["default_domain_resolver"],
+                json!({
+                    "server":"aerobox-dns-direct-1", "rewrite_ttl":60,
+                    "strategy":if ipv6 {"prefer_ipv4"} else {"ipv4_only"}
+                })
+            );
+            assert!(
+                !config["dns"]["servers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|server| server["tag"] == "aerobox-dns-bootstrap")
+            );
+        }
+    }
+
+    #[test]
+    fn hostname_dns_has_an_independent_bootstrap_without_a_profile_dns_server() {
+        let mut config = json!({});
+        let settings = Settings {
+            direct_dns: "tls://dns.example.com".into(),
+            ..Settings::default()
+        };
+        apply_settings(&mut config, &settings).unwrap();
+        let servers = config["dns"]["servers"].as_array().unwrap();
+        let direct = servers
+            .iter()
+            .find(|server| server["tag"] == DIRECT_DNS)
+            .unwrap();
+        let bootstrap = servers
+            .iter()
+            .find(|server| server["tag"] == direct["domain_resolver"]["server"])
+            .unwrap();
+        assert!(
+            bootstrap["server"]
+                .as_str()
+                .unwrap()
+                .parse::<std::net::IpAddr>()
+                .is_ok()
+        );
+        assert!(bootstrap.get("domain_resolver").is_none());
+        assert!(bootstrap.get("detour").is_none());
+        assert_eq!(
+            config["route"]["default_domain_resolver"]["server"],
+            DIRECT_DNS
         );
     }
 }
