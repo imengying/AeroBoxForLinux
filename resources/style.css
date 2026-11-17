@@ -33,7 +33,6 @@
 /* One type scale for the whole app: page titles lead, card titles follow,
  * and body text remains the reference size. */
 .brand { font-size: 1.22em; font-weight: 700; letter-spacing: .01em; }
-.page-title { font-size: 1.06em; font-weight: 700; }
 .section-title, .resource-name { font-size: 1em; font-weight: 600; }
 .empty-title { font-size: 1.04em; font-weight: 600; }
 .small { font-size: 0.90em; }
@@ -131,15 +130,12 @@
 .log-view { font-size: 0.95em; }
 .editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
-.settings-group { margin-bottom: 0.27em; }
 .page-content > preferencesgroup { margin-top: 0.27em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
 separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
 .padded-card { padding: 1.09em 1.27em; }
 
-.metrics > flowboxchild { padding: 0; }
-.stat-card { padding: 0.86em 1em; min-width: 14em; }
 .download { color: #2878d7; }
 .upload { color: #62708a; }
 .dark .download { color: #8cbaff; }
@@ -155,7 +151,6 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 3.55em; }
-.settings-dirty-mark { color: #b47716; font-size: 0.75em; }
 .aerobox-window .boxed-list { border-radius: 12px; border: 1px solid #e2e6ed; box-shadow: none; background: #ffffff; }
 .aerobox-window.dark .boxed-list { border-color: #363c47; background: #24282f; }
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .70); }

@@ -1039,16 +1039,6 @@ pub(super) fn smoke_ruleset(
         );
         return Ok(());
     }
-    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-        let mut result = Vec::new();
-        let mut child = root.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            result.extend(descendants(&widget));
-            result.push(widget);
-        }
-        result
-    }
     let window = parent
         .application()
         .context("缺少应用")?

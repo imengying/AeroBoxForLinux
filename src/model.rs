@@ -306,27 +306,9 @@ pub fn builtin_seed(id: &str) -> Option<&'static [u8]> {
     }
 }
 
-pub fn add_builtin_resources(state: &mut State) -> Result<usize> {
-    let mut added = 0;
-    for rule in builtin_resources() {
-        if !state.rulesets.iter().any(|r| r.id == rule.id) {
-            ensure!(
-                !state.rulesets.iter().any(|r| r.name == rule.name),
-                "已有同名规则：{}",
-                rule.name
-            );
-            state.rulesets.push(rule);
-            added += 1;
-        }
-    }
-    state.validate()?;
-    Ok(added)
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    pub schema: u32,
     pub settings: Settings,
     pub subscriptions: Vec<Subscription>,
     pub rulesets: Vec<RuleSet>,
@@ -334,7 +316,6 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            schema: 2,
             settings: Settings::default(),
             subscriptions: vec![],
             rulesets: builtin_resources(),
@@ -424,11 +405,6 @@ impl State {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.schema == 2,
-            "不支持的数据格式版本 {}；本版本仅支持全新订阅数据，原文件未更改",
-            self.schema
-        );
         self.settings.validate()?;
         let mut ids = HashSet::new();
         for (id, name) in self
@@ -648,12 +624,11 @@ mod tests {
     #[test]
     fn explicit_reset_archives_invalid_state_without_touching_the_core() {
         let dir = tempfile::tempdir().unwrap();
-        let invalid = br#"{"schema":2,"profiles":[]}"#;
+        let invalid = br#"{"profiles":[]}"#;
         fs::write(dir.path().join("state.json"), invalid).unwrap();
         fs::create_dir(dir.path().join("core")).unwrap();
         fs::write(dir.path().join("core/sing-box"), b"core fixture").unwrap();
         let (store, backup) = Store::reset(Some(dir.path().into())).unwrap();
-        assert_eq!(store.state.schema, 2);
         assert!(store.state.subscriptions.is_empty());
         assert_eq!(fs::read(backup.unwrap()).unwrap(), invalid);
         assert_eq!(
@@ -664,7 +639,6 @@ mod tests {
     #[test]
     fn defaults_are_single_subscription_and_enable_desktop_proxy() {
         let state = State::default();
-        assert_eq!(state.schema, 2);
         assert!(state.settings.system_proxy);
         assert_eq!(state.settings.log_level, "error");
         assert!(state.current_profile().is_err());
@@ -692,8 +666,7 @@ mod tests {
     #[test]
     fn invalid_data_is_rejected_without_overwriting() {
         for original in [
-            br#"{"schema":2,"settings":{},"profiles":[],"subscriptions":[],"rulesets":[]}"#
-                .as_slice(),
+            br#"{"settings":{},"profiles":[],"subscriptions":[],"rulesets":[]}"#.as_slice(),
             b"not-json",
         ] {
             let dir = tempfile::tempdir().unwrap();

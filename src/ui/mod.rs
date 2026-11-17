@@ -932,28 +932,25 @@ impl Ui {
             |s| s.api("GET", "/connections", None),
             move |ui, value| {
                 clear_box(&area);
-                let metrics = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-                metrics.set_homogeneous(true);
+                let totals = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+                totals.set_homogeneous(true);
                 let connections = value["connections"].as_array().cloned().unwrap_or_default();
-                metrics.append(&metric(
+                totals.append(&metric(
                     "go-up-symbolic",
                     "累计上传",
                     &bytes(value["uploadTotal"].as_u64().unwrap_or(0)),
-                    "",
                 ));
-                metrics.append(&metric(
+                totals.append(&metric(
                     "go-down-symbolic",
                     "累计下载",
                     &bytes(value["downloadTotal"].as_u64().unwrap_or(0)),
-                    "",
                 ));
-                metrics.append(&metric(
+                totals.append(&metric(
                     "network-workgroup-symbolic",
                     "活跃连接",
                     &connections.len().to_string(),
-                    "",
                 ));
-                area.append(&metrics);
+                area.append(&totals);
                 let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 area.append(&list);
                 ui.fill_connections(&list, &connections, "");
@@ -1171,6 +1168,18 @@ fn apply_theme(theme: &str) {
         _ => adw::ColorScheme::Default,
     });
 }
+/// Depth-first list of every descendant widget, used by the UI checks.
+pub(super) fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+    let mut widgets = vec![];
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        widgets.extend(descendants(&widget));
+        widgets.push(widget);
+    }
+    widgets
+}
+
 fn label(text: &str, classes: &str) -> gtk::Label {
     let label = gtk::Label::builder().label(text).xalign(0.0).build();
     // The hierarchy is defined once in style.css. Adding libadwaita title or
@@ -1186,9 +1195,6 @@ fn margin(widget: &impl IsA<gtk::Widget>, left: i32, right: i32, top: i32, botto
     widget.set_margin_end(right);
     widget.set_margin_top(top);
     widget.set_margin_bottom(bottom);
-}
-fn margin_inner(widget: &impl IsA<gtk::Widget>, _: i32) {
-    widget.add_css_class("padded-card");
 }
 fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
     let card = gtk::Box::new(orientation, spacing);
@@ -1214,9 +1220,9 @@ fn primary(title: &str, icon: &str) -> gtk::Button {
     button.set_child(Some(&row));
     button
 }
-fn metric(icon: &str, title: &str, value: &str, subtitle: &str) -> gtk::Box {
+fn metric(icon: &str, title: &str, value: &str) -> gtk::Box {
     let card = card(gtk::Orientation::Vertical, 10);
-    margin_inner(&card, 20);
+    card.add_css_class("padded-card");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.append(&label(title, "muted small"));
     let icon = gtk::Image::from_icon_name(icon);
@@ -1226,7 +1232,6 @@ fn metric(icon: &str, title: &str, value: &str, subtitle: &str) -> gtk::Box {
     row.append(&icon);
     card.append(&row);
     card.append(&label(value, "metric-value"));
-    card.append(&label(subtitle, "resource-subtitle"));
     card
 }
 fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
@@ -1572,7 +1577,6 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 28 => "nodes-narrow.png",
                 29 => "settings-unsaved.png",
                 38 => "settings-data.png",
-                43 => "settings-data.png",
                 46 => "settings-network.png",
                 48 => "settings-tun-permission.png",
                 _ => "",

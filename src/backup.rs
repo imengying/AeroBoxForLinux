@@ -81,7 +81,6 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
     ensure!(backup.rulesets.len() <= 5000, "备份中的规则集过多");
     let mut files = HashMap::new();
     let mut state = State {
-        schema: 2,
         settings: backup.settings,
         subscriptions: backup.subscriptions,
         rulesets: backup

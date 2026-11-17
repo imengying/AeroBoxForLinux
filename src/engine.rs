@@ -596,10 +596,6 @@ impl Service {
     pub fn check_current(&self) -> Result<()> {
         self.check(&self.generate_current()?)
     }
-    pub fn reload(&self) -> Result<()> {
-        let _op = self.operation.lock().unwrap();
-        self.reload_locked()
-    }
     pub fn restart(&self) -> Result<()> {
         self.desired_running.store(true, Ordering::SeqCst);
         let _op = self.operation.lock().unwrap();
@@ -1113,10 +1109,6 @@ impl Service {
         Ok(())
     }
 
-    pub fn select_outbound(&self, group: &str, name: &str) -> Result<()> {
-        let _op = self.operation.lock().unwrap();
-        self.select_outbound_locked(group, name)
-    }
     fn select_outbound_locked(&self, group: &str, name: &str) -> Result<()> {
         let tag = percent_encoding::utf8_percent_encode(group, percent_encoding::NON_ALPHANUMERIC);
         let path = format!("/proxies/{tag}");

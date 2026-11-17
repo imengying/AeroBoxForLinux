@@ -910,17 +910,6 @@ impl Ui {
         });
     }
 }
-
-fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-    let mut widgets = vec![];
-    let mut child = root.first_child();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        widgets.extend(descendants(&widget));
-        widgets.push(widget);
-    }
-    widgets
-}
 fn group(title: &str) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title(title);

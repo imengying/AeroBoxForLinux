@@ -528,16 +528,6 @@ fn format_timestamp(timestamp: u64, pattern: &str) -> String {
 
 pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) -> Result<()> {
     use anyhow::ensure;
-    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-        let mut result = vec![];
-        let mut child = root.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            result.extend(descendants(&widget));
-            result.push(widget);
-        }
-        result
-    }
     ensure!(ui.jobs.get() == 0, "订阅选用未完成");
     let widgets = descendants(&ui.body);
     ensure!(
@@ -679,16 +669,6 @@ pub(super) fn smoke_import_window(ui: &Rc<Ui>) -> Result<adw::Window> {
 
 pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
-    fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-        let mut widgets = vec![];
-        let mut next = root.first_child();
-        while let Some(child) = next {
-            next = child.next_sibling();
-            widgets.extend(descendants(&child));
-            widgets.push(child);
-        }
-        widgets
-    }
     if step == 3 {
         ensure!(ui.jobs.get() == 0, "订阅导入未完成");
         let state = ui.service.snapshot();
@@ -802,16 +782,6 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
 }
 
 pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
-    fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
-        let mut widgets = vec![];
-        let mut child = widget.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            widgets.extend(descendants(&widget));
-            widgets.push(widget);
-        }
-        widgets
-    }
     let mut retained = Vec::<glib::WeakRef<glib::Object>>::new();
     let app = ui.window.application().context("缺少应用")?;
     for _ in 0..5 {
