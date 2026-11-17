@@ -20,8 +20,9 @@
 .nav-item { min-height: 3.18em; font-weight: normal; }
 /* Icons follow the discrete font setting, but use a slightly quieter visual
  * weight than the old, oversized navigation glyphs. */
-.brand-mark { -gtk-icon-size: 1.64em; }
-.header-brand .brand { font-size: 1em; font-weight: 700; letter-spacing: .01em; }
+.brand-mark { -gtk-icon-size: 1.5em; }
+.header-brand { margin-left: 0.55em; }
+.header-brand .brand { font-size: 0.96em; font-weight: 700; letter-spacing: .01em; }
 .nav-icon { -gtk-icon-size: 1.45em; }
 .nav-list row:selected .nav-item { font-weight: 600; }
 
@@ -87,7 +88,7 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content, .subscription-card-content { padding: 0.91em 1.09em; }
+.node-card-content, .subscription-card-content { padding: 0.68em 0.86em; }
 .node-name, .subscription-name { font-weight: 600; }
 .node-protocol, .node-delay { font-size: 0.88em; }
 .node-protocol { color: alpha(@window_fg_color, .70); letter-spacing: .02em; }
@@ -105,8 +106,8 @@
 .node-card.node-selected .node-delay.latency-good,
 .node-card.node-selected .node-delay.latency-medium,
 .node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
-.node-card-footer { margin-top: 0.64em; }
-.node-test-button { padding: 0.27em; min-width: 2.36em; min-height: 2.36em; border-radius: 7px; }
+.node-card-footer { margin-top: 0.42em; }
+.node-test-button { padding: 0.18em; min-width: 2em; min-height: 2em; border-radius: 6px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
 .node-card.node-selected .node-test-button:disabled { color: alpha(@accent_fg_color, .68); }
@@ -115,18 +116,19 @@
 .subscription-card-content { min-width: 0; }
 .subscription-card, .subscription-card-content, .subscription-progress { min-width: 0; }
 .subscription-progress trough, .subscription-progress progress { min-width: 0; }
-.subscription-card-header { min-height: 2em; }
+.subscription-card-header { min-height: 1.6em; }
 .subscription-expiry { font-feature-settings: "tnum"; }
 .subscription-expiry.error { color: @error_color; }
-.subscription-progress { margin-top: 0.73em; margin-bottom: 0.64em; }
+.subscription-progress { margin-top: 0.55em; margin-bottom: 0.45em; }
 .subscription-progress trough { background: alpha(@accent_bg_color, .13); border-radius: 3px; min-height: 0.45em; }
 .subscription-progress progress { background: @accent_bg_color; border-radius: 3px; min-height: 0.45em; }
 .subscription-usage { font-size: 0.90em; font-weight: 500; }
-.card-menu > button { padding: 0.27em; min-width: 2.18em; min-height: 2.18em; border-radius: 7px; }
+.card-menu > button { padding: 0.18em; min-width: 1.95em; min-height: 1.95em; border-radius: 6px; }
 .subscription-actions { padding: 0.27em; }
-.subscription-actions button { padding: 0.55em 1.09em; }
+.subscription-actions button { padding: 0.45em 0.91em; }
 
-.log-view, .log-view text { font-family: monospace; font-size: 1em; background: transparent; }
+.log-view, .log-view text { font-family: monospace; background: transparent; }
+.log-view { font-size: 0.95em; }
 .editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
 .settings-group { margin-bottom: 0.27em; }
@@ -137,7 +139,7 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .padded-card { padding: 1.09em 1.27em; }
 
 .metrics > flowboxchild { padding: 0; }
-.stat-card { padding: 1em 1.18em; min-width: 15.5em; }
+.stat-card { padding: 0.86em 1em; min-width: 14em; }
 .download { color: #2878d7; }
 .upload { color: #62708a; }
 .dark .download { color: #8cbaff; }
@@ -162,20 +164,22 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 /* Cards in the same row stretch to the tallest one so their bottom edges line
  * up; inner spacing stays on the card class, not on the flow child. */
 .dashboard-grid > flowboxchild > .surface-card { margin: 0; }
-.home-network { padding: 1.09em 1.27em; min-width: 15.5em; }
-.home-network .exit-ip { font-size: 1.30em; font-weight: 600; }
-.speed-card { padding: 1.09em; min-width: 7.2em; }
-.speed-value { font-size: 1.55em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-mode { padding: 1.09em 1.27em; min-width: 15.5em; }
+.home-network { padding: 0.86em 1em; min-width: 14em; }
+/* A larger numeral needs its own line box, otherwise the glyph tops are
+ * clipped by the compact row height used for the IPv4/IPv6 captions. */
+.home-network .exit-ip { font-size: 1.12em; font-weight: 600; padding-top: 0.1em; }
+.speed-card { padding: 0.86em 0.95em; min-width: 6.6em; }
+.speed-value { font-size: 1.30em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 0.86em 1em; min-width: 14em; }
 .mode-selector { border-radius: 10px; background: #edf0f6; padding: 0.27em; }
-.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 0.45em 1em; font-weight: 500; }
+.mode-selector button { border-radius: 8px; border: none; box-shadow: none; background: transparent; padding: 0.36em 0.91em; font-weight: 500; }
 .mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .dark .mode-selector { background: #1b2029; }
-.home-takeover { padding: 0.18em 1.27em; min-width: 21.82em; }
-.home-switch { min-height: 3.64em; }
+.home-takeover { padding: 0.18em 1em; min-width: 19em; }
+.home-switch { min-height: 3.09em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
-.home-stat { padding: 1.09em 1.27em; min-width: 7.7em; }
-.home-stat-value { font-size: 1.32em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-stat { padding: 0.86em 1em; min-width: 7em; }
+.home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
 .home-start { border-radius: 12px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
 .home-start image { -gtk-icon-size: 20px; }
 

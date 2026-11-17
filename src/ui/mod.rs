@@ -11,7 +11,7 @@ use adw::prelude::*;
 use aerobox_for_linux::{
     engine::Service,
     model::{self, RuleSet, Subscription},
-    platform,
+    network, platform,
 };
 use anyhow::{Context, Result};
 use gtk::{gio, glib};
@@ -121,49 +121,6 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
             smoke_sequence(ui.clone(), path, activate_failed.clone());
         } else {
             ui.start_subscription_updates();
-            let settings = ui.service.snapshot().settings;
-            if settings.auto_start || settings.update_subscriptions_on_start {
-                ui.task(
-                    "启动",
-                    move |s| {
-                        let result = (|| {
-                            let state = s.snapshot();
-                            let needs_nodes = state
-                                .subscriptions
-                                .iter()
-                                .find(|sub| sub.id == settings.active_subscription)
-                                .is_none_or(|sub| !model::has_selectable_node(&sub.nodes));
-                            let update_first = settings.auto_start
-                                && settings.update_subscriptions_on_start
-                                && needs_nodes;
-                            if update_first {
-                                s.update_all_subscriptions()?;
-                            }
-                            let start = if settings.auto_start {
-                                s.start()
-                            } else {
-                                Ok(())
-                            };
-                            let update = if settings.update_subscriptions_on_start && !update_first
-                            {
-                                s.update_all_subscriptions()
-                            } else {
-                                Ok(0)
-                            };
-                            start?;
-                            update?;
-                            Ok(())
-                        })();
-                        Ok(result)
-                    },
-                    |ui, result: Result<()>| {
-                        ui.refresh(Page::Home);
-                        if let Err(e) = result {
-                            ui.error("启动失败", format!("{e:#}"));
-                        }
-                    },
-                );
-            }
         }
     });
     let monitor = Arc::downgrade(&service);
@@ -217,6 +174,11 @@ struct Ui {
     settings_prompt: RefCell<Option<adw::AlertDialog>>,
     smoke_dir: RefCell<Option<PathBuf>>,
     node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
+    /// Last successful exit-IP probe together with the core/selection key it
+    /// was taken for. Page visits reuse it; a node change misses the key.
+    last_detected: RefCell<Option<(String, network::NetworkInfo)>>,
+    /// Number of exit-IP probes started; a page revisit must not increase it.
+    detect_count: Cell<u64>,
 }
 
 impl Ui {
@@ -254,6 +216,21 @@ impl Ui {
         side_header.add_css_class("transparent-header");
         side_header.set_show_end_title_buttons(false);
         side_header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+        // Brand sits in the window's top-left corner, in the sidebar track, so
+        // it stays put instead of shifting with the page header contents.
+        let brand = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        brand.add_css_class("header-brand");
+        brand.set_valign(gtk::Align::Center);
+        brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
+        let data = glib::Bytes::from_static(include_bytes!(
+            "../../resources/io.github.imengying.AeroBoxForLinux.png"
+        ));
+        let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
+        let mark = gtk::Image::from_paintable(Some(&texture));
+        mark.add_css_class("brand-mark");
+        brand.append(&mark);
+        brand.append(&label("AeroBox", "brand"));
+        side_header.pack_start(&brand);
         sidebar.append(&side_header);
         let nav_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -289,35 +266,7 @@ impl Ui {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = adw::HeaderBar::new();
         header.add_css_class("transparent-header app-header");
-        let brand = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        brand.add_css_class("header-brand");
-        brand.set_valign(gtk::Align::Center);
-        brand.update_property(&[gtk::accessible::Property::Label("AeroBox")]);
-        let data = glib::Bytes::from_static(include_bytes!(
-            "../../resources/io.github.imengying.AeroBoxForLinux.png"
-        ));
-        let texture = gtk::gdk::Texture::from_bytes(&data).expect("embedded PNG icon");
-        let mark = gtk::Image::from_paintable(Some(&texture));
-        mark.add_css_class("brand-mark");
-        brand.append(&mark);
-        brand.append(&label("AeroBox", "brand"));
-        header.pack_start(&brand);
         header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
-        let sidebar_button = icon_button("sidebar-show-symbolic", "显示导航");
-        sidebar_button.set_visible(false);
-        let weak = split.downgrade();
-        sidebar_button.connect_clicked(move |_| {
-            if let Some(split) = weak.upgrade() {
-                split.set_show_sidebar(!split.shows_sidebar())
-            }
-        });
-        header.pack_start(&sidebar_button);
-        let weak_button = sidebar_button.downgrade();
-        split.connect_collapsed_notify(move |split| {
-            if let Some(button) = weak_button.upgrade() {
-                button.set_visible(split.is_collapsed())
-            }
-        });
         content.append(&header);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 16);
         body.set_hexpand(true);
@@ -344,11 +293,6 @@ impl Ui {
         let toast = adw::ToastOverlay::new();
         toast.set_child(Some(&split));
         window.set_content(Some(&toast));
-        let breakpoint = adw::Breakpoint::new(
-            adw::BreakpointCondition::parse("max-width: 860sp").expect("breakpoint"),
-        );
-        breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-        window.add_breakpoint(breakpoint);
         let ui = Rc::new(Self {
             typography,
             window,
@@ -379,6 +323,8 @@ impl Ui {
             settings_prompt: RefCell::new(None),
             smoke_dir: RefCell::new(None),
             node_panel: RefCell::new(None),
+            last_detected: RefCell::new(None),
+            detect_count: Cell::new(0),
         });
         let weak = Rc::downgrade(&ui);
         ui.nav.connect_row_selected(move |_, row| {
@@ -398,9 +344,6 @@ impl Ui {
             let destination = ui.clone();
             if ui.confirm_discard_settings(move || destination.navigate(page)) {
                 ui.navigate(page);
-            }
-            if ui.split.is_collapsed() && ui.page.get() == page {
-                ui.split.set_show_sidebar(false)
             }
         });
         let weak = Rc::downgrade(&ui);
@@ -675,12 +618,12 @@ impl Ui {
         while let Some(child) = self.body.first_child() {
             self.body.remove(&child)
         }
-        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        // No page heading: the sidebar already names the current page, and a
+        // repeated title only costs a row of vertical space. Pages that need
+        // actions keep the same row for them alone.
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         heading.set_valign(gtk::Align::Center);
-        let titles = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        titles.set_hexpand(true);
-        titles.append(&label(page.title(), "page-title"));
-        heading.append(&titles);
+        heading.set_hexpand(true);
         self.body.append(&heading);
         match page {
             Page::Home => self.home(),
@@ -690,6 +633,15 @@ impl Ui {
             Page::Connections => self.connections(&heading),
             Page::Logs => self.logs(&heading),
             Page::Settings => self.settings(&heading),
+        }
+        if heading.first_child().is_none() {
+            self.body.remove(&heading);
+        } else {
+            // Actions sit on the right; the freed title space becomes margin.
+            heading.set_halign(gtk::Align::Fill);
+            let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            spacer.set_hexpand(true);
+            heading.prepend(&spacer);
         }
     }
 
@@ -1317,6 +1269,22 @@ fn empty(icon: &str, title: &str, description: &str) -> gtk::Box {
     root.append(&description);
     root
 }
+/// Numeric settings as a plain entry: `AdwSpinRow` always draws stepper
+/// buttons, and hiding them is not supported, so a filtered entry is used
+/// instead. Non-digits are rejected as they are typed.
+fn number_entry(title: &str, value: &str) -> LabeledEntry {
+    let field = LabeledEntry::new(title, value);
+    field.entry.set_input_purpose(gtk::InputPurpose::Digits);
+    field.entry.set_max_length(6);
+    // Reject non-digits as they are typed instead of clamping afterwards.
+    field.entry.connect_insert_text(|entry, text, _| {
+        if !text.chars().all(|c| c.is_ascii_digit()) {
+            entry.stop_signal_emission_by_name("insert-text");
+        }
+    });
+    field
+}
+
 fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
     adw::SwitchRow::builder()
         .title(title)
@@ -1330,7 +1298,9 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 /// Sidebar width follows the font so the brand and nav labels keep their
 /// margins instead of clipping against a fixed track.
 fn sidebar_width(font_size: u32) -> f64 {
-    200.0 * (font_size as f64 / 11.0).clamp(0.9, 1.6)
+    // Narrow enough to leave the cards room, but still wide enough for the
+    // longest navigation label at the largest supported font size.
+    172.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
 }
 fn follow_width(
     grid: &gtk::FlowBox,
@@ -1521,6 +1491,36 @@ fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Screen position of the first log line, used to prove the view does not clip
+/// the top of its text.
+fn logs_bounds(ui: &Rc<Ui>) -> Result<gtk::graphene::Rect> {
+    fn walk(widget: &gtk::Widget, found: &mut Option<gtk::TextView>) {
+        if found.is_none()
+            && let Some(view) = widget.downcast_ref::<gtk::TextView>()
+        {
+            *found = Some(view.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            walk(&current, found);
+        }
+    }
+    let mut found = None;
+    walk(ui.body.upcast_ref(), &mut found);
+    let view = found.context("缺少日志视图")?;
+    let buffer = view.buffer();
+    let iter = buffer.start_iter();
+    let line = view.iter_location(&iter);
+    let offset = view.compute_bounds(&ui.floating).context("日志没有位置")?;
+    Ok(gtk::graphene::Rect::new(
+        offset.x(),
+        offset.y() + line.y() as f32,
+        line.width() as f32,
+        line.height() as f32,
+    ))
+}
+
 fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let step = Cell::new(0);
     let floating_y = Cell::new(None::<f32>);
@@ -1676,9 +1676,34 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
-                9 => ui.navigate(Page::Connections),
-                10 => ui.navigate(Page::Logs),
+                9 => {
+                    // Leaving and returning to the home page must reuse the
+                    // cached reading instead of probing again.
+                    ui.navigate(Page::Home);
+                    home::smoke_detect_once(&ui)?;
+                    let before = ui.detect_count.get();
+                    anyhow::ensure!(before > 0, "首页没有执行出口 IP 检测");
+                    ui.navigate(Page::Connections);
+                    ui.navigate(Page::Home);
+                    anyhow::ensure!(ui.dashboard.borrow().is_some(), "返回首页后没有重建页面");
+                    anyhow::ensure!(
+                        ui.detect_count.get() == before,
+                        "切换页面重新检测了出口 IP: {} -> {}",
+                        before,
+                        ui.detect_count.get()
+                    );
+                    ui.navigate(Page::Connections);
+                }
+                10 => {
+                    // Real log text with descenders and digits, so the layout
+                    // check can see whether the first line is clipped.
+                    ui.service.log("info: 出口 IP 已更新 (IPv4 203.0.113.7)");
+                    ui.service.log("debug: rule-set 中国大陆域名 gzip=ok");
+                    ui.navigate(Page::Logs);
+                }
                 11 => {
+                    let bounds = logs_bounds(&ui)?;
+                    anyhow::ensure!(bounds.y() >= 0.0, "日志首行被裁切: {bounds:?}");
                     apply_theme("light");
                     ui.navigate(Page::Home);
                     ui.window.set_default_size(790, 800);

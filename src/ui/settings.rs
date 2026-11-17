@@ -334,12 +334,6 @@ impl Ui {
         });
         let autostart = switch_row("登录时启动", "", platform::autostart_enabled());
         appearance.add(&autostart);
-        let auto_core = switch_row("启动时连接", "", settings.auto_start);
-        appearance.add(&auto_core);
-        let restart = switch_row("内核异常重启", "", settings.auto_restart);
-        appearance.add(&restart);
-        let update_subs = switch_row("启动时更新订阅", "", settings.update_subscriptions_on_start);
-        appearance.add(&update_subs);
         let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
         appearance.add(&detect_ip);
         general_page.append(&appearance);
@@ -352,10 +346,8 @@ impl Ui {
         let lan = switch_row("允许局域网访问", "", settings.allow_lan);
         lan.set_tooltip_text(Some("允许同一网络的设备使用本地代理端口"));
         network.add(&lan);
-        let mixed_port = adw::SpinRow::with_range(1.0, 65535.0, 1.0);
-        mixed_port.set_title("代理端口");
-        mixed_port.set_value(settings.mixed_port as f64);
-        network.add(&mixed_port);
+        let mixed_port = number_entry("代理端口", &settings.mixed_port.to_string());
+        network.add(&mixed_port.root);
         network_page.append(&network);
         let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
@@ -396,15 +388,13 @@ impl Ui {
             },
         );
         tun_group.add(&stack);
-        let mtu = adw::SpinRow::with_range(576.0, 9000.0, 1.0);
-        mtu.set_title("MTU");
-        mtu.set_value(settings.tun_mtu as f64);
-        tun_group.add(&mtu);
+        let mtu = number_entry("MTU", &settings.tun_mtu.to_string());
+        tun_group.add(&mtu.root);
         let strict = switch_row("严格路由", "", settings.strict_route);
         tun_group.add(&strict);
         for widget in [
             stack.clone().upcast::<gtk::Widget>(),
-            mtu.clone().upcast(),
+            mtu.root.clone().upcast(),
             strict.clone().upcast(),
         ] {
             widget.set_sensitive(settings.tun_enabled);
@@ -527,10 +517,8 @@ impl Ui {
         let testing = group("测速");
         let test_url = LabeledEntry::new("测试地址", &settings.test_url);
         testing.add(&test_url.root);
-        let timeout = adw::SpinRow::with_range(500.0, 60_000.0, 500.0);
-        timeout.set_title("超时（毫秒）");
-        timeout.set_value(settings.test_timeout as f64);
-        testing.add(&timeout);
+        let timeout = number_entry("超时（毫秒）", &settings.test_timeout.to_string());
+        testing.add(&timeout.root);
         network_page.append(&testing);
         let data = group("应用");
         let dir = adw::ActionRow::builder()
@@ -831,12 +819,10 @@ impl Ui {
                     }
                     .into(),
                     core_path: core_path.text().trim().into(),
-                    auto_start: auto_core.is_active(),
-                    auto_restart: restart.is_active(),
                     system_proxy: proxy.is_active(),
                     ipv6: ipv6.is_active(),
                     allow_lan: lan.is_active(),
-                    mixed_port: mixed_port.value() as u16,
+                    mixed_port: mixed_port.text().trim().parse().unwrap_or(0),
                     bypass_lan: bypass.is_active(),
                     sniff: sniff.is_active(),
                     dns_hijack: hijack.is_active(),
@@ -844,7 +830,6 @@ impl Ui {
                     direct_dns: direct_dns.text().trim().into(),
                     remote_dns: remote_dns.text().trim().into(),
                     auto_detect_ip: detect_ip.is_active(),
-                    update_subscriptions_on_start: update_subs.is_active(),
                     tun_enabled: tun.is_active(),
                     tun_stack: match stack.selected() {
                         1 => "gvisor",
@@ -852,11 +837,11 @@ impl Ui {
                         _ => "system",
                     }
                     .into(),
-                    tun_mtu: mtu.value() as u32,
+                    tun_mtu: mtu.text().trim().parse().unwrap_or(0),
                     strict_route: strict.is_active(),
                     log_level: levels[log.selected() as usize].into(),
                     test_url: test_url.text().trim().into(),
-                    test_timeout: timeout.value() as u32,
+                    test_timeout: timeout.text().trim().parse().unwrap_or(0),
                     ..saved.clone()
                 };
                 (next, autostart.is_active())
@@ -907,13 +892,6 @@ impl Ui {
         {
             let update = update_dirty.clone();
             row.connect_selected_notify(move |_| update());
-        }
-        for row in descendants(&self.body)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<adw::SpinRow>().ok())
-        {
-            let update = update_dirty.clone();
-            row.connect_value_notify(move |_| update());
         }
         for row in descendants(&self.body)
             .iter()
@@ -1250,13 +1228,13 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     let widgets = descendants(&ui.body);
     let mtu = widgets
         .iter()
-        .filter_map(|widget| widget.clone().downcast::<adw::SpinRow>().ok())
-        .find(|row| row.title() == "MTU")
-        .context("缺少 MTU 控件")?;
-    mtu.set_value(saved.tun_mtu as f64 + 100.0);
+        .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .context("缺少 MTU 输入")?;
+    mtu.set_text(&(saved.tun_mtu + 100).to_string());
     ensure!(panel.is_dirty.get(), "修改后没有未保存标记");
     ensure!(panel.save.is_sensitive(), "修改后保存按钮没有启用");
-    mtu.set_value(saved.tun_mtu as f64);
+    mtu.set_text(&saved.tun_mtu.to_string());
     ensure!(
         !panel.is_dirty.get(),
         "改回原值仍显示未保存: current={:?}, saved={:?}",
@@ -1264,7 +1242,7 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
         panel.baseline.borrow()
     );
     ensure!(!panel.save.is_sensitive(), "改回原值仍可以保存");
-    mtu.set_value(saved.tun_mtu as f64 + 100.0);
+    mtu.set_text(&(saved.tun_mtu + 100).to_string());
     let theme = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<adw::ComboRow>().ok())
@@ -1406,10 +1384,10 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     ensure!(stack.is_sensitive(), "启用 TUN 后无法选择协议栈");
     stack.set_selected(1);
     body.iter()
-        .filter_map(|w| w.clone().downcast::<adw::SpinRow>().ok())
-        .find(|row| row.title() == "MTU")
-        .context("缺少 MTU 控件")?
-        .set_value(1400.0);
+        .filter_map(|w| w.clone().downcast::<gtk::Entry>().ok())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .context("缺少 MTU 输入")?
+        .set_text("1400");
     body.iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
         .find(|row| row.title() == "字体大小")

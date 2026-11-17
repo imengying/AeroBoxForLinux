@@ -197,9 +197,7 @@ pub fn merge(
                 .map(|s| s.id.clone())
         })
         .unwrap_or_default();
-    // Preserve machine-local startup and window behavior from this desktop.
-    // A backup must not make another login session start AeroBox or its core.
-    settings.auto_start = current.settings.auto_start;
+    // Window geometry describes this desktop; a backup must not resize it.
     settings.width = current.settings.width;
     settings.height = current.settings.height;
     next.settings = settings;

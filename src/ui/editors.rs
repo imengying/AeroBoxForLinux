@@ -1,3 +1,4 @@
+use super::*;
 use std::{
     cell::Cell,
     rc::Rc,
@@ -256,14 +257,15 @@ pub fn subscription(
     form.append(&source_group);
     let updates = group("更新", "");
     let auto_update = switch("自动更新", "", item.auto_update);
-    let interval = adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
-    interval.set_title("更新间隔（分钟）");
-    interval.set_value(item.update_interval_minutes as f64);
-    interval.set_sensitive(item.auto_update);
-    let interval_toggle = interval.clone();
+    let interval = number_entry(
+        "更新间隔（分钟）",
+        &item.update_interval_minutes.to_string(),
+    );
+    interval.root.set_sensitive(item.auto_update);
+    let interval_toggle = interval.root.clone();
     auto_update.connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
     updates.add(&auto_update);
-    updates.add(&interval);
+    updates.add(&interval.root);
     form.append(&updates);
     let edit_nodes = gtk::Button::with_label("编辑节点数据");
     edit_nodes.set_halign(gtk::Align::Start);
@@ -316,7 +318,7 @@ pub fn subscription(
         let name = name.text().trim().to_owned();
         let input = source.text().trim().to_owned();
         let auto_update = auto_update.is_active();
-        let update_interval_minutes = interval.value() as u32;
+        let update_interval_minutes = interval.text().trim().parse().unwrap_or(0);
         let saving = saving.clone();
         let button = button.downgrade();
         let (tx, rx) = mpsc::channel();
@@ -436,10 +438,11 @@ pub fn ruleset(
     let source = LabeledEntry::new("在线地址或本地文件", &item.source);
     let name_row = name.root.clone();
     let source_row = source.root.clone();
-    let interval = adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
-    interval.set_title("自动更新间隔（分钟）");
-    interval.set_value(item.update_interval_minutes as f64);
-    interval.set_visible(item.is_remote());
+    let interval = number_entry(
+        "自动更新间隔（分钟）",
+        &item.update_interval_minutes.to_string(),
+    );
+    interval.root.set_visible(item.is_remote());
     let format_model = gtk::StringList::new(&["JSON 源文件", "SRS 二进制文件"]);
     let format = adw::ComboRow::builder()
         .title("文件格式")
@@ -449,7 +452,7 @@ pub fn ruleset(
     basic.add(&name_row);
     basic.add(&source_row);
     basic.add(&format);
-    basic.add(&interval);
+    basic.add(&interval.root);
     let actions = ["direct", "proxy", "reject"];
     let action = adw::ComboRow::builder()
         .title("匹配后")
@@ -502,7 +505,7 @@ pub fn ruleset(
     let switcher = stack.prev_sibling().expect("editor tabs");
     switcher.set_visible(!item.is_remote());
     let switcher = switcher.downgrade();
-    let remote_interval = interval.clone();
+    let remote_interval = interval.root.clone();
     source.entry.connect_changed(move |source| {
         let online = model::is_online_source(source.text().trim());
         remote_interval.set_visible(online);
@@ -561,7 +564,7 @@ pub fn ruleset(
                 .unwrap_or_else(|| item.clone());
             next.name = name.text().trim().into();
             next.source = source_text;
-            next.update_interval_minutes = interval.value() as u32;
+            next.update_interval_minutes = interval.text().trim().parse().unwrap_or(0);
             next.binary = binary;
             next.action = actions[action.selected() as usize].into();
             next.enabled = enabled.is_active();
@@ -1066,8 +1069,8 @@ pub(super) fn smoke_ruleset(
     let content = stack.child_by_name("content").context("缺少规则内容页")?;
     let interval = widgets
         .iter()
-        .filter_map(|w| w.downcast_ref::<adw::SpinRow>())
-        .find(|r| r.title() == "自动更新间隔（分钟）")
+        .filter_map(|w| w.downcast_ref::<gtk::Entry>())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("自动更新间隔（分钟）"))
         .context("缺少规则更新间隔")?;
     let source = widgets
         .iter()
@@ -1075,17 +1078,17 @@ pub(super) fn smoke_ruleset(
         .find(|entry| entry.placeholder_text().as_deref() == Some("在线地址或本地文件"))
         .context("缺少规则来源")?;
     ensure!(
-        interval.is_visible() && !stack.page(&content).is_visible(),
+        WidgetExt::is_visible(interval) && !stack.page(&content).is_visible(),
         "在线规则显示了无效的本地编辑器"
     );
     let original_source = source.text();
     source.set_text("");
     ensure!(
-        !interval.is_visible() && stack.page(&content).is_visible(),
+        !WidgetExt::is_visible(interval) && stack.page(&content).is_visible(),
         "本地规则编辑不可用"
     );
     source.set_text(&original_source);
-    interval.set_value(120.0);
+    interval.set_text("120");
     let save = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<gtk::Button>())

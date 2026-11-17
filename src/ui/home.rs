@@ -22,14 +22,18 @@ pub(super) struct Dashboard {
     pending: Cell<bool>,
     memory_at: Cell<Option<Instant>>,
     network_pending: Cell<bool>,
+    show_ipv6: Cell<bool>,
 }
 
 impl Ui {
     pub(super) fn home(self: &Rc<Self>) {
         self.body.add_css_class("home-page");
         self.body.set_spacing(16);
-        self.body.set_margin_bottom(32);
-        self.scroll.set_margin_bottom(100);
+        // The start button is an overlay, not a toolbar. Reserve room for it
+        // inside the scrolling content so it never carves a blank strip off
+        // the page; the card list simply ends above the button when scrolled
+        // to the bottom.
+        self.body.set_margin_bottom(84);
         let state = self.service.snapshot();
         let status = self.service.status();
 
@@ -276,6 +280,7 @@ impl Ui {
             pending: Cell::new(false),
             memory_at: Cell::new(None),
             network_pending: Cell::new(false),
+            show_ipv6: Cell::new(state.settings.ipv6),
         });
         let weak = Rc::downgrade(self);
         let weak_dashboard = Rc::downgrade(&dashboard);
@@ -285,11 +290,56 @@ impl Ui {
             }
         });
         dashboard.tick(self);
+        // Detection is tied to the node actually in use, not to page
+        // navigation. `show` reaches this point on every visit, so re-running
+        // it here would probe on each page switch.
+        self.dashboard.replace(Some(dashboard.clone()));
         if state.settings.auto_detect_ip {
-            dashboard.detect(self);
+            let key = self.detect_key();
+            let cached = self
+                .last_detected
+                .borrow()
+                .as_ref()
+                .filter(|(cached, _)| *cached == key)
+                .map(|(_, info)| info.clone());
+            match cached {
+                Some(info) => dashboard.apply(&info),
+                None => dashboard.detect(self),
+            }
         }
-        self.dashboard.replace(Some(dashboard));
     }
+}
+
+impl Ui {
+    /// The exit IP only depends on which core is running and which outbound it
+    /// uses. Navigation is deliberately absent, so revisiting the page keeps
+    /// the previous reading until the user switches node, subscription or mode.
+    fn detect_key(&self) -> String {
+        let state = self.service.snapshot();
+        let status = self.service.status();
+        let node = state
+            .subscriptions
+            .iter()
+            .find(|sub| sub.id == state.settings.active_subscription)
+            .and_then(|sub| sub.selected_node.clone())
+            .unwrap_or_default();
+        format!(
+            "{}:{}:{}:{}",
+            status.pid.map_or(-1, i64::from),
+            state.settings.active_subscription,
+            node,
+            state.settings.routing_mode
+        )
+    }
+}
+
+/// Start exactly one probe on behalf of the smoke run, which disables the
+/// automatic probe so screenshots stay deterministic.
+pub(super) fn smoke_detect_once(ui: &Rc<Ui>) -> Result<()> {
+    let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
+    dashboard.detect(ui);
+    anyhow::ensure!(ui.detect_count.get() > 0, "手动检测没有启动");
+    Ok(())
 }
 
 impl Dashboard {
@@ -376,10 +426,30 @@ impl Dashboard {
             }
         });
     }
+    fn show_info(&self, info: &aerobox_for_linux::network::NetworkInfo) {
+        self.ipv4.set_text(info.ipv4.as_deref().unwrap_or("不可用"));
+        if self.show_ipv6.get() {
+            self.ipv6.set_text(info.ipv6.as_deref().unwrap_or("不可用"));
+        }
+        self.network_status.set_text(if info.via_proxy {
+            "当前出口"
+        } else {
+            "直连出口"
+        });
+        self.network_status.set_tooltip_text(None);
+    }
+
+    fn apply(&self, info: &aerobox_for_linux::network::NetworkInfo) {
+        if !self.network_pending.get() {
+            self.show_info(info);
+        }
+    }
+
     fn detect(self: &Rc<Self>, ui: &Rc<Ui>) {
         if self.network_pending.replace(true) {
             return;
         }
+        ui.detect_count.set(ui.detect_count.get() + 1);
         self.refresh.set_sensitive(false);
         self.network_status.set_text("检测中…");
         self.ipv4.set_text("—");
@@ -413,20 +483,9 @@ impl Dashboard {
             }
             match result {
                 Ok(info) => {
-                    dashboard
-                        .ipv4
-                        .set_text(info.ipv4.as_deref().unwrap_or("不可用"));
-                    if ui.service.snapshot().settings.ipv6 {
-                        dashboard
-                            .ipv6
-                            .set_text(info.ipv6.as_deref().unwrap_or("不可用"));
-                    }
-                    dashboard.network_status.set_text(if info.via_proxy {
-                        "当前出口"
-                    } else {
-                        "直连出口"
-                    });
-                    dashboard.network_status.set_tooltip_text(None);
+                    let key = ui.detect_key();
+                    ui.last_detected.replace(Some((key, info.clone())));
+                    dashboard.show_info(&info);
                 }
                 Err(e) => {
                     dashboard.network_status.set_text("检测失败");

@@ -49,7 +49,6 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
     let mut original = state();
     original.settings.direct_dns = "tcp://223.5.5.5:5353".into();
     original.settings.remote_dns = "quic://dns.adguard-dns.com".into();
-    original.settings.auto_start = true;
     original.rulesets = vec![
         RuleSet {
             name: "本地规则".into(),
@@ -88,7 +87,6 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
     assert_eq!(original_files.get(&original.rulesets[0].id), Some(&bytes));
 
     let mut current = state();
-    current.settings.auto_start = false;
     current.settings.width = 1320;
     current.settings.height = 860;
     let (merged, mapped_files) =
@@ -106,7 +104,6 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
         merged.subscriptions[1].id
     );
     assert_eq!((merged.settings.width, merged.settings.height), (1320, 860));
-    assert!(!merged.settings.auto_start);
     assert_eq!(mapped_files.len(), 1);
     let (merged_twice, _) = backup::merge(&merged, imported, original_files).unwrap();
     assert_eq!(merged_twice.subscriptions.len(), 3);

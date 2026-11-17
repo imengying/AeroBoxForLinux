@@ -369,16 +369,16 @@ impl Ui {
         hint.add_css_class("small");
         form.append(&hint);
         let auto_update = switch_row("自动更新", "", true);
-        let interval =
-            adw::SpinRow::with_range(1.0, model::UPDATE_INTERVAL_MAX_MINUTES as f64, 10.0);
-        interval.set_title("更新间隔（分钟）");
-        interval.set_value(model::UPDATE_INTERVAL_DEFAULT_MINUTES as f64);
-        let interval_toggle = interval.clone();
+        let interval = number_entry(
+            "更新间隔（分钟）",
+            &model::UPDATE_INTERVAL_DEFAULT_MINUTES.to_string(),
+        );
+        let interval_toggle = interval.root.clone();
         auto_update
             .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
         let updates = adw::PreferencesGroup::new();
         updates.add(&auto_update);
-        updates.add(&interval);
+        updates.add(&interval.root);
         form.append(&updates);
         let error = gtk::Label::builder()
             .wrap(true)
@@ -472,7 +472,7 @@ impl Ui {
                 .to_string();
             let name = name.text().trim().to_owned();
             let auto_update = auto_update.is_active();
-            let interval = interval.value() as u32;
+            let interval = interval.text().trim().parse().unwrap_or(0);
             let window = weak_window.clone();
             let error = error.clone();
             let busy = busy.clone();
@@ -739,12 +739,11 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
     );
     let interval = widgets
         .iter()
-        .filter_map(|w| w.downcast_ref::<adw::SpinRow>())
-        .find(|row| row.title() == "更新间隔（分钟）")
+        .filter_map(|w| w.downcast_ref::<gtk::Entry>())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("更新间隔（分钟）"))
         .context("缺少分钟更新间隔")?;
     ensure!(
-        interval.value() == model::UPDATE_INTERVAL_DEFAULT_MINUTES as f64
-            && interval.adjustment().upper() == model::UPDATE_INTERVAL_MAX_MINUTES as f64,
+        interval.text() == model::UPDATE_INTERVAL_DEFAULT_MINUTES.to_string(),
         "导入窗口的默认更新间隔无效"
     );
     let source = widgets

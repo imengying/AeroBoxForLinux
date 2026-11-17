@@ -186,9 +186,9 @@ impl Service {
             if let Err(e) = self.restore_proxy() {
                 self.log(format!("恢复代理失败: {e:#}"))
             };
-            let restart = self.snapshot().settings.auto_restart
-                && !status.success()
-                && self.desired_running.load(Ordering::SeqCst);
+            // A failed core exit is always retried while the user still wants
+            // a connection; only an explicit stop disables the retry.
+            let restart = !status.success() && self.desired_running.load(Ordering::SeqCst);
             drop(operation);
             if restart {
                 if uptime.is_some_and(|t| t < Duration::from_secs(2)) {
