@@ -238,11 +238,10 @@ pub fn subscription(
     source.with_suffix(&choose);
     let name_row = name.root.clone();
     let source_row = source.root.clone();
-    let source_for_file = source.clone();
+    let source_for_file = source.entry.downgrade();
     let weak = editor.window.downgrade();
     choose.connect_clicked(move |_| {
-        if let Some(parent) = weak.upgrade() {
-            let source = source_for_file.clone();
+        if let (Some(parent), Some(source)) = (weak.upgrade(), source_for_file.upgrade()) {
             glib::MainContext::default().spawn_local(async move {
                 if let Ok(file) = gtk::FileDialog::new().open_future(Some(&parent)).await
                     && let Some(path) = file.path()

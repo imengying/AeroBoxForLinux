@@ -149,6 +149,7 @@ fn backend() -> Result<Backend> {
 #[derive(Debug)]
 pub struct ProxySnapshot {
     restore: Vec<DesktopCommand>,
+    verify: Vec<(DesktopCommand, String)>,
 }
 
 impl ProxySnapshot {
@@ -157,6 +158,23 @@ impl ProxySnapshot {
         for command in &self.restore {
             if let Err(error) = command.run() {
                 errors.push(error.to_string());
+            }
+        }
+        // gsettings can exit successfully even when dconf could not reach the
+        // session bus. Do not discard the snapshot until the saved values are
+        // visible again. KDE reads retain the missing-key default sentinel so
+        // a deleted key is distinguished from an explicitly empty value.
+        for (command, expected) in &self.verify {
+            match command.run() {
+                Ok(actual) if &actual == expected => {}
+                Ok(_) => {
+                    errors.push("系统代理恢复未生效，请检查桌面会话后重试".into());
+                    break;
+                }
+                Err(error) => {
+                    errors.push(error.to_string());
+                    break;
+                }
             }
         }
         ensure!(errors.is_empty(), "恢复系统代理失败: {}", errors.join("; "));
@@ -181,11 +199,14 @@ fn gsettings_keys() -> [(&'static str, &'static str); 10] {
 
 fn capture(backend: &Backend) -> Result<ProxySnapshot> {
     let mut restore = Vec::new();
+    let mut verify = Vec::new();
     match backend {
         Backend::Gnome { settings } => {
             for (schema, key) in gsettings_keys() {
-                let value = DesktopCommand::new(settings, ["get", schema, key]).run()?;
+                let read = DesktopCommand::new(settings, ["get", schema, key]);
+                let value = read.run()?;
                 restore.push(DesktopCommand::new(settings, ["set", schema, key, &value]));
+                verify.push((read, value));
             }
         }
         Backend::Kde {
@@ -202,7 +223,7 @@ fn capture(backend: &Backend) -> Result<ProxySnapshot> {
                 "ReversedException",
                 "ProxyType",
             ] {
-                let value = DesktopCommand::new(
+                let read = DesktopCommand::new(
                     read,
                     [
                         "--file",
@@ -214,8 +235,8 @@ fn capture(backend: &Backend) -> Result<ProxySnapshot> {
                         "--default",
                         &absent,
                     ],
-                )
-                .run()?;
+                );
+                let value = read.run()?;
                 let mut args = vec![
                     "--file",
                     "kioslaverc",
@@ -230,11 +251,12 @@ fn capture(backend: &Backend) -> Result<ProxySnapshot> {
                     args.push(&value);
                 }
                 restore.push(DesktopCommand::new(write, args));
+                verify.push((read, value));
             }
             restore.push(kde_notify(notify));
         }
     }
-    Ok(ProxySnapshot { restore })
+    Ok(ProxySnapshot { restore, verify })
 }
 
 fn address(server: &str) -> Result<(String, u16)> {
@@ -657,12 +679,35 @@ mod tests {
             .map(|(schema, key)| (format!("{schema}/{key}"), serde_json::json!("old-value")))
             .collect();
         fs::write(&state_path, serde_json::to_vec(&initial).unwrap()).unwrap();
-        fs::write(&program, "#!/usr/bin/python3\nimport sys,json\nfrom pathlib import Path\np=Path(__file__).with_suffix('.json')\ns=json.loads(p.read_text())\nkey=sys.argv[2]+'/'+sys.argv[3]\nif sys.argv[1]=='get': print(s[key])\nelif not (Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mode' and sys.argv[4]==\"'manual'\"):\n s[key]=sys.argv[4];p.write_text(json.dumps(s))\n").unwrap();
+        fs::write(&program, r#"#!/usr/bin/python3
+import sys,json
+from pathlib import Path
+p=Path(__file__).with_suffix('.json')
+s=json.loads(p.read_text())
+key=sys.argv[2]+'/'+sys.argv[3]
+if sys.argv[1]=='get': print(s[key])
+elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mode' and sys.argv[4]=="'manual'") or (Path(__file__).with_suffix('.restore-blocked').exists() and sys.argv[4]=='old-value')):
+ s[key]=sys.argv[4];p.write_text(json.dumps(s))
+"#).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
         let backend = Backend::Gnome {
             settings: program.clone(),
         };
         let snapshot = enable_proxy_for(&backend, "127.0.0.1:2080", "mixed").unwrap();
+        let blocked = program.with_extension("restore-blocked");
+        fs::write(&blocked, "").unwrap();
+        assert!(
+            snapshot
+                .restore()
+                .unwrap_err()
+                .to_string()
+                .contains("未生效")
+        );
+        let actual: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(actual["org.gnome.system.proxy/mode"], "'manual'");
+        // The same snapshot remains usable when the desktop starts accepting writes.
+        fs::remove_file(blocked).unwrap();
         snapshot.restore().unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&state_path).unwrap()).unwrap(),
@@ -679,6 +724,42 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fs::read(&state_path).unwrap()).unwrap(),
             initial
         );
+    }
+
+    #[test]
+    fn kde_proxy_restore_preserves_absent_and_empty_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("kconfig-test");
+        let state_path = program.with_extension("json");
+        let initial = serde_json::json!({"httpProxy":"", "ProxyType":"0", "unrelated":"keep"});
+        fs::write(&state_path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        fs::write(
+            &program,
+            r#"#!/usr/bin/python3
+import sys,json
+from pathlib import Path
+p=Path(__file__).with_suffix('.json')
+s=json.loads(p.read_text()); args=sys.argv[1:]; key=args[5]
+if len(args)==6 or '--default' in args:
+ print(s.get(key,args[7] if '--default' in args else ''))
+else:
+ if args[6]=='--delete': s.pop(key,None)
+ else: s[key]=args[6]
+ p.write_text(json.dumps(s))
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = Backend::Kde {
+            read: program.clone(),
+            write: program,
+            notify: PathBuf::from("/bin/true"),
+        };
+        let snapshot = enable_proxy_for(&backend, "127.0.0.1:2080", "mixed").unwrap();
+        snapshot.restore().unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+        assert_eq!(restored, initial);
     }
 
     #[test]

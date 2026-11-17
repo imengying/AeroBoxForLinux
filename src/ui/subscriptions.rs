@@ -404,15 +404,26 @@ impl Ui {
             .build();
         root.append(&form_scroll);
         window.set_content(Some(&root));
+        let busy = Rc::new(Cell::new(false));
         let buffer = source.buffer();
-        {
+        let validate = {
             // Validate as the text changes so the button state and the hint
             // always agree with what the user typed or pasted.
-            let hint = hint.clone();
-            let error = error.clone();
-            let import = import.clone();
+            let hint = hint.downgrade();
+            let error = error.downgrade();
             import.set_sensitive(false);
+            let import = import.downgrade();
+            let busy = busy.clone();
             let refresh = std::rc::Rc::new(move |buffer: &gtk::TextBuffer| {
+                let (Some(import), Some(hint), Some(error)) =
+                    (import.upgrade(), hint.upgrade(), error.upgrade())
+                else {
+                    return;
+                };
+                if busy.get() {
+                    import.set_sensitive(false);
+                    return;
+                }
                 let text = buffer
                     .text(&buffer.start_iter(), &buffer.end_iter(), false)
                     .to_string();
@@ -441,22 +452,33 @@ impl Ui {
                     }
                 }
             });
-            let refresh = refresh.clone();
-            buffer.connect_changed(move |buffer| refresh(buffer));
-        }
+            let changed = refresh.clone();
+            buffer.connect_changed(move |buffer| changed(buffer));
+            refresh
+        };
         let clipboard = window.clipboard();
         let paste_error = error.clone();
+        let paste_busy = busy.clone();
         paste.connect_clicked(move |_| {
+            if paste_busy.get() {
+                return;
+            }
             let buffer = buffer.clone();
             let error = paste_error.clone();
-            clipboard.read_text_async(None::<&gio::Cancellable>, move |result| match result {
-                Ok(Some(text)) => {
-                    buffer.set_text(&text);
-                    error.set_visible(false);
+            let busy = paste_busy.clone();
+            clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
+                if busy.get() {
+                    return;
                 }
-                _ => {
-                    error.set_text("剪贴板没有可导入的文本");
-                    error.set_visible(true);
+                match result {
+                    Ok(Some(text)) => {
+                        buffer.set_text(&text);
+                        error.set_visible(false);
+                    }
+                    _ => {
+                        error.set_text("剪贴板没有可导入的文本");
+                        error.set_visible(true);
+                    }
                 }
             });
         });
@@ -465,7 +487,11 @@ impl Ui {
         let file_source = source.buffer();
         let file_name = name.clone();
         let file_error = error.clone();
+        let file_busy = busy.clone();
         file.connect_clicked(move |button| {
+            if file_busy.get() {
+                return;
+            }
             let (Some(parent), Some(ui)) = (weak_window.upgrade(), weak.upgrade()) else {
                 return;
             };
@@ -474,10 +500,14 @@ impl Ui {
             let error = file_error.clone();
             let button = button.clone();
             let weak = Rc::downgrade(&ui);
+            let busy = file_busy.clone();
             gtk::FileDialog::builder()
                 .title("导入订阅文件")
                 .build()
                 .open(Some(&parent), None::<&gio::Cancellable>, move |result| {
+                    if busy.get() {
+                        return;
+                    }
                     let (Ok(file), Some(ui)) = (result, weak.upgrade()) else {
                         return;
                     };
@@ -502,17 +532,22 @@ impl Ui {
                                 filename,
                             ))
                         },
-                        move |_, result| match result {
-                            Ok((text, filename)) => {
-                                buffer.set_text(&text);
-                                if name.text().is_empty() {
-                                    name.set_text(&filename);
-                                }
-                                error.set_visible(false);
+                        move |_, result| {
+                            if busy.get() {
+                                return;
                             }
-                            Err(e) => {
-                                error.set_text(&format!("{e:#}"));
-                                error.set_visible(true);
+                            match result {
+                                Ok((text, filename)) => {
+                                    buffer.set_text(&text);
+                                    if name.text().is_empty() {
+                                        name.set_text(&filename);
+                                    }
+                                    error.set_visible(false);
+                                }
+                                Err(e) => {
+                                    error.set_text(&format!("{e:#}"));
+                                    error.set_visible(true);
+                                }
                             }
                         },
                     );
@@ -520,7 +555,6 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         let weak_window = window.downgrade();
-        let busy = Rc::new(Cell::new(false));
         let close_guard = busy.clone();
         window.connect_close_request(move |_| {
             if close_guard.get() {
@@ -533,6 +567,10 @@ impl Ui {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if busy.replace(true) {
+                return;
+            }
+            form.set_sensitive(false);
             let buffer = source.buffer();
             let input = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
@@ -543,8 +581,9 @@ impl Ui {
             let window = weak_window.clone();
             let error = error.clone();
             let busy = busy.clone();
+            let form = form.downgrade();
+            let validate = validate.clone();
             error.set_visible(false);
-            busy.set(true);
             ui.button_task(
                 button,
                 "导入中…",
@@ -559,6 +598,10 @@ impl Ui {
                 },
                 move |ui, result| {
                     busy.set(false);
+                    if let Some(form) = form.upgrade() {
+                        form.set_sensitive(true);
+                    }
+                    validate(&buffer);
                     match result {
                         Ok(()) => {
                             if let Some(window) = window.upgrade() {
@@ -760,6 +803,15 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
             .find(|s| s.name == "导入检查")
             .context("导入订阅没有保存")?;
         ensure!(
+            state
+                .subscriptions
+                .iter()
+                .filter(|s| s.name == "导入检查")
+                .count()
+                == 1,
+            "重复点击导入创建了多个订阅"
+        );
+        ensure!(
             sub.source.is_empty() && !sub.auto_update && sub.nodes.len() == 1,
             "本地导入状态无效"
         );
@@ -796,9 +848,10 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         source.buffer().set_text("invalid input");
     } else {
         ensure!(
-            ui.jobs.get() == 0 && save.is_sensitive(),
-            "失败后导入按钮没有恢复"
+            ui.jobs.get() == 0 && source.is_sensitive(),
+            "失败后导入表单没有恢复"
         );
+        ensure!(!save.is_sensitive(), "无效输入不应重新启用导入按钮");
         ensure!(
             widgets
                 .iter()
@@ -820,5 +873,64 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
     }
     save.emit_clicked();
     ensure!(!save.is_sensitive(), "导入期间按钮没有禁用");
+    ensure!(!source.is_sensitive(), "导入期间仍可编辑文本");
+    if step == 2 {
+        let pending = ui.jobs.get();
+        source.buffer().insert_at_cursor(" ");
+        ensure!(!save.is_sensitive(), "文本变更重新启用了忙碌的导入按钮");
+        // Signal delivery can also come from keyboard/default activation.
+        save.emit_clicked();
+        ensure!(ui.jobs.get() == pending, "重复点击启动了第二个导入任务");
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
+    fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut widgets = vec![];
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            widgets.extend(descendants(&widget));
+            widgets.push(widget);
+        }
+        widgets
+    }
+    let mut retained = Vec::<glib::WeakRef<glib::Object>>::new();
+    let app = ui.window.application().context("缺少应用")?;
+    for _ in 0..5 {
+        ui.import_subscription();
+        let window = smoke_import_window(ui)?;
+        for widget in descendants(&window) {
+            if let Some(source) = widget.downcast_ref::<gtk::TextView>() {
+                retained.push(source.buffer().upcast::<glib::Object>().downgrade());
+            }
+            retained.push(widget.upcast::<glib::Object>().downgrade());
+        }
+        window.close();
+        editors::subscription(
+            &ui.window,
+            ui.service.clone(),
+            Subscription::default(),
+            ui.saved(),
+        );
+        let editor = app
+            .windows()
+            .into_iter()
+            .find(|window| window.title().as_deref() == Some("编辑订阅"))
+            .context("缺少订阅编辑弹窗")?;
+        for widget in descendants(&editor) {
+            retained.push(widget.upcast::<glib::Object>().downgrade());
+        }
+        editor.close();
+    }
+    anyhow::ensure!(
+        retained.iter().all(|widget| widget.upgrade().is_none()),
+        "关闭订阅弹窗后仍有 {} 个控件或缓冲区未释放",
+        retained
+            .iter()
+            .filter(|widget| widget.upgrade().is_some())
+            .count()
+    );
     Ok(())
 }

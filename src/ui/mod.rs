@@ -1867,6 +1867,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     settings::smoke_tun_permission(&ui)?;
                 }
                 49..=55 => settings::smoke_autostart(&ui, current - 49)?,
+                56 => subscriptions::smoke_dialog_release(&ui)?,
                 _ => {}
             }
             Ok(())
@@ -1887,7 +1888,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             return glib::ControlFlow::Break;
         }
         step.set(current + 1);
-        if current == 55 {
+        if current == 56 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

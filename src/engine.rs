@@ -41,6 +41,8 @@ pub struct CoreInfo {
 }
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_millis(250);
 const RULE_DOWNLOAD_GROUP: &str = "aerobox-rule-download";
 
 #[derive(Clone, Debug)]
@@ -705,15 +707,6 @@ impl Service {
             r.binary = Some(binary);
             r.subscription_id = subscription_id;
         }
-        thread::sleep(Duration::from_millis(200));
-        {
-            let mut r = self.running.lock().unwrap();
-            if let Some(exit) = r.child.as_mut().unwrap().try_wait()? {
-                r.child = None;
-                r.started = None;
-                bail!("内核启动后退出: {exit}。详情见日志。")
-            }
-        }
         // The cache file can restore a mode different from default_mode. Match
         // the generated configuration before exposing the connection as ready.
         let api = self.running.lock().unwrap().config["experimental"]["clash_api"].clone();
@@ -721,18 +714,25 @@ impl Service {
             .as_str()
             .is_some_and(|value| !value.is_empty())
         {
+            // A remote rule without a seed must finish its first download
+            // before sing-box opens the API. Keep this wait cancellable instead
+            // of treating a still-starting router as a failed mode change.
+            self.wait_for_core_ready()?;
             let mode = api["default_mode"].as_str().unwrap_or("rule");
             let until = Instant::now() + Duration::from_secs(3);
             loop {
+                self.ensure_starting()?;
                 match self.set_runtime_mode_with_timeout(mode, Duration::from_millis(500)) {
                     Ok(()) => break,
                     Err(error) if Instant::now() >= until => {
+                        self.ensure_starting()?;
                         return Err(error.context("内核模式同步失败"));
                     }
                     Err(_) => thread::sleep(Duration::from_millis(30)),
                 }
             }
         }
+        self.ensure_starting()?;
         // A selector's cache can override its configured default. Apply the
         // profile's selected leaf before exposing the connected state.
         if let Some(tag) = selected_tag {
@@ -744,6 +744,7 @@ impl Service {
                 .find(|(_, node)| node.tag == tag)
                 .map(|(key, _)| key.clone());
         }
+        self.ensure_starting()?;
         if proxy {
             self.set_proxy(true)?
         };
@@ -766,6 +767,37 @@ impl Service {
         ));
         Ok(())
     }
+
+    fn ensure_starting(&self) -> Result<()> {
+        ensure!(!self.closing.load(Ordering::SeqCst), "程序正在退出");
+        ensure!(self.desired_running.load(Ordering::SeqCst), "启动已取消");
+        let mut running = self.running.lock().unwrap();
+        let child = running.child.as_mut().context("内核已停止")?;
+        if let Some(exit) = child.try_wait()? {
+            running.child = None;
+            running.started = None;
+            bail!("内核启动后退出: {exit}。详情见日志。")
+        }
+        Ok(())
+    }
+
+    fn wait_for_core_ready(&self) -> Result<()> {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            self.ensure_starting()?;
+            let result = self.api_with_timeout("GET", "/configs", None, STARTUP_REQUEST_TIMEOUT);
+            self.ensure_starting()?;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error) if Instant::now() >= deadline => {
+                    return Err(error
+                        .context("等待内核就绪超时（60 秒），请检查首次在线规则下载或内核日志"));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    }
+
     pub fn stop(&self) -> Result<()> {
         self.desired_running.store(false, Ordering::SeqCst);
         let _op = self.operation.lock().unwrap();
