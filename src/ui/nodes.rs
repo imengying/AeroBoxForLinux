@@ -26,7 +26,7 @@ struct NodeCard {
 }
 
 impl Ui {
-    pub(super) fn nodes(self: &Rc<Self>, heading: &gtk::Box) {
+    pub(super) fn nodes(self: &Rc<Self>) {
         let state = self.service.snapshot();
         let Some(subscription) = state
             .subscriptions
@@ -46,16 +46,41 @@ impl Ui {
             self.body.append(&choose);
             return;
         };
+        self.body.set_margin_bottom(76);
         let subscription_id = subscription.id.clone();
-        let name = label(&subscription.name, "muted");
-        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        self.body.append(&name);
-        let test = gtk::Button::with_label("测速");
-        test.add_css_class("compact-action");
-        test.set_valign(gtk::Align::Center);
+        let test = gtk::Button::new();
+        test.add_css_class("suggested-action");
+        test.add_css_class("primary-action");
+        test.add_css_class("floating-test");
+        test.set_halign(gtk::Align::Start);
+        test.set_valign(gtk::Align::End);
+        test.set_margin_start(20);
+        test.set_margin_bottom(20);
+        let test_row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        test_row.append(&bolt());
+        test_row.append(&label("测速", ""));
+        test.set_child(Some(&test_row));
         test.set_widget_name("nodes-test");
         test.set_tooltip_text(Some("测试此订阅的节点延迟"));
-        heading.append(&test);
+        self.floating.add_overlay(&test);
+        self.nodes_action.replace(Some(test.clone()));
+        // Reserve real scroll space, not just a bottom margin on the content.
+        // Its size follows the button and font, so the final card can scroll
+        // completely above the floating action at large text sizes as well.
+        let body = self.body.downgrade();
+        let button = test.downgrade();
+        test.add_tick_callback(move |_, _| {
+            let (Some(body), Some(button)) = (body.upgrade(), button.upgrade()) else {
+                return glib::ControlFlow::Break;
+            };
+            if button.height() > 0 {
+                let bottom = button.height() + button.margin_bottom() + 24;
+                if body.margin_bottom() != bottom {
+                    body.set_margin_bottom(bottom);
+                }
+            }
+            glib::ControlFlow::Continue
+        });
         let grid = gtk::FlowBox::new();
         grid.add_css_class("nodes-grid");
         grid.set_hexpand(true);
@@ -65,10 +90,12 @@ impl Ui {
         grid.set_homogeneous(true);
         grid.set_min_children_per_line(1);
         grid.set_max_children_per_line(4);
-        grid.set_column_spacing(12);
-        grid.set_row_spacing(12);
+        grid.set_column_spacing(8);
+        grid.set_row_spacing(8);
         grid.set_valign(gtk::Align::Start);
-        follow_width(&grid, 232, 12, 4, true);
+        // FlClash's compact proxy grid: roughly 208px minimum columns, 8px
+        // gaps, with one more column on wide windows rather than wide cards.
+        follow_width(&grid, 208, 8, 6, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -133,27 +160,24 @@ impl NodesPanel {
                 child.add_css_class("node-card");
                 child.set_widget_name("subscription-node");
                 child.set_focusable(true);
-                // Cards share the row width instead of a fixed 220px, so the
-                // grid fills wide windows and reflows evenly in narrow ones.
-                child.set_hexpand(true);
                 child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
-                let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
                 content.add_css_class("node-card-content");
-                let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                title.set_vexpand(true);
+                let title = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                title.set_vexpand(false);
                 let name = label(&node.name, "node-name");
                 name.set_hexpand(true);
                 name.set_valign(gtk::Align::Start);
-                name.set_wrap(true);
+                name.set_wrap(false);
                 name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-                name.set_lines(2);
+                name.set_lines(1);
                 name.set_width_chars(1);
                 name.set_max_width_chars(22);
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 name.set_tooltip_text(Some(&node.name));
                 title.append(&name);
                 let indicator = gtk::Stack::new();
-                indicator.set_size_request(20, 20);
+                indicator.set_size_request(16, 16);
                 indicator.set_valign(gtk::Align::Start);
                 let check = gtk::Image::from_icon_name("object-select-symbolic");
                 check.add_css_class("node-check");
@@ -173,7 +197,7 @@ impl NodesPanel {
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 footer.append(&protocol);
-                let delay = label("—", "muted node-delay");
+                let delay = label("", "muted node-delay");
                 delay.set_xalign(1.0);
                 footer.append(&delay);
                 let test = gtk::Button::new();
@@ -187,11 +211,8 @@ impl NodesPanel {
                     node.name
                 ))]);
                 let test_indicator = gtk::Stack::new();
-                test_indicator.set_size_request(18, 18);
-                test_indicator.add_named(
-                    &gtk::Image::from_icon_name("network-transmit-receive-symbolic"),
-                    Some("icon"),
-                );
+                test_indicator.set_size_request(16, 16);
+                test_indicator.add_named(&bolt(), Some("icon"));
                 let test_spinner = gtk::Spinner::new();
                 test_indicator.add_named(&test_spinner, Some("busy"));
                 test.set_child(Some(&test_indicator));
@@ -502,7 +523,7 @@ fn delay_text(delay: Option<u64>) -> String {
     match delay {
         Some(0) => "超时".into(),
         Some(ms) => format!("{ms} ms"),
-        None => "—".into(),
+        None => "".into(),
     }
 }
 
@@ -532,6 +553,42 @@ pub(super) fn smoke_delay_failure(ui: &Rc<Ui>) -> Result<()> {
     ] {
         update_delay(&card.delay, delay);
         ensure!(card.delay.has_css_class(class), "高延迟或超时没有警示色");
+    }
+    Ok(())
+}
+
+pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let action = ui.nodes_action.borrow().clone().context("缺少悬浮测速")?;
+    ensure!(
+        action.halign() == gtk::Align::Start && action.valign() == gtk::Align::End,
+        "测速不在左下角"
+    );
+    let action_bounds = action
+        .compute_bounds(&ui.floating)
+        .context("悬浮测速没有位置")?;
+    if let Some(card) = panel.cards.borrow().last() {
+        let card_bounds = card
+            .child
+            .compute_bounds(&ui.floating)
+            .context("末尾节点没有位置")?;
+        let overlap_x = card_bounds.x() < action_bounds.x() + action_bounds.width()
+            && action_bounds.x() < card_bounds.x() + card_bounds.width();
+        let overlap_y = card_bounds.y() < action_bounds.y() + action_bounds.height()
+            && action_bounds.y() < card_bounds.y() + card_bounds.height();
+        ensure!(
+            !(overlap_x && overlap_y),
+            "滚到底后测速按钮仍遮挡最后一张卡片: card=({},{},{}x{}) action=({},{},{}x{})",
+            card_bounds.x(),
+            card_bounds.y(),
+            card_bounds.width(),
+            card_bounds.height(),
+            action_bounds.x(),
+            action_bounds.y(),
+            action_bounds.width(),
+            action_bounds.height()
+        );
     }
     Ok(())
 }

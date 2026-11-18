@@ -93,10 +93,18 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
             window.present();
             return;
         }
+        let display = gtk::gdk::Display::default().expect("Wayland display");
+        let resource = gio::Resource::from_data(&glib::Bytes::from_static(include_bytes!(
+            "../../resources/icons.gresource"
+        )))
+        .expect("embedded symbolic icons");
+        gio::resources_register(&resource);
+        gtk::IconTheme::for_display(&display)
+            .add_resource_path("/io/github/imengying/AeroBoxForLinux/icons");
         let provider = gtk::CssProvider::new();
         provider.load_from_data(include_str!("../../resources/style.css"));
         gtk::style_context_add_provider_for_display(
-            &gtk::gdk::Display::default().expect("Wayland display"),
+            &display,
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
@@ -156,6 +164,7 @@ struct Ui {
     scroll: gtk::ScrolledWindow,
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
+    nodes_action: RefCell<Option<gtk::Button>>,
     settings_action: RefCell<Option<gtk::Button>>,
     nav: gtk::ListBox,
     nav_scroll: gtk::ScrolledWindow,
@@ -242,12 +251,12 @@ impl Ui {
         let nav = gtk::ListBox::new();
         nav.add_css_class("nav-list");
         nav.set_selection_mode(gtk::SelectionMode::Single);
-        margin(&nav, 12, 12, 0, 16);
+        margin(&nav, 8, 8, 0, 16);
         for page in Page::ALL {
             let row = gtk::ListBoxRow::new();
-            let item = gtk::Box::new(gtk::Orientation::Horizontal, 13);
+            let item = gtk::Box::new(gtk::Orientation::Horizontal, 10);
             item.add_css_class("nav-item");
-            margin(&item, 15, 12, 0, 0);
+            margin(&item, 12, 8, 0, 0);
             let image = gtk::Image::from_icon_name(page.icon());
             image.add_css_class("nav-icon");
             item.append(&image);
@@ -305,6 +314,7 @@ impl Ui {
             scroll,
             floating,
             home_action: RefCell::new(None),
+            nodes_action: RefCell::new(None),
             settings_action: RefCell::new(None),
             nav,
             nav_scroll,
@@ -611,6 +621,9 @@ impl Ui {
         if let Some(button) = self.home_action.borrow_mut().take() {
             self.floating.remove_overlay(&button);
         }
+        if let Some(button) = self.nodes_action.borrow_mut().take() {
+            self.floating.remove_overlay(&button);
+        }
         if let Some(button) = self.settings_action.borrow_mut().take() {
             self.floating.remove_overlay(&button);
         }
@@ -627,7 +640,7 @@ impl Ui {
         self.body.append(&heading);
         match page {
             Page::Home => self.home(),
-            Page::Nodes => self.nodes(&heading),
+            Page::Nodes => self.nodes(),
             Page::Subscriptions => self.subscriptions(&heading),
             Page::Rules => self.rules(&heading),
             Page::Connections => self.connections(&heading),
@@ -738,9 +751,9 @@ impl Ui {
                 _ => "直连",
             };
             let meta = if item.is_remote() {
-                format!("{action} · 每 {} 分钟更新", item.update_interval_minutes)
+                action.to_owned()
             } else {
-                format!("{action} · 本地 · {}", updated(item.updated))
+                format!("{action} · 本地")
             };
             let row = resource_row("view-list-bullet-symbolic", &item.name, &meta);
             // Trailing controls live in one fixed-width slot so the switch,
@@ -932,25 +945,7 @@ impl Ui {
             |s| s.api("GET", "/connections", None),
             move |ui, value| {
                 clear_box(&area);
-                let totals = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-                totals.set_homogeneous(true);
                 let connections = value["connections"].as_array().cloned().unwrap_or_default();
-                totals.append(&metric(
-                    "go-up-symbolic",
-                    "累计上传",
-                    &bytes(value["uploadTotal"].as_u64().unwrap_or(0)),
-                ));
-                totals.append(&metric(
-                    "go-down-symbolic",
-                    "累计下载",
-                    &bytes(value["downloadTotal"].as_u64().unwrap_or(0)),
-                ));
-                totals.append(&metric(
-                    "network-workgroup-symbolic",
-                    "活跃连接",
-                    &connections.len().to_string(),
-                ));
-                area.append(&totals);
                 let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 area.append(&list);
                 ui.fill_connections(&list, &connections, "");
@@ -1086,7 +1081,7 @@ impl Ui {
         let view = gtk::TextView::with_buffer(&buffer);
         view.set_editable(false);
         view.set_cursor_visible(false);
-        view.set_monospace(true);
+        view.set_monospace(false);
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         view.set_left_margin(18);
         view.set_right_margin(18);
@@ -1209,6 +1204,11 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button.set_valign(gtk::Align::Center);
     button
 }
+fn bolt() -> gtk::Image {
+    // A real symbolic icon follows foreground colour on the selected blue card.
+    gtk::Image::from_icon_name("aerobox-bolt-symbolic")
+}
+
 fn primary(title: &str, icon: &str) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("suggested-action");
@@ -1219,20 +1219,6 @@ fn primary(title: &str, icon: &str) -> gtk::Button {
     row.append(&label(title, ""));
     button.set_child(Some(&row));
     button
-}
-fn metric(icon: &str, title: &str, value: &str) -> gtk::Box {
-    let card = card(gtk::Orientation::Vertical, 10);
-    card.add_css_class("padded-card");
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.append(&label(title, "muted small"));
-    let icon = gtk::Image::from_icon_name(icon);
-    icon.add_css_class("metric-icon");
-    icon.set_hexpand(true);
-    icon.set_halign(gtk::Align::End);
-    row.append(&icon);
-    card.append(&row);
-    card.append(&label(value, "metric-value"));
-    card
 }
 fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -1297,15 +1283,16 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
         .active(active)
         .build()
 }
-/// FlowBox only spreads leftover space across children already on a row, so
-/// the column count has to follow the available width. Watching the width from
-/// a frame-clock tick is the only signal a FlowBox reliably offers.
-/// Sidebar width follows the font so the brand and nav labels keep their
+// The column target matches the compact card widths; the FlowBox keeps its
+// rows evenly sized without turning the remaining cards into row fillers.
+// Watching the width from a frame-clock tick is the signal this GTK4
+// version reliably offers.
+// Sidebar width follows the font so the brand and nav labels keep their
 /// margins instead of clipping against a fixed track.
 fn sidebar_width(font_size: u32) -> f64 {
     // Narrow enough to leave the cards room, but still wide enough for the
     // longest navigation label at the largest supported font size.
-    172.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
+    148.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
 }
 fn follow_width(
     grid: &gtk::FlowBox,
@@ -1414,22 +1401,6 @@ fn bytes(bytes: u64) -> String {
         format!("{:.1} KB", n / 1024.0)
     } else {
         format!("{bytes} B")
-    }
-}
-fn updated(time: u64) -> String {
-    if time == 0 {
-        "尚未更新".into()
-    } else {
-        let age = model::now().saturating_sub(time);
-        if age < 60 {
-            "刚刚更新".into()
-        } else if age < 3600 {
-            format!("{} 分钟前更新", age / 60)
-        } else if age < 86400 {
-            format!("{} 小时前更新", age / 3600)
-        } else {
-            format!("{} 天前更新", age / 86400)
-        }
     }
 }
 fn urlpart(text: &str) -> String {
@@ -1629,6 +1600,9 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 }
                 floating_y.set(Some(bounds.y()));
             }
+            if matches!(current, 5 | 8 | 28) {
+                nodes::smoke_floating_action(&ui)?;
+            }
             match current {
                 0 => {
                     let settings = ui.service.snapshot().settings;
@@ -1824,6 +1798,8 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);
+                    let adjustment = ui.scroll.vadjustment();
+                    adjustment.set_value(adjustment.upper());
                 }
                 28 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;

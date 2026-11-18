@@ -84,19 +84,14 @@ impl Ui {
         list.add_css_class("subscriptions-grid");
         list.set_selection_mode(gtk::SelectionMode::None);
         list.set_activate_on_single_click(true);
-        // Homogeneous keeps cards equal width; without a fixed minimum the
-        // FlowBox lets one card fill the row, so the minimum is dropped and the
-        // column count alone decides the layout.
+        // FlClash profile cards: 300px minimum width and at most three columns.
         list.set_homogeneous(true);
-        list.set_min_children_per_line(2);
-        list.set_max_children_per_line(2);
+        list.set_min_children_per_line(1);
+        list.set_max_children_per_line(3);
         list.set_column_spacing(16);
-        list.set_row_spacing(16);
+        list.set_row_spacing(12);
         list.set_valign(gtk::Align::Start);
-        // Subscription cards stay at two columns at most: they carry a name,
-        // expiry, progress bar and usage figures that a third column would
-        // squeeze below a readable width.
-        follow_width(&list, 360, 16, 2, self.typography.preview() >= 16);
+        follow_width(&list, 300, 16, 3, true);
         let ids: Vec<_> = state
             .subscriptions
             .iter()
@@ -116,7 +111,7 @@ impl Ui {
             }
             card.update_property(&[gtk::accessible::Property::Label(&item.name)]);
             card.update_state(&[gtk::accessible::State::Selected(Some(selected))]);
-            let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let header = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             header.add_css_class("subscription-card-header");
             let title = label(&item.name, "subscription-name");
             title.set_widget_name("subscription-name");
@@ -129,7 +124,7 @@ impl Ui {
             title.set_tooltip_text(Some(&item.name));
             header.append(&title);
             let indicator = gtk::Stack::new();
-            indicator.set_size_request(18, 18);
+            indicator.set_size_request(16, 16);
             indicator.set_valign(gtk::Align::Center);
             let check = gtk::Image::from_icon_name("object-select-symbolic");
             check.add_css_class("selection-check");
@@ -144,26 +139,17 @@ impl Ui {
             indicators.borrow_mut().push((indicator.clone(), spinner));
             header.append(&indicator);
             let expiry = if item.expires == 0 {
-                "有效期 —".to_owned()
+                "有效期未知".to_owned()
             } else {
-                let date = format_timestamp(item.expires, "%Y-%m-%d");
-                format!(
-                    "{date} {}",
-                    if item.expires <= model::now() {
-                        "已到期"
-                    } else {
-                        "到期"
-                    }
-                )
+                format!("{} 到期", format_timestamp(item.expires, "%Y-%m-%d"))
             };
             let expiration = label(&expiry, "subscription-expiry muted small");
             expiration.set_widget_name("subscription-expiry");
-            // Let the expiry text shrink so a large font cannot force the card
-            // wider than half the grid.
             expiration.set_ellipsize(gtk::pango::EllipsizeMode::End);
             if item.expires > 0 && item.expires <= model::now() {
                 expiration.add_css_class("error");
             }
+            title.set_tooltip_text(Some(&format!("{} · {}", item.name, expiry)));
             header.append(&expiration);
             let menu = gtk::MenuButton::builder()
                 .icon_name("view-more-symbolic")
@@ -228,45 +214,24 @@ impl Ui {
             header.append(&menu);
             content.append(&header);
             let used = item.download.saturating_add(item.upload);
-            let progress = gtk::ProgressBar::new();
-            progress.set_widget_name("subscription-progress");
-            progress.add_css_class("subscription-progress");
-            progress.set_fraction(if item.total > 0 {
-                (used as f64 / item.total as f64).min(1.0)
-            } else {
-                0.0
-            });
-            progress.set_margin_top(18);
-            progress.set_margin_bottom(16);
-            content.append(&progress);
-            let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            let usage = label(
+            let info = label(
                 &if item.total > 0 {
-                    format!("{} / {}", bytes(used), bytes(item.total))
+                    format!("已用 {} / {}", bytes(used), bytes(item.total))
+                } else if item.source.is_empty() {
+                    "本地订阅".into()
                 } else {
-                    "— / —".into()
+                    "在线订阅".into()
                 },
-                "subscription-usage",
+                "subscription-usage muted",
             );
-            usage.set_widget_name("subscription-usage");
-            usage.set_hexpand(true);
-            usage.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            usage.set_tooltip_text(Some(&if item.total > 0 {
+            info.set_widget_name("subscription-usage");
+            info.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            info.set_tooltip_text(Some(&if item.total > 0 {
                 format!("已用 {}，总量 {}", bytes(used), bytes(item.total))
             } else {
                 "订阅未提供流量信息".into()
             }));
-            footer.append(&usage);
-            let updated = label(&updated(item.updated), "subscription-updated muted small");
-            updated.set_widget_name("subscription-updated");
-            updated.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            updated.set_tooltip_text(
-                (item.updated > 0)
-                    .then(|| format_timestamp(item.updated, "%Y-%m-%d %H:%M"))
-                    .as_deref(),
-            );
-            footer.append(&updated);
-            content.append(&footer);
+            content.append(&info);
             card.set_child(Some(&content));
             list.insert(&card, -1);
         }
@@ -572,23 +537,16 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
             };
             let name = get("subscription-name")?;
             let expiry = get("subscription-expiry")?;
-            let progress = get("subscription-progress")?;
             let usage = get("subscription-usage")?;
-            let updated = get("subscription-updated")?;
             ensure!(
-                name.y() + name.height() <= progress.y()
-                    && expiry.y() + expiry.height() <= progress.y(),
-                "进度条没有位于名称和有效期下方"
+                name.y() + name.height() <= usage.y() && expiry.y() + expiry.height() <= usage.y(),
+                "流量信息没有位于名称和有效期下方"
             );
             ensure!(
-                usage.y() >= progress.y() + progress.height()
-                    && updated.y() >= progress.y() + progress.height(),
-                "流量和更新时间没有位于进度条下方"
+                (name.y() - expiry.y()).abs() < 2.0,
+                "名称和有效期不在同一行"
             );
-            ensure!(
-                usage.x() + usage.width() <= updated.x(),
-                "流量和更新时间重叠"
-            );
+            ensure!(usage.width() > 0.0, "订阅缺少流量信息");
             if index == 1 {
                 let first = list
                     .child_at_index(0)
