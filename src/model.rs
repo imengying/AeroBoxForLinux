@@ -95,6 +95,16 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Resizing the window saves its dimensions independently of settings edits.
+    pub fn same_preferences(&self, other: &Self) -> bool {
+        let comparable = Self {
+            width: other.width,
+            height: other.height,
+            ..self.clone()
+        };
+        comparable == *other
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(self.mixed_port > 0, "本地代理端口须为非零端口");
         ensure!(
@@ -176,7 +186,7 @@ impl Profile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Subscription {
     pub id: String,
@@ -211,7 +221,7 @@ impl Default for Subscription {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuleSet {
     pub id: String,

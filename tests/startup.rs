@@ -77,6 +77,13 @@ fn real_core_waits_for_a_slow_first_rule_download() {
         format!("http://{}/rules.srs", listener.local_addr().unwrap()),
     );
     let config = service.generate_current().unwrap();
+    // Another application took the cached API port before the core started.
+    let _occupied = TcpListener::bind(
+        config["experimental"]["clash_api"]["external_controller"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(config["route"]["rule_set"][0].get("initial_path").is_none());
     let server = thread::spawn(move || {
         let mut stream = accept_with_deadline(&listener);

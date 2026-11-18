@@ -81,8 +81,9 @@ impl SettingsPanel {
     }
 
     fn update_dirty(&self) {
-        let current = (self.read)();
-        let dirty = current != *self.baseline.borrow();
+        let (current, login) = (self.read)();
+        let baseline = self.baseline.borrow();
+        let dirty = !current.same_preferences(&baseline.0) || login != baseline.1;
         self.is_dirty.set(dirty);
         self.save.set_visible(dirty && !self.saving.get());
         self.save.set_sensitive(dirty && !self.saving.get());
@@ -113,10 +114,10 @@ impl SettingsPanel {
             let (Some(panel), Some(ui)) = (weak.upgrade(), weak_ui.upgrade()) else {
                 return;
             };
-            // Take the action before closing: `force_close` may synchronously
-            // emit `closed`, whose dismissal path clears obsolete callbacks.
+            if !ui.finish_settings_prompt(dialog) {
+                return;
+            }
             let after = ui.pending_leave.take();
-            ui.dismiss_settings_prompt(dialog);
             match response {
                 "discard" => {
                     let settings = panel.saved_settings();
@@ -128,8 +129,6 @@ impl SettingsPanel {
                     }
                 }
                 "save" => {
-                    // Closing consumes the navigation guard; hand the action
-                    // to `save`, which owns it until persistence succeeds.
                     ui.pending_leave.replace(after);
                     panel.save(&ui);
                 }
@@ -139,21 +138,6 @@ impl SettingsPanel {
             }
         });
         ui.settings_prompt.replace(Some(dialog.clone()));
-        let weak_ui = Rc::downgrade(ui);
-        dialog.connect_closed(move |dialog| {
-            if let Some(ui) = weak_ui.upgrade()
-                && ui
-                    .settings_prompt
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|current| current == dialog)
-            {
-                ui.settings_prompt.take();
-                if ui.page.get() == Page::Settings {
-                    ui.pending_leave.take();
-                }
-            }
-        });
         dialog.present(Some(&ui.window));
         false
     }
@@ -215,7 +199,9 @@ impl SettingsPanel {
             let (Some(ui), Some(panel)) = (weak_ui.upgrade(), weak_panel.upgrade()) else {
                 return;
             };
-            ui.dismiss_settings_prompt(prompt);
+            if !ui.finish_settings_prompt(prompt) {
+                return;
+            }
             match response {
                 "discard" => {
                     let saved = panel.saved_settings();
@@ -236,18 +222,6 @@ impl SettingsPanel {
                     panel.save(&ui);
                 }
                 _ => {}
-            }
-        });
-        let weak_ui = Rc::downgrade(ui);
-        prompt.connect_closed(move |dialog| {
-            if let Some(ui) = weak_ui.upgrade()
-                && ui
-                    .settings_prompt
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|current| current == dialog)
-            {
-                ui.settings_prompt.take();
             }
         });
         ui.settings_prompt.replace(Some(prompt.clone()));
@@ -582,8 +556,7 @@ impl Ui {
                     let Some(ui) = weak.upgrade() else {
                         return;
                     };
-                    ui.dismiss_settings_prompt(dialog);
-                    if response != "reset" {
+                    if !ui.finish_settings_prompt(dialog) || response != "reset" {
                         return;
                     }
                     let saved = ui.service.snapshot().settings;
@@ -622,18 +595,6 @@ impl Ui {
                             }
                         },
                     );
-                });
-                let weak_ui = Rc::downgrade(ui);
-                dialog.connect_closed(move |dialog| {
-                    if let Some(ui) = weak_ui.upgrade()
-                        && ui
-                            .settings_prompt
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|current| current == dialog)
-                    {
-                        ui.settings_prompt.take();
-                    }
                 });
                 ui.settings_prompt.replace(Some(dialog.clone()));
                 dialog.present(Some(&ui.window));
@@ -767,8 +728,7 @@ impl Ui {
                     let Some(ui) = weak.upgrade() else {
                         return;
                     };
-                    ui.dismiss_settings_prompt(dialog);
-                    if response != "restore" {
+                    if !ui.finish_settings_prompt(dialog) || response != "restore" {
                         return;
                     }
                     if let Some(dir) = ui.smoke_dir.borrow().clone() {
@@ -787,18 +747,6 @@ impl Ui {
                         };
                         restore_file(&ui, path, login);
                     });
-                });
-                let weak_ui = Rc::downgrade(ui);
-                dialog.connect_closed(move |dialog| {
-                    if let Some(ui) = weak_ui.upgrade()
-                        && ui
-                            .settings_prompt
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|current| current == dialog)
-                    {
-                        ui.settings_prompt.take();
-                    }
                 });
                 ui.settings_prompt.replace(Some(dialog.clone()));
                 dialog.present(Some(&ui.window));
@@ -936,7 +884,56 @@ fn smoke_data_button(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
         .with_context(|| format!("设置项 {title} 没有操作按钮"))
 }
 
-pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
+async fn smoke_respond(ui: &Ui, response: &str) -> Result<()> {
+    let dialog = ui
+        .settings_prompt
+        .borrow()
+        .clone()
+        .context("缺少设置确认框")?;
+    anyhow::ensure!(dialog.has_response(response), "确认框缺少操作 {response}");
+    let label = dialog.response_label(response);
+    let button = descendants(&dialog)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+        .find(|button| button.label().as_ref() == Some(&label))
+        .with_context(|| format!("缺少确认按钮「{label}」"))?;
+    let start = std::time::Instant::now();
+    loop {
+        if button.is_mapped()
+            && button.is_sensitive()
+            && button.width() > 0
+            && button.height() > 0
+            && let Some(bounds) = button.compute_bounds(&ui.window)
+            && let Some(hit) = ui.window.pick(
+                f64::from(bounds.x() + bounds.width() / 2.0),
+                f64::from(bounds.y() + bounds.height() / 2.0),
+                gtk::PickFlags::DEFAULT,
+            )
+            && (hit == *button.upcast_ref::<gtk::Widget>() || hit.is_ancestor(&button))
+        {
+            button.emit_clicked();
+            return Ok(());
+        }
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "确认按钮「{label}」未能显示"
+        );
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+}
+
+pub(super) fn smoke_section(ui: &Ui, section: &str) -> Result<()> {
+    let panel = ui.settings_panel.borrow();
+    let stack = &panel.as_ref().context("缺少设置页")?.stack;
+    anyhow::ensure!(
+        stack.child_by_name(section).is_some(),
+        "缺少设置分组 {section}"
+    );
+    stack.set_visible_child_name(section);
+    Ok(())
+}
+
+pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
     match step {
         0 => {
@@ -947,13 +944,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
                 "测试基线字体不应已是最大值"
             );
             smoke_data_button(ui, "导出备份")?.emit_clicked();
-            let prompt = ui
-                .settings_prompt
-                .borrow()
-                .as_ref()
-                .cloned()
-                .context("有未保存修改时导出没有提示")?;
-            prompt.emit_by_name::<()>("response", &[&"save"]);
+            smoke_respond(ui, "save").await?;
             ensure!(ui.jobs.get() > 0, "保存并继续没有启动保存");
         }
         1 => {
@@ -993,13 +984,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
         2 => {
             let before = ui.service.snapshot();
             smoke_data_button(ui, "恢复默认设置")?.emit_clicked();
-            let prompt = ui
-                .settings_prompt
-                .borrow()
-                .as_ref()
-                .cloned()
-                .context("恢复默认设置没有确认提示")?;
-            prompt.emit_by_name::<()>("response", &[&"reset"]);
+            smoke_respond(ui, "reset").await?;
             ensure!(before.subscriptions.len() == ui.service.snapshot().subscriptions.len());
         }
         3 => {
@@ -1024,13 +1009,7 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
         }
         4 => {
             smoke_data_button(ui, "合并恢复备份")?.emit_clicked();
-            let prompt = ui
-                .settings_prompt
-                .borrow()
-                .as_ref()
-                .cloned()
-                .context("合并恢复没有确认提示")?;
-            prompt.emit_by_name::<()>("response", &[&"restore"]);
+            smoke_respond(ui, "restore").await?;
             ensure!(ui.jobs.get() > 0, "选择备份后没有执行合并恢复");
         }
         _ => unreachable!(),
@@ -1038,17 +1017,8 @@ pub(super) fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
+pub(super) async fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
-    fn respond(ui: &Rc<Ui>, response: &str) -> Result<()> {
-        let dialog = ui
-            .settings_prompt
-            .borrow()
-            .clone()
-            .context("缺少设置操作确认框")?;
-        dialog.emit_by_name::<()>("response", &[&response]);
-        Ok(())
-    }
     ensure!(ui.jobs.get() == 0, "设置操作尚未完成");
     if step == 0 {
         // Only Weak handles survive navigation, including all signal closures.
@@ -1083,41 +1053,19 @@ pub(super) fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
                 },
             )?
             .emit_clicked();
-            respond(ui, if step == 4 { "discard" } else { "save" })?;
+            smoke_respond(ui, if step == 4 { "discard" } else { "save" }).await?;
         }
-        1 | 5 => respond(ui, "reset")?,
-        3 => respond(ui, "restore")?,
+        1 | 5 => smoke_respond(ui, "reset").await?,
+        3 => smoke_respond(ui, "restore").await?,
         6 => smoke_restored(ui)?,
         _ => unreachable!(),
     }
     Ok(())
 }
 
-pub(super) fn smoke_scroll_dns(ui: &Rc<Ui>) -> Result<bool> {
-    let direct = descendants(&ui.body)
-        .iter()
-        .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("直连 DNS"))
-        .context("缺少 DNS 输入")?;
-    if direct.height() <= 10 {
-        return Ok(false);
-    }
-    // Scroll the first field of the pair to the top edge so both entries end
-    // up inside the viewport, instead of assuming the document ends there.
-    let scroll = ui.scroll.clone();
-    glib::idle_add_local_once(move || {
-        let Some(bounds) = direct.compute_bounds(&scroll) else {
-            return;
-        };
-        let adjustment = scroll.vadjustment();
-        let target = adjustment.value() + f64::from(bounds.y()) - 24.0;
-        adjustment.set_value(target.clamp(0.0, adjustment.upper() - adjustment.page_size()));
-    });
-    Ok(true)
-}
-
-pub(super) fn smoke_network(ui: &Rc<Ui>) -> Result<()> {
+pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
     let widgets = descendants(&ui.body);
+    let mut entries = Vec::new();
     for (title, expected) in [
         ("直连 DNS", "tcp://223.5.5.5:5353"),
         ("远程 DNS", "tls://one.one.one.one"),
@@ -1127,18 +1075,45 @@ pub(super) fn smoke_network(ui: &Rc<Ui>) -> Result<()> {
             .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
             .find(|entry| entry.placeholder_text().as_deref() == Some(title))
             .with_context(|| format!("缺少 DNS 输入 {title}"))?;
-        anyhow::ensure!(WidgetExt::is_visible(&entry), "{title} 不可见");
         anyhow::ensure!(entry.text() == expected, "{title} 未恢复备份值");
-        let bounds = entry
-            .compute_bounds(&ui.scroll)
-            .with_context(|| format!("{title} 没有位置"))?;
-        anyhow::ensure!(
-            bounds.y() >= 0.0
-                && f64::from(bounds.y()) + f64::from(bounds.height()) <= ui.scroll.height() as f64,
-            "{title} 不在可见区域内"
-        );
+        entries.push(entry);
     }
-    Ok(())
+    let viewport = ui.scroll.child().context("设置页缺少滚动视口")?;
+    let adjustment = ui.scroll.vadjustment();
+    let start = std::time::Instant::now();
+    loop {
+        let bounds: Option<Vec<_>> = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .is_mapped()
+                    .then(|| entry.compute_bounds(&viewport))
+                    .flatten()
+                    .filter(|rect| rect.height() > 0.0)
+            })
+            .collect();
+        if ui.window.visible_dialog().is_none()
+            && let Some(bounds) = bounds
+        {
+            let top = f64::from(bounds[0].y());
+            let bottom = f64::from(bounds[1].y() + bounds[1].height());
+            let height = f64::from(viewport.height());
+            if top >= 0.0 && bottom <= height {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                start.elapsed() < Duration::from_secs(5),
+                "DNS 输入框未完整显示：直连顶部 {top}，远程底部 {bottom}，视口高度 {height}"
+            );
+            let value = adjustment.value();
+            adjustment.clamp_page(value + top.floor(), value + bottom.ceil());
+        }
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "弹窗未关闭或 DNS 输入框尚未布局"
+        );
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
 }
 
 pub(super) fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
@@ -1155,23 +1130,14 @@ pub(super) fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
-/// Height of the first settings row, used to prove that a font change moves
-/// layout and not just glyph size.
-pub(super) fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
+pub(super) async fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
     if let Some(response) = response {
-        let prompt = ui
-            .settings_prompt
-            .borrow()
-            .as_ref()
-            .cloned()
-            .context("离开未保存设置时没有确认提示")?;
         anyhow::ensure!(ui.page.get() == Page::Settings, "确认前已离开设置页");
         anyhow::ensure!(
             ui.pending_leave.borrow().is_some(),
             "离开确认没有保存目标页面"
         );
-        prompt.emit_by_name::<()>("response", &[&response]);
-        return Ok(());
+        return smoke_respond(ui, response).await;
     }
     smoke_edit(ui)?;
     let weak = Rc::downgrade(ui);
@@ -1220,7 +1186,7 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
         .context("缺少设置页控制器")?;
     let (saved, _) = panel.baseline.borrow().clone();
     ensure!(
-        saved == ui.service.snapshot().settings,
+        saved.same_preferences(&ui.service.snapshot().settings),
         "设置基线与持久化值不一致"
     );
     let widgets = descendants(&ui.body);

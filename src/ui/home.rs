@@ -2,6 +2,15 @@ use super::*;
 use aerobox_for_linux::traffic::{Counters, RateMeter};
 use std::time::Instant;
 
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct ExitIpKey {
+    pid: Option<u32>,
+    subscription: String,
+    node: Option<String>,
+    mode: String,
+    ipv6: bool,
+}
+
 pub(super) struct Dashboard {
     controls: gtk::Box,
     modes: Vec<(&'static str, gtk::ToggleButton)>,
@@ -21,8 +30,7 @@ pub(super) struct Dashboard {
     rates: RefCell<RateMeter>,
     pending: Cell<bool>,
     memory_at: Cell<Option<Instant>>,
-    network_pending: Cell<bool>,
-    show_ipv6: Cell<bool>,
+    show_ipv6: bool,
 }
 
 impl Ui {
@@ -279,66 +287,93 @@ impl Ui {
             rates: RefCell::new(RateMeter::default()),
             pending: Cell::new(false),
             memory_at: Cell::new(None),
-            network_pending: Cell::new(false),
-            show_ipv6: Cell::new(state.settings.ipv6),
+            show_ipv6: state.settings.ipv6,
         });
         let weak = Rc::downgrade(self);
         let weak_dashboard = Rc::downgrade(&dashboard);
         refresh.connect_clicked(move |_| {
             if let (Some(ui), Some(dashboard)) = (weak.upgrade(), weak_dashboard.upgrade()) {
-                dashboard.detect(&ui);
+                dashboard.detect(&ui, ui.detect_key());
             }
         });
         dashboard.tick(self);
-        // Detection is tied to the node actually in use, not to page
-        // navigation. `show` reaches this point on every visit, so re-running
-        // it here would probe on each page switch.
         self.dashboard.replace(Some(dashboard.clone()));
-        if state.settings.auto_detect_ip {
-            let key = self.detect_key();
-            let cached = self
-                .last_detected
-                .borrow()
-                .as_ref()
-                .filter(|(cached, _)| *cached == key)
-                .map(|(_, info)| info.clone());
-            match cached {
-                Some(info) => dashboard.apply(&info),
-                None => dashboard.detect(self),
-            }
+        let key = self.detect_key();
+        if self.detecting.borrow().as_ref() == Some(&key) {
+            dashboard.show_detecting();
+        } else if let Some((_, info)) = self
+            .last_detected
+            .borrow()
+            .as_ref()
+            .filter(|(cached, _)| cached == &key)
+        {
+            dashboard.show_info(info);
+        } else if state.settings.auto_detect_ip {
+            dashboard.detect(self, key);
         }
     }
 }
 
 impl Ui {
-    /// The exit IP only depends on which core is running and which outbound it
-    /// uses. Navigation is deliberately absent, so revisiting the page keeps
-    /// the previous reading until the user switches node, subscription or mode.
-    fn detect_key(&self) -> String {
+    fn detect_key(&self) -> ExitIpKey {
         let state = self.service.snapshot();
         let status = self.service.status();
         let node = state
             .subscriptions
             .iter()
             .find(|sub| sub.id == state.settings.active_subscription)
-            .and_then(|sub| sub.selected_node.clone())
-            .unwrap_or_default();
-        format!(
-            "{}:{}:{}:{}",
-            status.pid.map_or(-1, i64::from),
-            state.settings.active_subscription,
+            .and_then(|sub| sub.selected_node.clone());
+        ExitIpKey {
+            pid: status.pid,
+            subscription: state.settings.active_subscription,
             node,
-            state.settings.routing_mode
-        )
+            mode: state.settings.routing_mode,
+            ipv6: state.settings.ipv6,
+        }
     }
 }
 
-/// Start exactly one probe on behalf of the smoke run, which disables the
-/// automatic probe so screenshots stay deterministic.
-pub(super) fn smoke_detect_once(ui: &Rc<Ui>) -> Result<()> {
+pub(super) fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
+    let before = ui.detect_count.get();
+    let ipv6 = ui.service.snapshot().settings.ipv6;
+    ui.service.update(|state| {
+        state.settings.auto_detect_ip = true;
+        Ok(())
+    })?;
+    // Seed a known reading so this check never depends on a public IP service.
+    ui.last_detected.replace(Some((
+        ui.detect_key(),
+        network::NetworkInfo {
+            ipv4: Some("192.0.2.10".into()),
+            ..Default::default()
+        },
+    )));
+    ui.navigate(Page::Home);
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
-    dashboard.detect(ui);
-    anyhow::ensure!(ui.detect_count.get() > 0, "手动检测没有启动");
+    anyhow::ensure!(
+        dashboard.ipv4.text() == "192.0.2.10" && ui.detect_count.get() == before,
+        "返回首页时没有复用出口 IP"
+    );
+    ui.navigate(Page::Connections);
+    ui.service.update(|state| {
+        state.settings.ipv6 = !ipv6;
+        Ok(())
+    })?;
+    ui.navigate(Page::Home);
+    anyhow::ensure!(ui.detect_count.get() == before + 1, "IPv6 改变后未重新检测");
+    ui.navigate(Page::Connections);
+    ui.navigate(Page::Home);
+    let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
+    anyhow::ensure!(
+        ui.detect_count.get() == before + 1 && !dashboard.refresh.is_sensitive(),
+        "切换页面后没有复用正在进行的检测"
+    );
+    ui.navigate(Page::Connections);
+    ui.service.update(|state| {
+        state.settings.auto_detect_ip = false;
+        state.settings.ipv6 = ipv6;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -428,7 +463,7 @@ impl Dashboard {
     }
     fn show_info(&self, info: &aerobox_for_linux::network::NetworkInfo) {
         self.ipv4.set_text(info.ipv4.as_deref().unwrap_or("不可用"));
-        if self.show_ipv6.get() {
+        if self.show_ipv6 {
             self.ipv6.set_text(info.ipv6.as_deref().unwrap_or("不可用"));
         }
         self.network_status.set_text(if info.via_proxy {
@@ -439,59 +474,69 @@ impl Dashboard {
         self.network_status.set_tooltip_text(None);
     }
 
-    fn apply(&self, info: &aerobox_for_linux::network::NetworkInfo) {
-        if !self.network_pending.get() {
-            self.show_info(info);
-        }
-    }
-
-    fn detect(self: &Rc<Self>, ui: &Rc<Ui>) {
-        if self.network_pending.replace(true) {
-            return;
-        }
-        ui.detect_count.set(ui.detect_count.get() + 1);
+    fn show_detecting(&self) {
         self.refresh.set_sensitive(false);
         self.network_status.set_text("检测中…");
+        self.network_status.set_tooltip_text(None);
         self.ipv4.set_text("—");
-        self.ipv6.set_text(if ui.service.snapshot().settings.ipv6 {
-            "—"
-        } else {
-            "已关闭"
-        });
-        let status = ui.service.status();
+        self.ipv6
+            .set_text(if self.show_ipv6 { "—" } else { "已关闭" });
+    }
+
+    fn detect(&self, ui: &Rc<Ui>, key: ExitIpKey) {
+        self.show_detecting();
+        if ui.detecting.borrow().as_ref() == Some(&key) {
+            return;
+        }
+        ui.detecting.replace(Some(key.clone()));
+        let request = ui.detect_count.get() + 1;
+        ui.detect_count.set(request);
         let service = ui.service.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(service.network_info());
         });
-        let weak = Rc::downgrade(self);
         let weak_ui = Rc::downgrade(ui);
         glib::timeout_add_local(Duration::from_millis(100), move || {
-            let (Some(dashboard), Some(ui)) = (weak.upgrade(), weak_ui.upgrade()) else {
+            let Some(ui) = weak_ui.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if ui.detect_count.get() != request {
+                return glib::ControlFlow::Break;
+            }
             let result = match rx.try_recv() {
                 Ok(v) => v,
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
                 Err(_) => Err(anyhow::anyhow!("检测任务已结束")),
             };
-            dashboard.network_pending.set(false);
-            dashboard.refresh.set_sensitive(true);
-            if ui.service.status().pid != status.pid {
-                dashboard.network_status.set_text("请重新检测");
+            ui.detecting.take();
+            let dashboard = ui.dashboard.borrow().clone();
+            if ui.detect_key() != key {
+                if let Some(view) = dashboard
+                    && !view.refresh.is_sensitive()
+                {
+                    view.refresh.set_sensitive(true);
+                    view.network_status.set_text("请重新检测");
+                }
                 return glib::ControlFlow::Break;
+            }
+            if let Some(view) = &dashboard {
+                view.refresh.set_sensitive(true);
             }
             match result {
                 Ok(info) => {
-                    let key = ui.detect_key();
-                    ui.last_detected.replace(Some((key, info.clone())));
-                    dashboard.show_info(&info);
+                    if let Some(view) = dashboard {
+                        view.show_info(&info);
+                    }
+                    ui.last_detected.replace(Some((key.clone(), info)));
                 }
                 Err(e) => {
-                    dashboard.network_status.set_text("检测失败");
-                    dashboard
-                        .network_status
-                        .set_tooltip_text(Some(&format!("{e:#}")));
+                    ui.last_detected.take();
+                    if let Some(view) = dashboard {
+                        view.network_status.set_text("检测失败");
+                        view.network_status
+                            .set_tooltip_text(Some(&format!("{e:#}")));
+                    }
                 }
             }
             glib::ControlFlow::Break

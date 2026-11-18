@@ -336,6 +336,34 @@ fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() 
 }
 
 #[test]
+fn resizing_with_settings_open_preserves_edits_and_the_latest_window_size() {
+    let (dir, service) = service();
+    let resize = |width, height| {
+        service
+            .update(|state| {
+                state.settings.width = width;
+                state.settings.height = height;
+                Ok(())
+            })
+            .unwrap();
+    };
+    let baseline = service.snapshot().settings;
+    let mut edited = baseline.clone();
+    edited.direct_dns = "tls://dns.example.com".into();
+    resize(1280, 800);
+    service.apply_settings_form(baseline, edited).unwrap();
+    let saved = service.snapshot().settings;
+    assert_eq!(saved.direct_dns, "tls://dns.example.com");
+    assert_eq!((saved.width, saved.height), (1280, 800));
+
+    resize(1120, 700);
+    service.reset_settings(saved).unwrap();
+    let reopened = Store::open(Some(dir.path().into())).unwrap().state.settings;
+    assert_eq!(reopened.direct_dns, Settings::default().direct_dns);
+    assert_eq!((reopened.width, reopened.height), (1120, 700));
+}
+
+#[test]
 fn stale_settings_form_cannot_overwrite_newer_state() {
     let (_dir, service) = service();
     let previous = service.snapshot().settings;

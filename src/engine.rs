@@ -273,24 +273,46 @@ impl Service {
     pub fn generate_profile(&self, state: &State, profile: &Profile) -> Result<Value> {
         Ok(self.prepare_profile(state, profile)?.config)
     }
-    fn control_port(&self, mixed_port: u16) -> Result<u16> {
+    fn control_port(&self, mixed_port: u16, inbounds: &[Value]) -> Result<u16> {
+        use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+
+        let usable = |port: u16| {
+            port != mixed_port && !inbounds.iter().any(|entry| entry["listen_port"] == port)
+        };
+        let active = {
+            let running = self.running.lock().unwrap();
+            running.child.as_ref().and_then(|_| {
+                running.config["experimental"]["clash_api"]["external_controller"]
+                    .as_str()?
+                    .parse::<SocketAddr>()
+                    .ok()
+            })
+        };
+        if let Some(address) = active
+            && usable(address.port())
+        {
+            return Ok(address.port());
+        }
+
         let mut slot = self.control_port.lock().unwrap();
         if let Some(port) = *slot
-            && port != mixed_port
+            && usable(port)
+            && TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
         {
             return Ok(port);
         }
-        let listener =
-            std::net::TcpListener::bind(("127.0.0.1", 0)).context("无法分配内部控制端口")?;
-        let port = listener
-            .local_addr()
-            .map(|address| address.port())
-            .context("无法读取内部控制端口")?;
-        // Binding port zero skips a mixed listener that is already active.
-        // Before startup no listener exists, so explicitly exclude its port.
-        ensure!(port != mixed_port, "内部控制端口与代理端口冲突，请重试");
-        *slot = Some(port);
-        Ok(port)
+        // Keep excluded ports bound while choosing another ephemeral port.
+        let mut excluded = Vec::new();
+        loop {
+            let listener =
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("无法分配内部控制端口")?;
+            let port = listener.local_addr()?.port();
+            if usable(port) {
+                *slot = Some(port);
+                return Ok(port);
+            }
+            excluded.push(listener);
+        }
     }
 
     fn prepare_profile(&self, state: &State, profile: &Profile) -> Result<PreparedConfig> {
@@ -516,7 +538,10 @@ impl Service {
         crate::config::apply_profile_settings(&mut config, &state.settings, lan_tag, ads_tag)?;
         config["experimental"]["clash_api"]["external_controller"] = json!(format!(
             "127.0.0.1:{}",
-            self.control_port(state.settings.mixed_port)?
+            self.control_port(
+                state.settings.mixed_port,
+                config["inbounds"].as_array().context("缺少代理入口")?
+            )?
         ));
         if !nodes.is_empty() {
             // Global always follows the application node picker, independently
@@ -1314,15 +1339,7 @@ impl Service {
                         self.api_with_timeout("GET", "/proxies/proxy", None, CONTROL_TIMEOUT)?;
                     let previous = current["now"].as_str().context("内核没有返回当前节点")?;
                     self.select_outbound_locked("proxy", &target)?;
-                    let expected = serde_json::to_value(&before)?;
-                    if let Err(error) = self.update(|state| {
-                        ensure!(
-                            serde_json::to_value(&*state)? == expected,
-                            "订阅在选择节点期间已改变，请重试"
-                        );
-                        *state = candidate;
-                        Ok(())
-                    }) {
+                    if let Err(error) = self.persist_if_current(&before, candidate) {
                         return Err(match self.select_outbound_locked("proxy", previous) {
                             Ok(()) => error,
                             Err(restore) => error.context(format!("恢复原节点失败：{restore:#}")),
@@ -1452,7 +1469,7 @@ impl Service {
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
         ensure!(
-            before.settings == previous,
+            before.settings.same_preferences(&previous),
             "其他操作已更改设置，请重新打开设置页后再保存"
         );
         let mut candidate = before.clone();
@@ -1464,7 +1481,7 @@ impl Service {
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
         ensure!(
-            before.settings == previous,
+            before.settings.same_preferences(&previous),
             "其他操作已更改设置，请重新打开设置页后再保存"
         );
         let mut candidate = before.clone();
@@ -1857,6 +1874,22 @@ impl Service {
         Ok(())
     }
 
+    /// Save an applied change together with the most recent window dimensions.
+    fn persist_if_current(&self, before: &State, mut candidate: State) -> Result<()> {
+        self.update(|state| {
+            ensure!(
+                state.settings.same_preferences(&before.settings)
+                    && state.subscriptions == before.subscriptions
+                    && state.rulesets == before.rulesets,
+                "数据在操作期间已改变，请重试"
+            );
+            candidate.settings.width = state.settings.width;
+            candidate.settings.height = state.settings.height;
+            *state = candidate;
+            Ok(())
+        })
+    }
+
     /// The operation mutex is held. Check and apply first, then commit the
     /// state atomically; a failed apply/save restores the previous core without
     /// ever persisting a selection which did not become active.
@@ -1915,15 +1948,7 @@ impl Service {
                     self.stop_locked()?;
                 }
             }
-            let expected = serde_json::to_value(before)?;
-            self.update(|state| {
-                ensure!(
-                    serde_json::to_value(&*state)? == expected,
-                    "数据在操作期间已改变，请重试"
-                );
-                *state = candidate;
-                Ok(())
-            })
+            self.persist_if_current(before, candidate)
         })();
         if let Err(error) = apply {
             if let Some((config, binary, id)) = old_running {

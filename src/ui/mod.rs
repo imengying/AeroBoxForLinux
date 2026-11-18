@@ -126,7 +126,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
         );
         ui.window.present();
         if let Some(path) = smoke.clone() {
-            smoke_sequence(ui.clone(), path, activate_failed.clone());
+            glib::spawn_future_local(smoke_sequence(ui.clone(), path, activate_failed.clone()));
         } else {
             ui.start_subscription_updates();
         }
@@ -185,23 +185,26 @@ struct Ui {
     node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
     /// Last successful exit-IP probe together with the core/selection key it
     /// was taken for. Page visits reuse it; a node change misses the key.
-    last_detected: RefCell<Option<(String, network::NetworkInfo)>>,
-    /// Number of exit-IP probes started; a page revisit must not increase it.
+    last_detected: RefCell<Option<(home::ExitIpKey, network::NetworkInfo)>>,
+    detecting: RefCell<Option<home::ExitIpKey>>,
+    /// Identifies the latest probe even when two requests use the same route.
     detect_count: Cell<u64>,
 }
 
 impl Ui {
     fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
+        const MIN_WIDTH: i32 = 480;
+        const MIN_HEIGHT: i32 = 400;
         let settings = service.snapshot().settings;
         apply_theme(&settings.theme);
         let typography = typography::Typography::new(settings.font_size);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("AeroBox")
-            .width_request(480)
-            .height_request(400)
-            .default_width(settings.width.max(700))
-            .default_height(settings.height.max(560))
+            .width_request(MIN_WIDTH)
+            .height_request(MIN_HEIGHT)
+            .default_width(settings.width.max(MIN_WIDTH))
+            .default_height(settings.height.max(MIN_HEIGHT))
             .build();
         window.add_css_class("aerobox-window");
         window.set_icon_name(Some(platform::APP_ID));
@@ -334,6 +337,7 @@ impl Ui {
             smoke_dir: RefCell::new(None),
             node_panel: RefCell::new(None),
             last_detected: RefCell::new(None),
+            detecting: RefCell::new(None),
             detect_count: Cell::new(0),
         });
         let weak = Rc::downgrade(&ui);
@@ -658,16 +662,13 @@ impl Ui {
         }
     }
 
-    fn dismiss_settings_prompt(&self, dialog: &adw::AlertDialog) {
-        let current = self
-            .settings_prompt
-            .borrow()
-            .as_ref()
-            .is_some_and(|current| current == dialog);
-        if current {
-            self.settings_prompt.take();
-            dialog.force_close();
-        }
+    fn finish_settings_prompt(&self, dialog: &adw::AlertDialog) -> bool {
+        // AlertDialog closes itself and emits a response for both button
+        // clicks and dismissal. Its closed signal can arrive before response.
+        self.settings_prompt
+            .borrow_mut()
+            .take_if(|current| current == dialog)
+            .is_some()
     }
 
     fn navigate(self: &Rc<Self>, page: Page) {
@@ -1497,8 +1498,8 @@ fn logs_bounds(ui: &Rc<Ui>) -> Result<gtk::graphene::Rect> {
     ))
 }
 
-fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
-    let step = Cell::new(0);
+async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
+    let mut current = 0;
     let floating_y = Cell::new(None::<f32>);
     let font_size = Cell::new(None);
     let row_height = Cell::new(None);
@@ -1515,12 +1516,9 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
         eprintln!("Wayland smoke: timed out");
         guard_app.quit();
     });
-    glib::timeout_add_local(Duration::from_millis(850), move || {
-        let current = step.get();
-        if matches!(current, 39..=49) && ui.settings_prompt.borrow().is_some() {
-            return glib::ControlFlow::Continue;
-        }
-        let result = (|| -> Result<()> {
+    loop {
+        glib::timeout_future(Duration::from_millis(850)).await;
+        let result: Result<()> = async {
             let name = match current {
                 0 => "home.png",
                 1 => "subscriptions.png",
@@ -1582,13 +1580,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 );
             }
             if current == 18 {
-                for widget in descendants(&ui.body) {
-                    if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
-                        && stack.widget_name() == "settings-sections"
-                    {
-                        stack.set_visible_child_name("network");
-                    }
-                }
+                settings::smoke_section(&ui, "network")?;
                 ui.scroll.vadjustment().set_value(0.0);
             }
             if current == 13 || current == 14 {
@@ -1662,24 +1654,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
-                9 => {
-                    // Leaving and returning to the home page must reuse the
-                    // cached reading instead of probing again.
-                    ui.navigate(Page::Home);
-                    home::smoke_detect_once(&ui)?;
-                    let before = ui.detect_count.get();
-                    anyhow::ensure!(before > 0, "首页没有执行出口 IP 检测");
-                    ui.navigate(Page::Connections);
-                    ui.navigate(Page::Home);
-                    anyhow::ensure!(ui.dashboard.borrow().is_some(), "返回首页后没有重建页面");
-                    anyhow::ensure!(
-                        ui.detect_count.get() == before,
-                        "切换页面重新检测了出口 IP: {} -> {}",
-                        before,
-                        ui.detect_count.get()
-                    );
-                    ui.navigate(Page::Connections);
-                }
+                9 => home::smoke_ip_cache(&ui)?,
                 10 => {
                     // Real log text with descenders and digits, so the layout
                     // check can see whether the first line is clipped.
@@ -1772,19 +1747,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 22 => {
                     subscriptions::smoke_import(&ui, 3)?;
                     ui.navigate(Page::Settings);
-                    fn select_core(widget: &gtk::Widget) {
-                        if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
-                            && stack.widget_name() == "settings-sections"
-                        {
-                            stack.set_visible_child_name("core");
-                        }
-                        let mut child = widget.first_child();
-                        while let Some(widget) = child {
-                            child = widget.next_sibling();
-                            select_core(&widget);
-                        }
-                    }
-                    select_core(ui.body.upcast_ref());
+                    settings::smoke_section(&ui, "core")?;
                 }
                 23 => ui.navigate(Page::Nodes),
                 24 => {
@@ -1817,11 +1780,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_test_node(&ui, 0)?;
                     ui.window.set_default_size(1000, 680);
                     ui.navigate(Page::Settings);
-                    settings::smoke_unsaved(&ui, None)?;
+                    settings::smoke_unsaved(&ui, None).await?;
                 }
                 30 => {
                     settings::smoke_save_bounds(&ui)?;
-                    settings::smoke_unsaved(&ui, Some("cancel"))?;
+                    settings::smoke_unsaved(&ui, Some("cancel")).await?;
                 }
                 31 => {
                     anyhow::ensure!(
@@ -1839,7 +1802,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     );
                 }
                 32 => {
-                    settings::smoke_unsaved(&ui, Some("discard"))?;
+                    settings::smoke_unsaved(&ui, Some("discard")).await?;
                 }
                 33 => {
                     anyhow::ensure!(
@@ -1852,10 +1815,10 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     );
                     ui.navigate(Page::Settings);
                     settings::smoke_restored(&ui)?;
-                    settings::smoke_unsaved(&ui, None)?;
+                    settings::smoke_unsaved(&ui, None).await?;
                 }
                 34 => {
-                    settings::smoke_unsaved(&ui, Some("save"))?;
+                    settings::smoke_unsaved(&ui, Some("save")).await?;
                     anyhow::ensure!(ui.page.get() == Page::Settings, "保存完成前提前离开");
                 }
                 35 => {
@@ -1881,11 +1844,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "未保存时允许关闭窗口"
                     );
                     anyhow::ensure!(ui.window.is_visible(), "未保存时直接关闭了窗口");
-                    settings::smoke_unsaved(&ui, Some("cancel"))?;
+                    settings::smoke_unsaved(&ui, Some("cancel")).await?;
                 }
                 37 => {
                     ui.navigate(Page::Nodes);
-                    settings::smoke_unsaved(&ui, Some("discard"))?;
+                    settings::smoke_unsaved(&ui, Some("discard")).await?;
                 }
                 38 => {
                     anyhow::ensure!(
@@ -1898,17 +1861,16 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     );
                     ui.navigate(Page::Settings);
                     settings::smoke_restored(&ui)?;
-                    settings::smoke_data_action(&ui, 0)?;
+                    settings::smoke_data_action(&ui, 0).await?;
                     resources_before_reset.replace(None);
                 }
-                39 => settings::smoke_data_action(&ui, 1)?,
-                40 => settings::smoke_data_action(&ui, 1)?,
+                40 => settings::smoke_data_action(&ui, 1).await?,
                 41 => {
                     resources_before_reset.replace(Some(ui.service.snapshot()));
-                    settings::smoke_data_action(&ui, 2)?;
+                    settings::smoke_data_action(&ui, 2).await?;
                 }
                 42 => {
-                    settings::smoke_data_action(&ui, 3)?;
+                    settings::smoke_data_action(&ui, 3).await?;
                     let state = ui.service.snapshot();
                     let before = resources_before_reset
                         .borrow()
@@ -1935,7 +1897,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 43 => {
                     let adjustment = ui.scroll.vadjustment();
                     adjustment.set_value(0.0);
-                    settings::smoke_data_action(&ui, 4)?;
+                    settings::smoke_data_action(&ui, 4).await?;
                 }
                 44 => {
                     settings::smoke_restored(&ui)?;
@@ -1953,53 +1915,24 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                             && state.settings.routing_mode == "global",
                         "备份没有正确合并或恢复设置"
                     );
-                    fn select_settings_page(widget: &gtk::Widget, name: &str) {
-                        if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
-                            && stack.widget_name() == "settings-sections"
-                        {
-                            stack.set_visible_child_name(name);
-                        }
-                        let mut child = widget.first_child();
-                        while let Some(widget) = child {
-                            child = widget.next_sibling();
-                            select_settings_page(&widget, name);
-                        }
-                    }
-                    select_settings_page(ui.body.upcast_ref(), "network");
+                    settings::smoke_section(&ui, "network")?;
                 }
-                45 => {
-                    if !settings::smoke_scroll_dns(&ui)? {
-                        return Ok(());
-                    }
-                }
+                45 => settings::smoke_network(&ui).await?,
                 47 => {
-                    settings::smoke_network(&ui)?;
-                    fn select_tun(widget: &gtk::Widget) {
-                        if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
-                            && stack.widget_name() == "settings-sections"
-                        {
-                            stack.set_visible_child_name("tun");
-                        }
-                        let mut child = widget.first_child();
-                        while let Some(widget) = child {
-                            child = widget.next_sibling();
-                            select_tun(&widget);
-                        }
-                    }
-                    select_tun(ui.body.upcast_ref());
+                    settings::smoke_section(&ui, "tun")?;
                 }
                 49 => {
                     settings::smoke_tun_permission(&ui)?;
                 }
-                50..=56 => settings::smoke_autostart(&ui, current - 50)?,
+                50..=56 => settings::smoke_autostart(&ui, current - 50).await?,
                 57 => subscriptions::smoke_dialog_release(&ui)?,
                 _ => {}
             }
             Ok(())
-        })();
+        }.await;
         if let Err(error) = result {
             if current == 0 && error.to_string() == "窗口没有渲染内容" {
-                return glib::ControlFlow::Continue;
+                continue;
             }
             eprintln!("Wayland smoke step {current}: {error:#}");
             if let Err(screenshot_error) = screenshot(
@@ -2010,10 +1943,9 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             }
             failed.set(true);
             app.quit();
-            return glib::ControlFlow::Break;
+            return;
         }
-        step.set(current + 1);
-        if current == 56 {
+        if current == 57 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();
@@ -2023,8 +1955,8 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 else {println!("Wayland smoke: subscription selection, node cards, home modes, rules, settings, import and clipboard passed");}
                 app.quit();
             });
-            return glib::ControlFlow::Break;
+            return;
         }
-        glib::ControlFlow::Continue
-    });
+        current += 1;
+    }
 }

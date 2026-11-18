@@ -308,6 +308,12 @@ fn control_endpoint_is_internal_stable_and_independent_of_the_proxy_port() {
         port,
         moved["inbounds"][0]["listen_port"].as_u64().unwrap() as u16
     );
+    let _other_listener = TcpListener::bind(endpoint).unwrap();
+    let available = service.generate_current().unwrap();
+    assert_ne!(
+        available["experimental"]["clash_api"]["external_controller"], endpoint,
+        "an idle cached endpoint may have been taken by another application"
+    );
 }
 
 #[test]
