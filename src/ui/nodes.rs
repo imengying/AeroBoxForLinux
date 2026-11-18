@@ -46,15 +46,14 @@ impl Ui {
             self.body.append(&choose);
             return;
         };
-        self.body.set_margin_bottom(76);
         let subscription_id = subscription.id.clone();
         let test = gtk::Button::new();
         test.add_css_class("suggested-action");
         test.add_css_class("primary-action");
         test.add_css_class("floating-test");
-        test.set_halign(gtk::Align::Start);
+        test.set_halign(gtk::Align::End);
         test.set_valign(gtk::Align::End);
-        test.set_margin_start(20);
+        test.set_margin_end(20);
         test.set_margin_bottom(20);
         let test_row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
         test_row.append(&bolt());
@@ -64,23 +63,27 @@ impl Ui {
         test.set_tooltip_text(Some("测试此订阅的节点延迟"));
         self.floating.add_overlay(&test);
         self.nodes_action.replace(Some(test.clone()));
-        // Reserve real scroll space, not just a bottom margin on the content.
-        // Its size follows the button and font, so the final card can scroll
-        // completely above the floating action at large text sizes as well.
-        let body = self.body.downgrade();
+        // The overlay includes its children in height measurement. Reserve a
+        // matching viewport margin so the floating action cannot cover cards
+        // at any font size, even before the first frame is allocated.
+        let scroll = self.scroll.downgrade();
         let button = test.downgrade();
-        test.add_tick_callback(move |_, _| {
-            let (Some(body), Some(button)) = (body.upgrade(), button.upgrade()) else {
-                return glib::ControlFlow::Break;
+        let update_inset = move || {
+            let (Some(scroll), Some(button)) = (scroll.upgrade(), button.upgrade()) else {
+                return;
             };
-            if button.height() > 0 {
-                let bottom = button.height() + button.margin_bottom() + 24;
-                if body.margin_bottom() != bottom {
-                    body.set_margin_bottom(bottom);
-                }
+            let (_, height, _, _) = button.measure(gtk::Orientation::Vertical, -1);
+            let inset = (height + button.margin_bottom() + 24).max(76);
+            if scroll.margin_bottom() != inset {
+                scroll.set_margin_bottom(inset);
             }
+        };
+        update_inset();
+        test.add_tick_callback(move |_, _| {
+            update_inset();
             glib::ControlFlow::Continue
         });
+        self.body.set_margin_bottom(24);
         let grid = gtk::FlowBox::new();
         grid.add_css_class("nodes-grid");
         grid.set_hexpand(true);
@@ -89,13 +92,13 @@ impl Ui {
         grid.set_activate_on_single_click(true);
         grid.set_homogeneous(true);
         grid.set_min_children_per_line(1);
-        grid.set_max_children_per_line(4);
+        grid.set_max_children_per_line(8);
         grid.set_column_spacing(8);
         grid.set_row_spacing(8);
         grid.set_valign(gtk::Align::Start);
-        // FlClash's compact proxy grid: roughly 208px minimum columns, 8px
-        // gaps, with one more column on wide windows rather than wide cards.
-        follow_width(&grid, 208, 8, 6, true);
+        // Small proxy tiles, roughly a third of the old card width. The grid
+        // adds another column before it widens the cards.
+        follow_width(&grid, 92, 8, 12, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -161,18 +164,18 @@ impl NodesPanel {
                 child.set_widget_name("subscription-node");
                 child.set_focusable(true);
                 child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
-                let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 content.add_css_class("node-card-content");
-                let title = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let title = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 title.set_vexpand(false);
                 let name = label(&node.name, "node-name");
                 name.set_hexpand(true);
                 name.set_valign(gtk::Align::Start);
-                name.set_wrap(false);
+                name.set_wrap(true);
                 name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-                name.set_lines(1);
+                name.set_lines(2);
                 name.set_width_chars(1);
-                name.set_max_width_chars(22);
+                name.set_max_width_chars(10);
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 name.set_tooltip_text(Some(&node.name));
                 title.append(&name);
@@ -190,15 +193,18 @@ impl NodesPanel {
                 indicator.add_named(&spinner, Some("busy"));
                 title.append(&indicator);
                 content.append(&title);
-                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                footer.add_css_class("node-card-footer");
+                // Protocol, latency and the test control share the lower rows
+                // so the tile stays narrow instead of growing with long names.
                 let protocol = label(&node.protocol, "muted node-protocol");
                 protocol.set_hexpand(true);
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                footer.append(&protocol);
+                content.append(&protocol);
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                footer.add_css_class("node-card-footer");
                 let delay = label("", "muted node-delay");
-                delay.set_xalign(1.0);
+                delay.set_xalign(0.0);
+                delay.set_hexpand(true);
                 footer.append(&delay);
                 let test = gtk::Button::new();
                 test.add_css_class("flat");
@@ -562,8 +568,8 @@ pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
     let action = ui.nodes_action.borrow().clone().context("缺少悬浮测速")?;
     ensure!(
-        action.halign() == gtk::Align::Start && action.valign() == gtk::Align::End,
-        "测速不在左下角"
+        action.halign() == gtk::Align::End && action.valign() == gtk::Align::End,
+        "测速不在右下角"
     );
     let action_bounds = action
         .compute_bounds(&ui.floating)

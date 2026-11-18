@@ -1094,16 +1094,25 @@ pub(super) fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
 }
 
 pub(super) fn smoke_scroll_dns(ui: &Rc<Ui>) -> Result<bool> {
-    let remote = descendants(&ui.body)
+    let direct = descendants(&ui.body)
         .iter()
         .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("远程 DNS"))
+        .find(|entry| entry.placeholder_text().as_deref() == Some("直连 DNS"))
         .context("缺少 DNS 输入")?;
-    if remote.height() <= 10 {
+    if direct.height() <= 10 {
         return Ok(false);
     }
-    let adjustment = ui.scroll.vadjustment();
-    adjustment.set_value(adjustment.upper());
+    // Scroll the first field of the pair to the top edge so both entries end
+    // up inside the viewport, instead of assuming the document ends there.
+    let scroll = ui.scroll.clone();
+    glib::idle_add_local_once(move || {
+        let Some(bounds) = direct.compute_bounds(&scroll) else {
+            return;
+        };
+        let adjustment = scroll.vadjustment();
+        let target = adjustment.value() + f64::from(bounds.y()) - 24.0;
+        adjustment.set_value(target.clamp(0.0, adjustment.upper() - adjustment.page_size()));
+    });
     Ok(true)
 }
 

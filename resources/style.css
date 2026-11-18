@@ -28,7 +28,7 @@
 
 .nav-list { background: transparent; }
 .sidebar-scroll { background: transparent; }
-.nav-list row { border-radius: 10px; margin: 0.12em 0; padding: 0; color: alpha(@window_fg_color, .86); }
+.nav-list row { border-radius: 8px; margin: 0.12em 0; padding: 0; color: alpha(@window_fg_color, .86); }
 .nav-list row:selected { background: alpha(@window_fg_color, .065); color: @window_fg_color; }
 /* Prism's small primary indicator, rather than a full-height blue border. */
 .nav-list row:selected { box-shadow: inset 3px 11px 0 -11px @accent_color, inset 3px -11px 0 -11px @accent_color; }
@@ -56,19 +56,18 @@
 .section-title, .resource-name { font-size: 1em; font-weight: 600; }
 .empty-title { font-size: 1.04em; font-weight: 600; }
 .small { font-size: 0.90em; }
-.surface-card { border-radius: 24px; background: @app_card_bg; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); }
+.surface-card { border-radius: 16px; background: @app_card_bg; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); }
 .dark .surface-card { background: @dark_card_bg; border-color: alpha(#ffffff, .055); box-shadow: 0 2px 8px alpha(#000000, .16); }
-.home-page .surface-card { border-radius: 32px; }
-.primary-action { border-radius: 999px; padding: 0.55em 1.18em; font-weight: 600; }
+.primary-action { border-radius: 12px; padding: 0.55em 1.18em; font-weight: 600; }
 /* Floating corner action: opaque surface with a soft shadow so it stays
  * readable over scrolled content, matching the home start button. */
 .aerobox-window .floating-save,
-.aerobox-window .floating-test { border-radius: 999px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 6px 18px alpha(#183b50,.22); }
+.aerobox-window .floating-test { border-radius: 12px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 6px 18px alpha(#183b50,.22); }
 .aerobox-window .floating-test:disabled { background: @accent_bg_color; color: @accent_fg_color; opacity: .72; }
 .dark .floating-test:disabled { background: #2388f4; color: @accent_fg_color; opacity: .82; }
 .dark .floating-save, .dark .floating-test { box-shadow: 0 6px 18px alpha(#000000,.45); }
-.compact-action { border-radius: 999px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
-.row-icon { background: #e9e9ed; color: #60616a; border-radius: 14px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
+.compact-action { border-radius: 12px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
+.row-icon { background: #e9e9ed; color: #60616a; border-radius: 8px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
 .dark .row-icon { background: #303138; color: #b8becb; }
 
 .resource-subtitle { color: @app_muted; font-size: 0.90em; }
@@ -78,22 +77,22 @@
  * right edge instead of drifting outward. */
 .row-actions { min-width: 13.64em; }
 .row-actions > button, .row-actions > switch { margin-left: 0; }
-.empty-icon { color: @app_muted; background: alpha(@window_fg_color,.06); border-radius: 999px; -gtk-icon-size: 2.73em; min-height: 5.45em; min-width: 5.45em; }
+.empty-icon { color: @app_muted; background: alpha(@window_fg_color,.06); border-radius: 12px; -gtk-icon-size: 2.73em; min-height: 5.45em; min-width: 5.45em; }
 .empty-description { color: alpha(@window_fg_color, .70); }
-.search { border-radius: 999px; min-height: 2.73em; }
+.search { border-radius: 12px; min-height: 2.73em; }
 /* Fixed-caption inputs: the caption never moves into the field, so entering
  * text cannot shift the layout the way a floating entry label does. */
 .labeled-entry { margin-top: 0.12em; margin-bottom: 0.12em; }
 .labeled-entry-title { font-size: 0.86em; font-weight: 600; color: alpha(@window_fg_color, 0.70); }
-.labeled-entry-input { min-height: 2.82em; border-radius: 12px; }
+.labeled-entry-input { min-height: 2.82em; border-radius: 8px; }
 .labeled-entry-input:focus { border-color: @accent_color; }
 
 /* Shared card surfaces, selection and focus for nodes and subscriptions. */
 .nodes-grid, .subscriptions-grid { background: transparent; }
 /* Longhand borders everywhere: a `border-color` only override keeps the box
  * metrics identical between the default and selected states. */
-.node-card, .subscription-card { padding: 0; border-radius: 20px; background: @app_card_bg; border-width: 1px; border-style: solid; border-color: transparent; box-shadow: 0 1px 2px alpha(#000000, .035), 0 3px 10px alpha(#000000, .025); }
-.subscription-card { border-radius: 24px; }
+.node-card, .subscription-card { padding: 0; border-radius: 12px; background: @app_card_bg; border-width: 1px; border-style: solid; border-color: transparent; box-shadow: 0 1px 2px alpha(#000000, .035), 0 3px 10px alpha(#000000, .025); }
+.subscription-card { border-radius: 16px; }
 .dark .node-card, .dark .subscription-card { background: @dark_card_bg; border-color: alpha(#ffffff, .055); box-shadow: 0 2px 8px alpha(#000000, .13); }
 .node-card:hover, .subscription-card:hover { background: #f5f5f8; border-color: transparent; }
 .dark .node-card:hover, .dark .subscription-card:hover { background: #2b2d34; border-color: transparent; }
@@ -111,11 +110,11 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content { padding: 0.4em 0.82em; }
-.subscription-card-content { padding: 0.48em 0.86em; }
+.node-card-content { padding: 0.9em 0.8em; }
+.subscription-card-content { padding: 1em 1em; }
 .node-name, .subscription-name { font-size: 0.96em; font-weight: 600; }
 .node-protocol, .node-delay { font-size: 0.84em; }
-.node-protocol { color: @app_muted; letter-spacing: .02em; }
+.node-protocol { color: @app_muted; letter-spacing: .02em; margin-top: 0.3em; }
 .dark .node-protocol { color: @dark_muted; }
 .node-check { color: @accent_color; }
 .selection-check { color: @accent_color; }
@@ -133,7 +132,7 @@
 .node-card.node-selected .node-delay.latency-good,
 .node-card.node-selected .node-delay.latency-medium,
 .node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
-.node-card-footer { margin-top: 0.25em; }
+.node-card-footer { margin-top: 0.45em; min-height: 1.35em; }
 .aerobox-window button.node-test-button { padding: 0; min-width: 1.6em; min-height: 0; border-radius: 5px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
@@ -153,6 +152,16 @@
 .editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
 .page-content > preferencesgroup { margin-top: 0.27em; }
+/* Caption-and-entry rows need separation from the preceding switch and from
+ * one another. Margins live on the child so separators stay full width. */
+.settings-page .labeled-entry {
+  margin-top: 1.2em;
+  margin-bottom: 1.3em;
+  padding-left: 0.55em;
+  padding-right: 0.55em;
+}
+.settings-page .labeled-entry-title { margin-bottom: 0.35em; }
+.settings-page > stack > box { padding-top: 0.35em; padding-bottom: 1.5em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
 separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
@@ -165,13 +174,13 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
 
 .settings-page entry { font-size: 1em; }
-.editor-tabs { border-radius: 999px; background: alpha(@window_fg_color, .065); padding: 0.27em; }
-.editor-tabs button { border: none; border-radius: 999px; box-shadow: none; background: transparent; padding: 0.45em 1.09em; }
+.editor-tabs { border-radius: 12px; background: alpha(@window_fg_color, .065); padding: 0.27em; }
+.editor-tabs button { border: none; border-radius: 12px; box-shadow: none; background: transparent; padding: 0.45em 1.09em; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
 .ip-address { font-size: 1em; font-feature-settings: "tnum"; }
-.settings-page row { min-height: 3.55em; }
-.aerobox-window .boxed-list { border-radius: 24px; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); background: @app_card_bg; }
+.settings-page row { min-height: 3.9em; }
+.aerobox-window .boxed-list { border-radius: 16px; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); background: @app_card_bg; }
 .aerobox-window.dark .boxed-list { border-color: alpha(#ffffff, .055); background: @dark_card_bg; }
 .aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .70); }
 
@@ -186,8 +195,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .speed-card { padding: 0.86em 0.95em; min-width: 6.6em; }
 .speed-value { font-size: 1.30em; font-weight: 600; font-feature-settings: "tnum"; }
 .home-mode { padding: 0.86em 1em; min-width: 14em; }
-.mode-selector { border-radius: 999px; background: #e9e9ed; padding: 0.27em; }
-.mode-selector button { border-radius: 999px; border: none; box-shadow: none; background: transparent; padding: 0.36em 0.91em; font-weight: 500; }
+.mode-selector { border-radius: 12px; background: #e9e9ed; padding: 0.27em; }
+.mode-selector button { border-radius: 12px; border: none; box-shadow: none; background: transparent; padding: 0.36em 0.91em; font-weight: 500; }
 .mode-selector button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 .dark .mode-selector { background: #303138; }
 .home-takeover { padding: 0.18em 1em; min-width: 19em; }
@@ -195,7 +204,7 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
 .home-stat { padding: 0.86em 1em; min-width: 7em; }
 .home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-start { border-radius: 999px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.home-start { border-radius: 12px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
 .home-start image { -gtk-icon-size: 20px; }
 
 /* Keep one compact control density across the main pages and dialogs. These
@@ -224,6 +233,6 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .editor-root spinbutton text { min-height: 0; }
 .aerobox-window dropdown > button,
 .editor-root dropdown > button { min-height: 2.36em; }
-.aerobox-window .settings-page row,
+.aerobox-window .settings-page row { min-height: 3.9em; }
 .editor-root row { min-height: 3.55em; }
 .editor-root preferencesgroup .boxed-list > row { min-height: 3.55em; }

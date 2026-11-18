@@ -1517,7 +1517,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     });
     glib::timeout_add_local(Duration::from_millis(850), move || {
         let current = step.get();
-        if matches!(current, 38..=48) && ui.settings_prompt.borrow().is_some() {
+        if matches!(current, 39..=49) && ui.settings_prompt.borrow().is_some() {
             return glib::ControlFlow::Continue;
         }
         let result = (|| -> Result<()> {
@@ -1545,10 +1545,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 25 => "subscriptions-large-text.png",
                 26 => "subscriptions-menu.png",
                 27 => "subscriptions-narrow.png",
-                28 => "nodes-narrow.png",
-                29 => "settings-unsaved.png",
+                29 => "nodes-narrow.png",
+                30 => "settings-unsaved.png",
                 38 => "settings-data.png",
-                46 => "settings-network.png",
+                45 => "settings-network.png",
+                46 => "settings-network-scrolled.png",
                 48 => "settings-tun-permission.png",
                 _ => "",
             };
@@ -1580,6 +1581,16 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     "配置页面仍存在"
                 );
             }
+            if current == 18 {
+                for widget in descendants(&ui.body) {
+                    if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
+                        && stack.widget_name() == "settings-sections"
+                    {
+                        stack.set_visible_child_name("network");
+                    }
+                }
+                ui.scroll.vadjustment().set_value(0.0);
+            }
             if current == 13 || current == 14 {
                 let button = ui.home_action.borrow();
                 let bounds = button
@@ -1599,9 +1610,6 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     anyhow::ensure!((bounds.y() - previous).abs() < 1.0, "滚动移动了启动按钮");
                 }
                 floating_y.set(Some(bounds.y()));
-            }
-            if matches!(current, 5 | 8 | 28) {
-                nodes::smoke_floating_action(&ui)?;
             }
             match current {
                 0 => {
@@ -1798,21 +1806,24 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);
+                }
+                28 => {
                     let adjustment = ui.scroll.vadjustment();
                     adjustment.set_value(adjustment.upper());
                 }
-                28 => {
+                29 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
+                    nodes::smoke_floating_action(&ui)?;
                     nodes::smoke_test_node(&ui, 0)?;
                     ui.window.set_default_size(1000, 680);
                     ui.navigate(Page::Settings);
                     settings::smoke_unsaved(&ui, None)?;
                 }
-                29 => {
+                30 => {
                     settings::smoke_save_bounds(&ui)?;
                     settings::smoke_unsaved(&ui, Some("cancel"))?;
                 }
-                30 => {
+                31 => {
                     anyhow::ensure!(
                         !settings::SettingsPanel::smoke_has_prompt(&ui),
                         "继续编辑后确认框未关闭"
@@ -1827,7 +1838,9 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "继续编辑后无法再次请求离开"
                     );
                 }
-                32 => settings::smoke_unsaved(&ui, Some("discard"))?,
+                32 => {
+                    settings::smoke_unsaved(&ui, Some("discard"))?;
+                }
                 33 => {
                     anyhow::ensure!(
                         ui.page.get() == Page::Nodes,
@@ -1959,7 +1972,7 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         return Ok(());
                     }
                 }
-                46 => {
+                47 => {
                     settings::smoke_network(&ui)?;
                     fn select_tun(widget: &gtk::Widget) {
                         if let Some(stack) = widget.downcast_ref::<gtk::Stack>()
@@ -1975,11 +1988,11 @@ fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     }
                     select_tun(ui.body.upcast_ref());
                 }
-                48 => {
+                49 => {
                     settings::smoke_tun_permission(&ui)?;
                 }
-                49..=55 => settings::smoke_autostart(&ui, current - 49)?,
-                56 => subscriptions::smoke_dialog_release(&ui)?,
+                50..=56 => settings::smoke_autostart(&ui, current - 50)?,
+                57 => subscriptions::smoke_dialog_release(&ui)?,
                 _ => {}
             }
             Ok(())
