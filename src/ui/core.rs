@@ -159,7 +159,12 @@ impl Ui {
                     |s| s.install_core(),
                     |ui, result| {
                         match result {
-                            Ok(()) => ui.notify("内核已安装"),
+                            Ok(()) => {
+                                ui.notify("内核已安装");
+                                if let Some(panel) = ui.settings_panel.borrow().as_ref() {
+                                    panel.refresh_permissions(ui);
+                                }
+                            }
                             Err(e) => ui.error("安装失败", format!("{e:#}")),
                         }
                         if let Some(panel) = ui.core.borrow().as_ref() {

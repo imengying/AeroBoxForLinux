@@ -1,6 +1,7 @@
 use super::*;
 
 type SettingsAction = Rc<dyn Fn(&Rc<Ui>, bool)>;
+type PermissionRefresh = Rc<dyn Fn(&Rc<Ui>)>;
 
 pub(super) struct SettingsPanel {
     save: gtk::Button,
@@ -8,6 +9,7 @@ pub(super) struct SettingsPanel {
     tabs: gtk::StackSwitcher,
     autostart: adw::SwitchRow,
     read: Rc<dyn Fn() -> (model::Settings, bool)>,
+    refresh_permissions: PermissionRefresh,
     baseline: RefCell<(model::Settings, bool)>,
     is_dirty: Cell<bool>,
     saving: Cell<bool>,
@@ -32,7 +34,7 @@ impl SettingsPanel {
             ui.error("设置无效", error);
             return;
         }
-        self.busy(true);
+        self.begin_save();
         let weak = Rc::downgrade(self);
         ui.button_task(
             &self.save,
@@ -54,6 +56,7 @@ impl SettingsPanel {
                         panel
                             .baseline
                             .replace((ui.service.snapshot().settings, login));
+                        panel.refresh_permissions(ui);
                         ui.notify("设置已保存");
                         if let Some(after) = after {
                             after();
@@ -77,8 +80,10 @@ impl SettingsPanel {
         let baseline = self.baseline.borrow();
         let dirty = !current.same_preferences(&baseline.0) || login != baseline.1;
         self.is_dirty.set(dirty);
-        self.save.set_visible(dirty && !self.saving.get());
-        self.save.set_sensitive(dirty && !self.saving.get());
+        if !self.saving.get() {
+            self.save.set_visible(dirty);
+            self.save.set_sensitive(dirty);
+        }
     }
 
     pub(super) fn confirm_leave(self: &Rc<Self>, ui: &Rc<Ui>, leave: Rc<dyn Fn()>) -> bool {
@@ -146,6 +151,10 @@ impl SettingsPanel {
         self.baseline.borrow().0.clone()
     }
 
+    pub(super) fn refresh_permissions(&self, ui: &Rc<Ui>) {
+        (self.refresh_permissions)(ui);
+    }
+
     fn sync_autostart(&self, service: &Service) {
         self.autostart.set_active(service.autostart_enabled());
         self.update_dirty();
@@ -157,6 +166,11 @@ impl SettingsPanel {
         self.tabs.set_sensitive(!active);
         self.save.set_visible(!active && self.is_dirty.get());
         self.save.set_sensitive(!active && self.is_dirty.get());
+    }
+
+    fn begin_save(&self) {
+        self.busy(true);
+        self.save.set_visible(true);
     }
 
     fn request_save(ui: &Rc<Ui>, action: &str, on_ready: SettingsAction) {
@@ -376,18 +390,39 @@ impl Ui {
         permissions.add_suffix(&authorize);
         tun_group.add(&permissions);
         tun_page.append(&tun_group);
-        let refresh_permissions = {
-            let permissions = permissions.clone();
-            let authorize = authorize.clone();
+        let refresh_permissions: PermissionRefresh = Rc::new({
+            let permissions = permissions.downgrade();
+            let authorize = authorize.downgrade();
+            let generation = Rc::new(Cell::new(0_u64));
             move |ui: &Rc<Ui>| {
+                let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade()) else {
+                    return;
+                };
+                let request = generation.get().wrapping_add(1);
+                generation.set(request);
+                let path = ui.service.snapshot().settings.core_path;
+                row.set_subtitle("读取中…");
+                row.set_tooltip_text(None);
+                button.set_sensitive(false);
+                button.set_label("检查中…");
                 let (tx, rx) = mpsc::channel();
                 let service = ui.service.clone();
                 std::thread::spawn(move || {
                     let _ = tx.send(service.tun_available());
                 });
-                let permissions = permissions.downgrade();
-                let authorize = authorize.downgrade();
+                let permissions = permissions.clone();
+                let authorize = authorize.clone();
+                let generation = generation.clone();
+                let weak_ui = Rc::downgrade(ui);
                 glib::timeout_add_local(Duration::from_millis(100), move || {
+                    let Some(ui) = weak_ui.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if generation.get() != request
+                        || ui.service.snapshot().settings.core_path != path
+                    {
+                        return glib::ControlFlow::Break;
+                    }
                     let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade())
                     else {
                         return glib::ControlFlow::Break;
@@ -410,25 +445,27 @@ impl Ui {
                             row.set_subtitle("无法读取权限，请先选择有效内核");
                             row.set_tooltip_text(Some(&format!("{error:#}")));
                             button.set_sensitive(true);
+                            button.set_label("授权");
                             glib::ControlFlow::Break
                         }
                         Err(mpsc::TryRecvError::Disconnected) => {
                             row.set_subtitle("权限检查未完成，请重新打开设置");
                             button.set_sensitive(true);
+                            button.set_label("授权");
                             glib::ControlFlow::Break
                         }
                     }
                 });
             }
-        };
+        });
         refresh_permissions(self);
-        let refresh_permissions = Rc::new(refresh_permissions);
         let weak = Rc::downgrade(self);
+        let refresh_after_authorize = refresh_permissions.clone();
         authorize.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
                 button.set_sensitive(false);
                 let button = button.downgrade();
-                let refresh = refresh_permissions.clone();
+                let refresh = refresh_after_authorize.clone();
                 ui.task(
                     "授权",
                     |s| Ok(s.authorize_tun()),
@@ -565,7 +602,7 @@ impl Ui {
                     let previous = panel.saved_settings();
                     ui.apply_font_size(settings.font_size);
                     apply_theme(&settings.theme);
-                    panel.busy(true);
+                    panel.begin_save();
                     ui.button_task(
                         &panel.save,
                         "恢复中…",
@@ -807,6 +844,7 @@ impl Ui {
                 .expect("settings tabs"),
             autostart: autostart.clone(),
             read: read.clone(),
+            refresh_permissions,
             baseline,
             is_dirty: Cell::new(false),
             saving: Cell::new(false),
@@ -977,6 +1015,7 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             let before = ui.service.snapshot();
             smoke_data_button(ui, "恢复默认设置")?.emit_clicked();
             smoke_respond(ui, "reset").await?;
+            smoke_saving(ui)?;
             ensure!(before.subscriptions.len() == ui.service.snapshot().subscriptions.len());
         }
         3 => {
@@ -1108,17 +1147,88 @@ pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
     }
 }
 
-pub(super) fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
+pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    use std::os::unix::fs::PermissionsExt;
+
     let row = descendants(&ui.body)
         .iter()
         .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
         .find(|row| row.title().as_str() == "网络权限")
         .context("缺少网络权限行")?;
-    anyhow::ensure!(row.is_visible(), "网络权限行不可见");
-    anyhow::ensure!(
+    ensure!(row.is_visible(), "网络权限行不可见");
+    ensure!(
         matches!(row.subtitle().as_deref(), Some(text) if text != "读取中…" && !text.is_empty()),
         "权限状态仍停留在读取中"
     );
+    ensure!(
+        !ui.service.status().running,
+        "权限自检不能更改正在运行的内核"
+    );
+    let panel = ui
+        .settings_panel
+        .borrow()
+        .as_ref()
+        .cloned()
+        .context("缺少设置页")?;
+    let authorize = smoke_data_button(ui, "网络权限")?;
+    let path_entry = descendants(&ui.body)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Entry>().ok())
+        .find(|entry| entry.placeholder_text().as_deref() == Some("内核路径（留空自动检测）"))
+        .context("缺少内核路径输入")?;
+    let original_path = ui.service.snapshot().settings.core_path;
+    let directory = tempfile::tempdir()?;
+    let binary = directory.path().join("sing-box");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nprintf 'sing-box version smoke-permissions\\n'\n",
+    )?;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+    let valid_path = binary.display().to_string();
+    let missing_path = directory.path().join("missing").display().to_string();
+    for path in [&valid_path, &missing_path, &valid_path, &original_path] {
+        path_entry.set_text(path);
+        panel.save.emit_clicked();
+        smoke_saving(ui)?;
+        let start = std::time::Instant::now();
+        while ui.jobs.get() > 0 || row.subtitle().as_deref() == Some("读取中…") {
+            ensure!(
+                start.elapsed() < Duration::from_secs(5),
+                "保存后权限检查未完成"
+            );
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        ensure!(
+            ui.service.snapshot().settings.core_path == *path,
+            "权限自检的内核路径未保存"
+        );
+        ensure!(
+            ui.settings_panel
+                .borrow()
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(current, &panel))
+                && row.is_ancestor(&ui.body),
+            "保存内核路径后重建了设置表单"
+        );
+        let (subtitle, button_label, sensitive) = match ui.service.tun_available() {
+            Ok(true) => ("已授权，可创建虚拟网卡", "已授权", false),
+            Ok(false) => ("未授权；TUN 需要网络管理权限", "授权", true),
+            Err(_) => ("无法读取权限，请先选择有效内核", "授权", true),
+        };
+        ensure!(
+            row.subtitle().as_deref() == Some(subtitle)
+                && authorize.label().as_deref() == Some(button_label)
+                && authorize.is_sensitive() == sensitive,
+            "保存内核路径后权限显示没有更新: {:?}, {:?}, {}",
+            row.subtitle(),
+            authorize.label(),
+            authorize.is_sensitive()
+        );
+        if path == &valid_path {
+            ensure!(row.tooltip_text().is_none(), "有效内核保留了旧权限错误提示");
+        }
+    }
     Ok(())
 }
 
@@ -1164,6 +1274,25 @@ pub(super) fn smoke_save_bounds(ui: &Rc<Ui>) -> Result<()> {
         "保存按钮不在右下角: bounds={bounds:?}, overlay={}x{}",
         ui.floating.width(),
         ui.floating.height(),
+    );
+    Ok(())
+}
+
+fn smoke_saving(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    let panel = ui.settings_panel.borrow();
+    let panel = panel.as_ref().context("缺少设置页")?;
+    ensure!(ui.jobs.get() > 0 && panel.saving.get(), "保存任务没有启动");
+    ensure!(
+        panel.save.is_visible() && !panel.save.is_sensitive(),
+        "保存期间按钮不可见或允许重复保存"
+    );
+    ensure!(
+        descendants(&panel.save)
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Spinner>().ok())
+            .any(|spinner| spinner.is_visible() && spinner.is_spinning()),
+        "保存按钮内没有工作中的进度指示器"
     );
     Ok(())
 }
@@ -1360,14 +1489,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
             .set_text(text);
     }
     save.emit_clicked();
-    ensure!(!save.is_sensitive(), "保存期间没有禁用按钮");
-    ensure!(
-        descendants(save)
-            .iter()
-            .filter_map(|w| w.clone().downcast::<gtk::Spinner>().ok())
-            .any(|spinner| spinner.is_spinning()),
-        "进度指示器不在保存按钮中"
-    );
+    smoke_saving(ui)?;
     body.iter()
         .filter_map(|w| w.clone().downcast::<gtk::Stack>().ok())
         .find(|stack| stack.widget_name() == "settings-sections")

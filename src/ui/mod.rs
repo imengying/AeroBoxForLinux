@@ -1690,6 +1690,7 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_delay_failure(&ui)?;
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_test_node(&ui, 0)?;
+                    nodes::smoke_selection_navigation(&ui).await?;
                     apply_theme("dark");
                 }
                 9 => home::smoke_ip_cache(&ui).await?,
@@ -1960,7 +1961,7 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     settings::smoke_section(&ui, "tun")?;
                 }
                 49 => {
-                    settings::smoke_tun_permission(&ui)?;
+                    settings::smoke_tun_permission(&ui).await?;
                 }
                 50..=56 => settings::smoke_autostart(&ui, current - 50).await?,
                 57 => subscriptions::smoke_dialog_release(&ui)?,

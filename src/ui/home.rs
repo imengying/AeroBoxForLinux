@@ -32,7 +32,6 @@ pub(super) struct Dashboard {
     rates: RefCell<RateMeter>,
     pending: Cell<bool>,
     memory_at: Cell<Option<Instant>>,
-    show_ipv6: bool,
 }
 
 impl Ui {
@@ -309,7 +308,6 @@ impl Ui {
             rates: RefCell::new(RateMeter::default()),
             pending: Cell::new(false),
             memory_at: Cell::new(None),
-            show_ipv6: state.settings.ipv6,
         });
         let weak = Rc::downgrade(self);
         let weak_dashboard = Rc::downgrade(&dashboard);
@@ -450,6 +448,66 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
             );
         }
     }
+    // A selection can finish after the user has already returned home.
+    // Neither switching a stopped subscription nor a hot node switch changes
+    // the PID; the regular dashboard tick must still invalidate the old IP.
+    let state = ui.service.snapshot();
+    let active = state
+        .subscriptions
+        .iter()
+        .find(|sub| sub.id == state.settings.active_subscription)
+        .context("缺少当前订阅")?;
+    let original = active.selected_node.as_deref().context("缺少选中节点")?;
+    let alternate = model::selectable_nodes(&active.nodes)
+        .filter_map(|node| node["tag"].as_str())
+        .find(|tag| *tag != original)
+        .context("缺少备用节点")?;
+    let other = state
+        .subscriptions
+        .iter()
+        .find(|sub| sub.id != active.id)
+        .context("缺少备用订阅")?;
+    let pid = ui.service.status().pid;
+    let reading = network::NetworkInfo {
+        ipv4: Some("192.0.2.10".into()),
+        ..Default::default()
+    };
+    for subscription in [false, true] {
+        dashboard.show_info(&reading);
+        if subscription {
+            ui.service.select_subscription(&other.id)?;
+        } else {
+            ui.service.select_subscription_node(&active.id, alternate)?;
+        }
+        dashboard.tick(ui);
+        anyhow::ensure!(
+            ui.service.status().pid == pid
+                && *dashboard.exit_key.borrow() == ui.detect_key()
+                && dashboard.exit_ip.text() == "—"
+                && dashboard.network.is_sensitive()
+                && ui.body.first_child().as_ref() == Some(&content),
+            "切换节点或订阅后首页仍显示旧出口 IP，或重建了页面"
+        );
+        ui.service.select_subscription_node(&active.id, original)?;
+        dashboard.tick(ui);
+    }
+    let ipv6_reading = network::NetworkInfo {
+        ipv6: Some("2001:db8::10".into()),
+        ..Default::default()
+    };
+    for enabled in [!state.settings.ipv6, state.settings.ipv6] {
+        ui.service.update(|state| {
+            state.settings.ipv6 = enabled;
+            Ok(())
+        })?;
+        dashboard.tick(ui);
+        dashboard.show_info(&ipv6_reading);
+        anyhow::ensure!(
+            dashboard.exit_ip.text() == if enabled { "2001:db8::10" } else { "不可用" },
+            "首页仍使用旧的 IPv6 设置"
+        );
+    }
+    dashboard.exit_ip.set_text("—");
     Ok(())
 }
 
@@ -616,8 +674,7 @@ impl Dashboard {
 
     pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
         let status = ui.service.status();
-        let changed = self.exit_key.borrow().pid != status.pid;
-        if ui.jobs.get() == 0 && changed {
+        if ui.jobs.get() == 0 && *self.exit_key.borrow() != ui.detect_key() {
             self.refresh(ui);
         }
         self.controls.set_sensitive(ui.jobs.get() == 0);
@@ -709,7 +766,7 @@ impl Dashboard {
         let ip = info
             .ipv4
             .as_deref()
-            .or_else(|| info.ipv6.as_deref().filter(|_| self.show_ipv6))
+            .or_else(|| info.ipv6.as_deref().filter(|_| self.exit_key.borrow().ipv6))
             .unwrap_or("不可用");
         self.exit_ip.set_text(ip);
         self.network.set_tooltip_text(Some("点击检测出口 IP"));

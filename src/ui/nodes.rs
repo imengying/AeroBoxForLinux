@@ -334,12 +334,20 @@ impl NodesPanel {
         ui.task_result(
             move |s| s.select_subscription_node(&node.subscription_id, &node.node_tag),
             move |ui, result| {
-                ui.subscription_revision
-                    .set(ui.service.subscription_revision());
                 if let Some(panel) = weak.upgrade() {
                     panel.selecting.set(false);
-                    panel.reload_local(ui);
-                    panel.read_runtime(ui);
+                    let current = ui.page.get() == Page::Nodes
+                        && ui
+                            .node_panel
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|current| Rc::ptr_eq(current, &panel));
+                    if current {
+                        ui.subscription_revision
+                            .set(ui.service.subscription_revision());
+                        panel.reload_local(ui);
+                        panel.read_runtime(ui);
+                    }
                 }
                 if let Err(error) = result {
                     ui.error("选择节点失败", format!("{error:#}"));
@@ -712,6 +720,116 @@ pub(super) fn smoke_nodes(
             .collect();
         ensure!(after == highlighted, "选用成功前提前高亮了节点");
     }
+    Ok(())
+}
+
+pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    ensure!(ui.jobs.get() == 0, "节点任务未完成");
+    ensure!(!ui.service.status().running, "切页自检不能更改运行中的节点");
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let (original, index, selected) = {
+        let data = panel.data.borrow();
+        let original = data
+            .iter()
+            .find(|node| node.selected)
+            .context("缺少原选中节点")?
+            .node_tag
+            .clone();
+        let index = data
+            .iter()
+            .position(|node| !node.selected)
+            .context("切页自检至少需要两个节点")?;
+        (original, index, data[index].node_tag.clone())
+    };
+
+    let revision = ui.service.subscription_revision();
+    ui.subscription_revision.set(revision);
+    // Keep an unrelated real task pending so the heartbeat cannot consume the
+    // revision before this test observes the selection callback's result.
+    let (release, blocked) = mpsc::channel();
+    ui.task_result(
+        move |_| {
+            blocked
+                .recv_timeout(Duration::from_secs(5))
+                .context("节点切页自检任务未释放")
+        },
+        |_, _| {},
+    );
+    let child = panel.cards.borrow()[index].child.clone();
+    panel.grid.emit_by_name::<()>("child-activated", &[&child]);
+    ensure!(panel.selecting.get(), "节点选择没有启动");
+    ui.navigate(Page::Subscriptions);
+    ui.navigate(Page::Nodes);
+    let returned = ui.node_panel.borrow().clone().context("没有返回节点页")?;
+    ensure!(!Rc::ptr_eq(&panel, &returned), "返回节点页仍在使用旧控制器");
+
+    // Retain the old panel deliberately: checking only Weak::upgrade or the
+    // current page is insufficient after navigating away and straight back.
+    let start = std::time::Instant::now();
+    while panel.selecting.get() {
+        ensure!(start.elapsed() < Duration::from_secs(5), "节点选择没有完成");
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    ensure!(
+        ui.service
+            .subscription_nodes(&panel.subscription_id)?
+            .iter()
+            .any(|node| node.selected && node.node_tag == selected),
+        "切页期间没有保存所选节点"
+    );
+    ensure!(
+        ui.service.subscription_revision() > revision && ui.subscription_revision.get() == revision,
+        "旧节点页吞掉了当前页面尚未处理的变更"
+    );
+    release.send(())?;
+    let start = std::time::Instant::now();
+    while ui.jobs.get() > 0 || ui.subscription_revision.get() != ui.service.subscription_revision()
+    {
+        ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "节点页没有处理待刷新变更"
+        );
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    let current = ui.node_panel.borrow().clone().context("节点页已丢失")?;
+    ensure!(!Rc::ptr_eq(&returned, &current), "节点页没有收到刷新");
+    ensure!(
+        current
+            .data
+            .borrow()
+            .iter()
+            .zip(current.cards.borrow().iter())
+            .filter(|(_, card)| card.child.has_css_class("node-selected"))
+            .map(|(node, _)| node.node_tag.as_str())
+            .eq([selected.as_str()]),
+        "返回节点页后高亮仍是旧节点"
+    );
+
+    let index = current
+        .data
+        .borrow()
+        .iter()
+        .position(|node| node.node_tag == original)
+        .context("原节点已丢失")?;
+    let child = current.cards.borrow()[index].child.clone();
+    current
+        .grid
+        .emit_by_name::<()>("child-activated", &[&child]);
+    let start = std::time::Instant::now();
+    while ui.jobs.get() > 0 {
+        ensure!(start.elapsed() < Duration::from_secs(5), "原节点未恢复");
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    ensure!(
+        current
+            .data
+            .borrow()
+            .iter()
+            .any(|node| node.selected && node.node_tag == original)
+            && ui.subscription_revision.get() == ui.service.subscription_revision(),
+        "当前节点页没有就地更新恢复选择"
+    );
     Ok(())
 }
 
