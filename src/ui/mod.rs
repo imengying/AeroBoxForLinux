@@ -600,6 +600,9 @@ impl Ui {
     }
 
     fn show(self: &Rc<Self>, page: Page) {
+        // Capture before reading page data. A change committed while building
+        // the page must remain pending for the next heartbeat.
+        let revision = self.service.subscription_revision();
         if let Some(dialog) = self.settings_prompt.take() {
             dialog.force_close();
         }
@@ -650,6 +653,9 @@ impl Ui {
             Page::Connections => self.connections(&heading),
             Page::Logs => self.logs(&heading),
             Page::Settings => self.settings(&heading),
+        }
+        if matches!(page, Page::Nodes | Page::Subscriptions) {
+            self.subscription_revision.set(revision);
         }
         if heading.first_child().is_none() {
             self.body.remove(&heading);
@@ -1808,6 +1814,10 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);
+                    anyhow::ensure!(
+                        ui.subscription_revision.get() == ui.service.subscription_revision(),
+                        "新节点页没有记录已显示的订阅版本，定时刷新会重置滚动位置"
+                    );
                 }
                 28 => {
                     let adjustment = ui.scroll.vadjustment();

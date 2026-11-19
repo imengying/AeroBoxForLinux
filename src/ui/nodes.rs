@@ -749,11 +749,7 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
     // revision before this test observes the selection callback's result.
     let (release, blocked) = mpsc::channel();
     ui.task_result(
-        move |_| {
-            blocked
-                .recv_timeout(Duration::from_secs(5))
-                .context("节点切页自检任务未释放")
-        },
+        move |_| blocked.recv().context("节点切页自检任务未释放"),
         |_, _| {},
     );
     let child = panel.cards.borrow()[index].child.clone();
@@ -762,6 +758,7 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
     ui.navigate(Page::Subscriptions);
     ui.navigate(Page::Nodes);
     let returned = ui.node_panel.borrow().clone().context("没有返回节点页")?;
+    let returned_revision = ui.subscription_revision.get();
     ensure!(!Rc::ptr_eq(&panel, &returned), "返回节点页仍在使用旧控制器");
 
     // Retain the old panel deliberately: checking only Weak::upgrade or the
@@ -779,9 +776,11 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
         "切页期间没有保存所选节点"
     );
     ensure!(
-        ui.service.subscription_revision() > revision && ui.subscription_revision.get() == revision,
+        ui.service.subscription_revision() > revision
+            && ui.subscription_revision.get() == returned_revision,
         "旧节点页吞掉了当前页面尚未处理的变更"
     );
+    let needs_refresh = returned_revision != ui.service.subscription_revision();
     release.send(())?;
     let start = std::time::Instant::now();
     while ui.jobs.get() > 0 || ui.subscription_revision.get() != ui.service.subscription_revision()
@@ -792,8 +791,16 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
         );
         glib::timeout_future(Duration::from_millis(16)).await;
     }
+    // The selection may have committed before the returned page was built.
+    // Give the heartbeat a turn and ensure it preserves that up-to-date page.
+    if !needs_refresh {
+        glib::timeout_future(Duration::from_millis(1100)).await;
+    }
     let current = ui.node_panel.borrow().clone().context("节点页已丢失")?;
-    ensure!(!Rc::ptr_eq(&returned, &current), "节点页没有收到刷新");
+    ensure!(
+        Rc::ptr_eq(&returned, &current) != needs_refresh,
+        "节点页遗漏了待刷新变更或重复刷新了已显示的变更"
+    );
     ensure!(
         current
             .data
