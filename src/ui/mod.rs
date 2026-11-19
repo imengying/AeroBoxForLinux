@@ -401,11 +401,10 @@ impl Ui {
                 && (ui.jobs.get() == 0 || ui.page.get() == Page::Home)
             {
                 ui.last_pid.set(status.pid);
-                if matches!(
-                    ui.page.get(),
-                    Page::Home | Page::Nodes | Page::Subscriptions
-                ) {
-                    ui.refresh(ui.page.get())
+                if ui.page.get() == Page::Home {
+                    ui.refresh(Page::Home);
+                } else if let Some(panel) = ui.node_panel.borrow().clone() {
+                    panel.refresh(&ui);
                 }
             }
             let revision = ui.service.subscription_revision();
@@ -522,7 +521,9 @@ impl Ui {
         let weak_button = button.downgrade();
         self.task_result(work, move |ui, result| {
             spinner.stop();
-            if let Some(button) = weak_button.upgrade() {
+            if let Some(button) = weak_button.upgrade()
+                && button.child().as_ref() == Some(content.upcast_ref())
+            {
                 button.set_child(original.as_ref());
                 button.set_sensitive(true);
             }
@@ -621,7 +622,6 @@ impl Ui {
         self.body.set_spacing(12);
         self.body.set_margin_bottom(18);
         self.scroll.vadjustment().set_value(0.0);
-        self.scroll.set_margin_bottom(0);
         if let Some(button) = self.home_action.borrow_mut().take() {
             self.floating.remove_overlay(&button);
         }
@@ -772,18 +772,35 @@ impl Ui {
             ))]);
             let id = item.id.clone();
             let weak = Rc::downgrade(self);
+            let syncing = Rc::new(Cell::new(false));
             enabled.connect_state_set(move |switch, enabled| {
+                if syncing.get() {
+                    return glib::Propagation::Proceed;
+                }
                 if let Some(ui) = weak.upgrade() {
                     switch.set_sensitive(false);
                     let switch = switch.downgrade();
                     let id = id.clone();
+                    let updated_id = id.clone();
+                    let syncing = syncing.clone();
                     ui.task_result(
                         move |s| s.apply_ruleset_enabled(&id, enabled),
                         move |ui, result| {
                             if let Some(switch) = switch.upgrade() {
+                                syncing.set(true);
+                                if let Some(rule) = ui
+                                    .service
+                                    .snapshot()
+                                    .rulesets
+                                    .iter()
+                                    .find(|rule| rule.id == updated_id)
+                                {
+                                    switch.set_state(rule.enabled);
+                                    switch.set_active(rule.enabled);
+                                }
+                                syncing.set(false);
                                 switch.set_sensitive(true);
                             }
-                            ui.refresh(Page::Rules);
                             if let Err(error) = result {
                                 ui.error("设置规则失败", format!("{error:#}"));
                             }
@@ -796,25 +813,34 @@ impl Ui {
             let edit = gtk::Button::with_label("设置");
             edit.add_css_class("compact-action");
             let weak = Rc::downgrade(self);
-            let rules = item.clone();
+            let id = item.id.clone();
             edit.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    editors::ruleset(&ui.window, ui.service.clone(), rules.clone(), ui.saved())
+                if let Some(ui) = weak.upgrade()
+                    && let Some(rules) = ui
+                        .service
+                        .snapshot()
+                        .rulesets
+                        .into_iter()
+                        .find(|rules| rules.id == id)
+                {
+                    editors::ruleset(&ui.window, ui.service.clone(), rules, ui.saved())
                 }
             });
             trailing.append(&edit);
             if !item.is_remote() {
                 let content = icon_button("document-edit-symbolic", "编辑规则内容");
                 let weak = Rc::downgrade(self);
-                let rules = item.clone();
+                let id = item.id.clone();
                 content.connect_clicked(move |_| {
-                    if let Some(ui) = weak.upgrade() {
-                        editors::rule_content(
-                            &ui.window,
-                            ui.service.clone(),
-                            rules.clone(),
-                            ui.saved(),
-                        )
+                    if let Some(ui) = weak.upgrade()
+                        && let Some(rules) = ui
+                            .service
+                            .snapshot()
+                            .rulesets
+                            .into_iter()
+                            .find(|rules| rules.id == id)
+                    {
+                        editors::rule_content(&ui.window, ui.service.clone(), rules, ui.saved())
                     }
                 });
                 trailing.append(&content);
@@ -1101,7 +1127,15 @@ impl Ui {
 
     fn refresh(self: &Rc<Self>, page: Page) {
         if self.page.get() == page {
-            self.show(page)
+            let dashboard = self.dashboard.borrow().clone();
+            if page == Page::Home
+                && let Some(dashboard) = dashboard
+            {
+                dashboard.refresh(self);
+                dashboard.tick(self);
+            } else {
+                self.show(page);
+            }
         }
     }
     fn save_text(self: &Rc<Self>, name: &str, text: String) {
@@ -1583,6 +1617,9 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 settings::smoke_section(&ui, "network")?;
                 ui.scroll.vadjustment().set_value(0.0);
             }
+            if matches!(current, 0 | 12 | 13) {
+                home::smoke_cards(&ui)?;
+            }
             if current == 13 || current == 14 {
                 let button = ui.home_action.borrow();
                 let bounds = button
@@ -1611,10 +1648,11 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                             && (ui.window.width(), ui.window.height()) == (1000, 680),
                         "默认窗口尺寸未生效"
                     );
+                    home::smoke_controls(&ui).await?;
                     ui.navigate(Page::Subscriptions);
                 }
                 1 => {
-                    subscriptions::smoke_selection(&ui, 0, None)?;
+                    subscriptions::smoke_selection(&ui, 0, None).await?;
                     ui.import_subscription();
                 }
                 2 => {
@@ -1623,10 +1661,10 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     window.close();
                 }
                 3 => {
-                    subscriptions::smoke_selection(&ui, 0, Some(1))?;
+                    subscriptions::smoke_selection(&ui, 0, Some(1)).await?;
                 }
                 4 => {
-                    subscriptions::smoke_selection(&ui, 1, None)?;
+                    subscriptions::smoke_selection(&ui, 1, None).await?;
                     ui.navigate(Page::Nodes);
                 }
                 5 => {
@@ -1642,10 +1680,10 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                         "选择节点改变了模式"
                     );
                     ui.navigate(Page::Subscriptions);
-                    subscriptions::smoke_selection(&ui, 1, Some(0))?;
+                    subscriptions::smoke_selection(&ui, 1, Some(0)).await?;
                 }
                 7 => {
-                    subscriptions::smoke_selection(&ui, 0, None)?;
+                    subscriptions::smoke_selection(&ui, 0, None).await?;
                     ui.navigate(Page::Nodes);
                 }
                 8 => {
@@ -1654,7 +1692,7 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     nodes::smoke_test_node(&ui, 0)?;
                     apply_theme("dark");
                 }
-                9 => home::smoke_ip_cache(&ui)?,
+                9 => home::smoke_ip_cache(&ui).await?,
                 10 => {
                     // Real log text with descenders and digits, so the layout
                     // check can see whether the first line is clipped.
@@ -1756,16 +1794,16 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     ui.navigate(Page::Subscriptions);
                 }
                 25 => {
-                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    subscriptions::smoke_selection(&ui, 2, None).await?;
                     subscriptions::smoke_menu(&ui, true)?;
                 }
                 26 => {
-                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    subscriptions::smoke_selection(&ui, 2, None).await?;
                     subscriptions::smoke_menu(&ui, false)?;
                     ui.window.set_default_size(600, 720);
                 }
                 27 => {
-                    subscriptions::smoke_selection(&ui, 2, None)?;
+                    subscriptions::smoke_selection(&ui, 2, None).await?;
                     let id = ui.service.snapshot().subscriptions[0].id.clone();
                     ui.service.select_subscription(&id)?;
                     ui.navigate(Page::Nodes);

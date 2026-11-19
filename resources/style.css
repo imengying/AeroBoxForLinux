@@ -59,13 +59,8 @@
 .surface-card { border-radius: 16px; background: @app_card_bg; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); }
 .dark .surface-card { background: @dark_card_bg; border-color: alpha(#ffffff, .055); box-shadow: 0 2px 8px alpha(#000000, .16); }
 .primary-action { border-radius: 12px; padding: 0.55em 1.18em; font-weight: 600; }
-/* Floating corner action: opaque surface with a soft shadow so it stays
- * readable over scrolled content, matching the home start button. */
-.aerobox-window .floating-save,
-.aerobox-window .floating-test { border-radius: 12px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 6px 18px alpha(#183b50,.22); }
-.aerobox-window .floating-test:disabled { background: @accent_bg_color; color: @accent_fg_color; opacity: .72; }
-.dark .floating-test:disabled { background: #2388f4; color: @accent_fg_color; opacity: .82; }
-.dark .floating-save, .dark .floating-test { box-shadow: 0 6px 18px alpha(#000000,.45); }
+.aerobox-window .floating-save { border-radius: 12px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 6px 18px alpha(#183b50,.22); }
+.dark .floating-save { box-shadow: 0 6px 18px alpha(#000000,.45); }
 .compact-action { border-radius: 12px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
 .row-icon { background: #e9e9ed; color: #60616a; border-radius: 8px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
 .dark .row-icon { background: #303138; color: #b8becb; }
@@ -110,11 +105,11 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content { padding: 0.9em 0.8em; }
+.node-card-content { padding: 0.75em 0.85em; }
 .subscription-card-content { padding: 1em 1em; }
 .node-name, .subscription-name { font-size: 0.96em; font-weight: 600; }
 .node-protocol, .node-delay { font-size: 0.84em; }
-.node-protocol { color: @app_muted; letter-spacing: .02em; margin-top: 0.3em; }
+.node-protocol { color: @app_muted; letter-spacing: .02em; }
 .dark .node-protocol { color: @dark_muted; }
 .node-check { color: @accent_color; }
 .selection-check { color: @accent_color; }
@@ -132,8 +127,7 @@
 .node-card.node-selected .node-delay.latency-good,
 .node-card.node-selected .node-delay.latency-medium,
 .node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
-.node-card-footer { margin-top: 0.45em; min-height: 1.35em; }
-.aerobox-window button.node-test-button { padding: 0; min-width: 1.6em; min-height: 0; border-radius: 5px; }
+.aerobox-window button.node-test-button { padding: 0; min-width: 1.6em; min-height: 1.6em; border-radius: 5px; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
 .node-test-button:disabled image { -gtk-icon-filter: none; }
 .node-card.node-selected .node-test-button:disabled { color: alpha(@accent_fg_color, .82); }
@@ -178,7 +172,6 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .editor-tabs button { border: none; border-radius: 12px; box-shadow: none; background: transparent; padding: 0.45em 1.09em; }
 .editor-tabs button:checked { background: @accent_bg_color; color: @accent_fg_color; }
 
-.ip-address { font-size: 1em; font-feature-settings: "tnum"; }
 .settings-page row { min-height: 3.9em; }
 .aerobox-window .boxed-list { border-radius: 16px; border: 1px solid alpha(#666672, .08); box-shadow: 0 1px 2px alpha(#000000, .025), 0 5px 16px alpha(#000000, .035); background: @app_card_bg; }
 .aerobox-window.dark .boxed-list { border-color: alpha(#ffffff, .055); background: @dark_card_bg; }
@@ -188,11 +181,13 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 /* Cards in the same row stretch to the tallest one so their bottom edges line
  * up; inner spacing stays on the card class, not on the flow child. */
 .dashboard-grid > flowboxchild > .surface-card { margin: 0; }
-.home-network { padding: 0.86em 1em; min-width: 14em; }
-/* A larger numeral needs its own line box, otherwise the glyph tops are
- * clipped by the compact row height used for the IPv4/IPv6 captions. */
-.home-network .exit-ip { font-size: 1.12em; font-weight: 600; padding-top: 0.1em; }
-.speed-card { padding: 0.86em 0.95em; min-width: 6.6em; }
+.aerobox-window button.home-network { padding: 0.75em 1em; min-width: 14em; font-weight: normal; }
+.home-network:hover { background: #f5f5f8; }
+.dark .home-network:hover { background: #2b2d34; }
+.home-network:active { background: #e9e9ed; }
+.dark .home-network:active { background: #303138; }
+.home-network .exit-ip { font-size: 1.12em; font-weight: 600; font-feature-settings: "tnum"; }
+.speed-card { padding: 0.75em 1em; min-width: 6.6em; }
 .speed-value { font-size: 1.30em; font-weight: 600; font-feature-settings: "tnum"; }
 .home-mode { padding: 0.86em 1em; min-width: 14em; }
 .mode-selector { border-radius: 12px; background: #e9e9ed; padding: 0.27em; }
@@ -204,8 +199,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
 .home-stat { padding: 0.86em 1em; min-width: 7em; }
 .home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-start { border-radius: 12px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
-.home-start image { -gtk-icon-size: 20px; }
+.floating-action { border-radius: 12px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.floating-action image { -gtk-icon-size: 20px; }
 
 /* Keep one compact control density across the main pages and dialogs. These
  * selectors override libadwaita's generous touch-sized defaults, not the

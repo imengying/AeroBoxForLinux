@@ -53,6 +53,7 @@ impl Ui {
                 ui.import_subscription();
             }
         });
+        let displayed_revision = Rc::new(Cell::new(self.service.subscription_revision()));
         let state = self.service.snapshot();
         if state.subscriptions.is_empty() {
             self.body
@@ -239,31 +240,65 @@ impl Ui {
         let weak = Rc::downgrade(self);
         let busy = Rc::new(Cell::new(false));
         list.connect_child_activated(move |list, row| {
-            if busy.replace(true) {
+            if busy.get() {
                 return;
             }
             let (Some(ui), Some(id)) = (weak.upgrade(), ids.get(row.index() as usize)) else {
-                busy.set(false);
                 return;
             };
+            if ui.service.snapshot().settings.active_subscription == *id {
+                return;
+            }
+            busy.set(true);
             let id = id.clone();
             let (indicator, spinner) = indicators.borrow()[row.index() as usize].clone();
             indicator.set_visible_child_name("busy");
             spinner.start();
-            list.set_sensitive(false);
             let list = list.downgrade();
             let busy = busy.clone();
+            let ids = ids.clone();
+            let indicators = indicators.clone();
+            let displayed_revision = displayed_revision.clone();
             ui.task_result(
                 move |s| s.select_subscription(&id),
                 move |ui, result| {
                     busy.set(false);
                     spinner.stop();
-                    if let Some(list) = list.upgrade() {
-                        list.set_sensitive(true);
+                    if let Some(list) = list.upgrade()
+                        && list.is_ancestor(&ui.body)
+                    {
+                        let revision = ui.service.subscription_revision();
+                        ui.subscription_revision.set(revision);
+                        // A concurrent subscription update still needs to render
+                        // its changed name, usage or card list.
+                        if revision != displayed_revision.get() + u64::from(result.is_ok()) {
+                            ui.refresh(Page::Subscriptions);
+                        } else {
+                            let state = ui.service.snapshot();
+                            for (index, (id, (indicator, spinner))) in
+                                ids.iter().zip(indicators.borrow().iter()).enumerate()
+                            {
+                                let selected = state.settings.active_subscription == *id;
+                                if let Some(card) = list.child_at_index(index as i32) {
+                                    if selected {
+                                        card.add_css_class("subscription-selected");
+                                    } else {
+                                        card.remove_css_class("subscription-selected");
+                                    }
+                                    card.update_state(&[gtk::accessible::State::Selected(Some(
+                                        selected,
+                                    ))]);
+                                }
+                                spinner.stop();
+                                indicator.set_visible_child_name(if selected {
+                                    "chosen"
+                                } else {
+                                    "empty"
+                                });
+                            }
+                            displayed_revision.set(revision);
+                        }
                     }
-                    ui.subscription_revision
-                        .set(ui.service.subscription_revision());
-                    ui.refresh(Page::Subscriptions);
                     if let Err(error) = result {
                         ui.error("切换订阅失败", format!("{error:#}"));
                     }
@@ -491,7 +526,11 @@ fn format_timestamp(timestamp: u64, pattern: &str) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) -> Result<()> {
+pub(super) async fn smoke_selection(
+    ui: &Rc<Ui>,
+    active: usize,
+    click: Option<usize>,
+) -> Result<()> {
     use anyhow::ensure;
     ensure!(ui.jobs.get() == 0, "订阅选用未完成");
     let widgets = descendants(&ui.body);
@@ -580,6 +619,7 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
         }
     }
     if let Some(index) = click {
+        let scroll = ui.scroll.vadjustment().value();
         let row = list.child_at_index(index as i32).unwrap();
         list.emit_by_name::<()>("child-activated", &[&row]);
         ensure!(
@@ -588,7 +628,31 @@ pub(super) fn smoke_selection(ui: &Rc<Ui>, active: usize, click: Option<usize>) 
                 .has_css_class("subscription-selected"),
             "选用成功前丢失原高亮"
         );
+        let start = std::time::Instant::now();
+        while ui.jobs.get() != 0 {
+            ensure!(start.elapsed() < Duration::from_secs(5), "切换订阅未完成");
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+        ensure!(
+            list.is_ancestor(&ui.body)
+                && list.child_at_index(index as i32).as_ref() == Some(&row)
+                && (ui.scroll.vadjustment().value() - scroll).abs() < 1.0,
+            "切换订阅重建了卡片或重置了滚动位置"
+        );
+        ensure!(
+            row.has_css_class("subscription-selected")
+                && ui.service.snapshot().settings.active_subscription
+                    == state.subscriptions[index].id,
+            "切换订阅后没有就地更新选中项"
+        );
     }
+    let selected = list.child_at_index(click.unwrap_or(active) as i32).unwrap();
+    let revision = ui.service.subscription_revision();
+    list.emit_by_name::<()>("child-activated", &[&selected]);
+    ensure!(
+        ui.jobs.get() == 0 && ui.service.subscription_revision() == revision,
+        "点击已选订阅仍然发起后台操作"
+    );
     Ok(())
 }
 

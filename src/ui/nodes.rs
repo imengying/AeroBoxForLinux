@@ -47,43 +47,20 @@ impl Ui {
             return;
         };
         let subscription_id = subscription.id.clone();
-        let test = gtk::Button::new();
-        test.add_css_class("suggested-action");
-        test.add_css_class("primary-action");
-        test.add_css_class("floating-test");
+        let test = primary("测速", "aerobox-bolt-symbolic");
+        test.add_css_class("floating-action");
         test.set_halign(gtk::Align::End);
         test.set_valign(gtk::Align::End);
-        test.set_margin_end(20);
-        test.set_margin_bottom(20);
-        let test_row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-        test_row.append(&bolt());
-        test_row.append(&label("测速", ""));
-        test.set_child(Some(&test_row));
+        test.set_margin_end(30);
+        test.set_margin_bottom(24);
         test.set_widget_name("nodes-test");
         test.set_tooltip_text(Some("测试此订阅的节点延迟"));
         self.floating.add_overlay(&test);
         self.nodes_action.replace(Some(test.clone()));
-        // The overlay includes its children in height measurement. Reserve a
-        // matching viewport margin so the floating action cannot cover cards
-        // at any font size, even before the first frame is allocated.
-        let scroll = self.scroll.downgrade();
-        let button = test.downgrade();
-        let update_inset = move || {
-            let (Some(scroll), Some(button)) = (scroll.upgrade(), button.upgrade()) else {
-                return;
-            };
-            let (_, height, _, _) = button.measure(gtk::Orientation::Vertical, -1);
-            let inset = (height + button.margin_bottom() + 24).max(76);
-            if scroll.margin_bottom() != inset {
-                scroll.set_margin_bottom(inset);
-            }
-        };
-        update_inset();
-        test.add_tick_callback(move |_, _| {
-            update_inset();
-            glib::ControlFlow::Continue
-        });
-        self.body.set_margin_bottom(24);
+        // GTK includes the button's margins in its natural height. Put this
+        // clearance after the last card so earlier rows can scroll under it.
+        let (_, action_height, _, _) = test.measure(gtk::Orientation::Vertical, -1);
+        self.body.set_margin_bottom(action_height + 8);
         let grid = gtk::FlowBox::new();
         grid.add_css_class("nodes-grid");
         grid.set_hexpand(true);
@@ -92,13 +69,11 @@ impl Ui {
         grid.set_activate_on_single_click(true);
         grid.set_homogeneous(true);
         grid.set_min_children_per_line(1);
-        grid.set_max_children_per_line(8);
+        grid.set_max_children_per_line(4);
         grid.set_column_spacing(8);
         grid.set_row_spacing(8);
         grid.set_valign(gtk::Align::Start);
-        // Small proxy tiles, roughly a third of the old card width. The grid
-        // adds another column before it widens the cards.
-        follow_width(&grid, 92, 8, 12, true);
+        follow_width(&grid, 156, 8, 4, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -138,6 +113,11 @@ impl Ui {
 }
 
 impl NodesPanel {
+    pub(super) fn refresh(self: &Rc<Self>, ui: &Rc<Ui>) {
+        self.reload_local(ui);
+        self.read_runtime(ui);
+    }
+
     fn reload_local(self: &Rc<Self>, ui: &Rc<Ui>) {
         match ui.service.subscription_nodes(&self.subscription_id) {
             Ok(nodes) => self.display(ui, nodes),
@@ -164,7 +144,7 @@ impl NodesPanel {
                 child.set_widget_name("subscription-node");
                 child.set_focusable(true);
                 child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
-                let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
                 content.add_css_class("node-card-content");
                 let title = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 title.set_vexpand(false);
@@ -193,18 +173,13 @@ impl NodesPanel {
                 indicator.add_named(&spinner, Some("busy"));
                 title.append(&indicator);
                 content.append(&title);
-                // Protocol, latency and the test control share the lower rows
-                // so the tile stays narrow instead of growing with long names.
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 let protocol = label(&node.protocol, "muted node-protocol");
                 protocol.set_hexpand(true);
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                content.append(&protocol);
-                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                footer.add_css_class("node-card-footer");
+                footer.append(&protocol);
                 let delay = label("", "muted node-delay");
-                delay.set_xalign(0.0);
-                delay.set_hexpand(true);
                 footer.append(&delay);
                 let test = gtk::Button::new();
                 test.add_css_class("flat");
@@ -289,7 +264,6 @@ impl NodesPanel {
     }
 
     fn controls(&self) {
-        self.grid.set_sensitive(!self.selecting.get());
         let pending = self.pending.borrow();
         self.test.set_sensitive(
             !self.selecting.get()
@@ -346,6 +320,9 @@ impl NodesPanel {
         let Some(node) = self.data.borrow().get(index).cloned() else {
             return;
         };
+        if node.selected {
+            return;
+        }
         self.selecting.set(true);
         self.revision.set(self.revision.get() + 1);
         self.controls();
@@ -574,6 +551,18 @@ pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
     let action_bounds = action
         .compute_bounds(&ui.floating)
         .context("悬浮测速没有位置")?;
+    let hit = ui
+        .floating
+        .pick(
+            f64::from(action_bounds.x() / 2.0),
+            f64::from(action_bounds.y() + action_bounds.height() / 2.0),
+            gtk::PickFlags::DEFAULT,
+        )
+        .context("悬浮测速旁的列表无法操作")?;
+    ensure!(
+        hit == *ui.scroll.upcast_ref::<gtk::Widget>() || hit.is_ancestor(&ui.scroll),
+        "测速按钮占用了列表底部一整行"
+    );
     if let Some(card) = panel.cards.borrow().last() {
         let card_bounds = card
             .child
@@ -634,7 +623,16 @@ pub(super) fn smoke_nodes(
     if let Some(selected) = selected {
         ensure!(highlighted == vec![selected], "所选节点没有高亮");
     }
-    for card in panel.cards.borrow().iter() {
+    let cards = panel.cards.borrow();
+    if count >= 5 && ui.window.width() == 1000 && ui.typography.preview() == 11 {
+        let first_y = cards[0].child.allocation().y();
+        let first_row = cards
+            .iter()
+            .take_while(|card| card.child.allocation().y() == first_y)
+            .count();
+        ensure!(first_row == 4, "常规窗口第一行显示了 {first_row} 个节点");
+    }
+    for card in cards.iter() {
         let bounds = card
             .child
             .compute_bounds(&panel.grid)

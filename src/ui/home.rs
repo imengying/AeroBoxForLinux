@@ -14,6 +14,10 @@ pub(super) struct ExitIpKey {
 pub(super) struct Dashboard {
     controls: gtk::Box,
     modes: Vec<(&'static str, gtk::ToggleButton)>,
+    switches: Vec<(bool, gtk::Switch)>,
+    syncing: Rc<Cell<bool>>,
+    running: Cell<bool>,
+    exit_key: RefCell<ExitIpKey>,
     download: gtk::Label,
     upload: gtk::Label,
     download_unit: gtk::Label,
@@ -23,10 +27,8 @@ pub(super) struct Dashboard {
     connections: gtk::Label,
     uptime: gtk::Label,
     memory: gtk::Label,
-    ipv4: gtk::Label,
-    ipv6: gtk::Label,
-    network_status: gtk::Label,
-    refresh: gtk::Button,
+    exit_ip: gtk::Label,
+    network: gtk::Button,
     rates: RefCell<RateMeter>,
     pending: Cell<bool>,
     memory_at: Cell<Option<Instant>>,
@@ -44,6 +46,7 @@ impl Ui {
         self.body.set_margin_bottom(84);
         let state = self.service.snapshot();
         let status = self.service.status();
+        let syncing = Rc::new(Cell::new(false));
 
         let toggle = primary(
             if status.running { "停止" } else { "启动" },
@@ -53,7 +56,7 @@ impl Ui {
                 "media-playback-start-symbolic"
             },
         );
-        toggle.add_css_class("home-start");
+        toggle.add_css_class("floating-action");
         toggle.set_widget_name("home-start");
         toggle.set_halign(gtk::Align::End);
         toggle.set_valign(gtk::Align::End);
@@ -95,6 +98,7 @@ impl Ui {
                     }
                 },
             );
+            ui.refresh(Page::Home);
         });
         self.floating.add_overlay(&toggle);
         self.home_action.replace(Some(toggle));
@@ -103,24 +107,25 @@ impl Ui {
         follow_width(&top, 232, 14, 2, false);
         top.set_vexpand(false);
         top.add_css_class("home-top");
-        let network = card(gtk::Orientation::Vertical, 12);
+        let network = gtk::Button::new();
+        network.add_css_class("surface-card");
         network.add_css_class("home-network");
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        network.set_widget_name("exit-ip");
+        network.set_tooltip_text(Some("点击检测出口 IP"));
+        network.update_property(&[gtk::accessible::Property::Label("检测出口 IP")]);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         header.append(&gtk::Image::from_icon_name("network-wireless-symbolic"));
-        let title = label("出口 IP", "section-title");
-        title.set_hexpand(true);
-        header.append(&title);
-        let network_status = label("", "muted small");
-        header.append(&network_status);
-        let refresh = icon_button("view-refresh-symbolic", "检测当前出口 IP");
-        header.append(&refresh);
-        network.append(&header);
-        let ipv4 = ip_row(&network, "IPv4", true);
-        ipv4.add_css_class("exit-ip");
-        let ipv6 = ip_row(&network, "IPv6", false);
-        if !state.settings.ipv6 {
-            ipv6.set_text("已关闭");
-        }
+        header.append(&label("出口 IP", "section-title"));
+        content.append(&header);
+        let exit_ip = label("—", "exit-ip");
+        exit_ip.set_hexpand(true);
+        exit_ip.set_wrap(true);
+        exit_ip.set_wrap_mode(gtk::pango::WrapMode::Char);
+        exit_ip.set_width_chars(1);
+        exit_ip.set_max_width_chars(39);
+        content.append(&exit_ip);
+        network.set_child(Some(&content));
         top.insert(&network, -1);
 
         let speeds = gtk::Box::new(gtk::Orientation::Horizontal, 14);
@@ -129,19 +134,25 @@ impl Ui {
             speed_card("go-down-symbolic", "下载", "download");
         let (up, upload, upload_unit, upload_total) =
             speed_card("go-up-symbolic", "上传", "upload");
-        speeds.append(&down);
         speeds.append(&up);
+        speeds.append(&down);
         top.insert(&speeds, -1);
         self.body.append(&top);
 
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        controls.set_sensitive(self.jobs.get() == 0);
         let control_grid = flow(1, 2);
         follow_width(&control_grid, 232, 14, 2, false);
         let mode_row = card(gtk::Orientation::Vertical, 12);
         mode_row.add_css_class("home-mode");
+        let mode_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let title = label("出站模式", "section-title");
-        mode_row.append(&title);
+        title.set_hexpand(true);
+        mode_header.append(&title);
+        let mode_spinner = gtk::Spinner::new();
+        mode_spinner.set_size_request(18, 18);
+        mode_spinner.set_opacity(0.0);
+        mode_header.append(&mode_spinner);
+        mode_row.append(&mode_header);
         let modes = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         modes.set_homogeneous(true);
         modes.add_css_class("mode-selector");
@@ -156,26 +167,30 @@ impl Ui {
             }
             button.set_active(state.settings.routing_mode == value);
             let weak = Rc::downgrade(self);
-            let group = controls.downgrade();
-            button.connect_clicked(move |button| {
-                if !button.is_active() {
+            let syncing = syncing.clone();
+            let spinner = mode_spinner.clone();
+            button.connect_toggled(move |button| {
+                if syncing.get() || !button.is_active() {
                     return;
                 }
-                if let Some(ui) = weak.upgrade() {
-                    if let Some(group) = group.upgrade() {
-                        group.set_sensitive(false);
-                    }
-                    ui.button_task(
-                        button.upcast_ref::<gtk::Button>(),
-                        "切换中…",
+                if let Some(ui) = weak.upgrade()
+                    && ui.jobs.get() == 0
+                {
+                    spinner.set_opacity(1.0);
+                    spinner.start();
+                    let spinner = spinner.clone();
+                    ui.task_result(
                         move |s| s.set_routing_mode(value),
-                        |ui, result| {
+                        move |ui, result| {
+                            spinner.stop();
+                            spinner.set_opacity(0.0);
                             ui.refresh(Page::Home);
                             if let Err(e) = result {
                                 ui.error("切换失败", format!("{e:#}"));
                             }
                         },
                     );
+                    ui.refresh(Page::Home);
                 }
             });
             modes.append(&button);
@@ -186,6 +201,7 @@ impl Ui {
 
         let switches = card(gtk::Orientation::Vertical, 0);
         switches.add_css_class("home-takeover");
+        let mut switch_controls = Vec::new();
         for (title, system, active, icon) in [
             (
                 "系统代理",
@@ -215,24 +231,26 @@ impl Ui {
             let switch = gtk::Switch::new();
             switch.set_valign(gtk::Align::Center);
             switch.set_active(active);
+            switch.set_widget_name(if system { "system-proxy" } else { "tun" });
             switch.update_property(&[gtk::accessible::Property::Label(title)]);
             let weak = Rc::downgrade(self);
-            let group = controls.downgrade();
+            let syncing = syncing.clone();
             switch.connect_state_set(move |_, enabled| {
-                if let Some(ui) = weak.upgrade() {
-                    if let Some(group) = group.upgrade() {
-                        group.set_sensitive(false);
-                    }
-                    ui.task(
-                        title,
+                if syncing.get() {
+                    return glib::Propagation::Proceed;
+                }
+                if let Some(ui) = weak.upgrade()
+                    && ui.jobs.get() == 0
+                {
+                    ui.task_result(
                         move |s| {
-                            Ok(if system {
+                            if system {
                                 s.set_system_proxy_enabled(enabled)
                             } else {
                                 let mut settings = s.snapshot().settings;
                                 settings.tun_enabled = enabled;
                                 s.apply_settings(settings)
-                            })
+                            }
                         },
                         |ui, result| {
                             ui.refresh(Page::Home);
@@ -241,11 +259,13 @@ impl Ui {
                             }
                         },
                     );
+                    ui.refresh(Page::Home);
                 }
                 glib::Propagation::Stop
             });
             row.append(&switch);
             switches.append(&row);
+            switch_controls.push((system, switch));
         }
         control_grid.insert(&switches, -1);
         controls.append(&control_grid);
@@ -271,6 +291,10 @@ impl Ui {
         let dashboard = Rc::new(Dashboard {
             modes: mode_buttons,
             controls,
+            switches: switch_controls,
+            syncing,
+            running: Cell::new(status.running),
+            exit_key: RefCell::new(self.detect_key()),
             download,
             upload,
             download_unit,
@@ -280,10 +304,8 @@ impl Ui {
             connections,
             uptime,
             memory,
-            ipv4,
-            ipv6,
-            network_status,
-            refresh: refresh.clone(),
+            exit_ip,
+            network: network.clone(),
             rates: RefCell::new(RateMeter::default()),
             pending: Cell::new(false),
             memory_at: Cell::new(None),
@@ -291,7 +313,7 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         let weak_dashboard = Rc::downgrade(&dashboard);
-        refresh.connect_clicked(move |_| {
+        network.connect_clicked(move |_| {
             if let (Some(ui), Some(dashboard)) = (weak.upgrade(), weak_dashboard.upgrade()) {
                 dashboard.detect(&ui, ui.detect_key());
             }
@@ -333,7 +355,105 @@ impl Ui {
     }
 }
 
-pub(super) fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
+pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
+    let cards = descendants(&ui.body)
+        .into_iter()
+        .filter(|widget| {
+            matches!(
+                widget.widget_name().as_str(),
+                "exit-ip" | "upload" | "download"
+            )
+        })
+        .map(|widget| widget.compute_bounds(&ui.body).context("首页卡片没有位置"))
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(cards.len() == 3, "首页缺少出口 IP 或流量卡片");
+    anyhow::ensure!(
+        cards.iter().all(
+            |bounds| bounds.height() > 0.0 && (bounds.height() - cards[0].height()).abs() < 1.0
+        ),
+        "出口 IP、上传、下载卡片高度不一致"
+    );
+    anyhow::ensure!(
+        cards.iter().all(|bounds| bounds.x() >= -1.0
+            && bounds.x() + bounds.width() <= ui.body.width() as f32 + 1.0)
+            && cards[1].x() < cards[2].x(),
+        "首页卡片被裁切或上传、下载顺序错误"
+    );
+    let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
+    let text = dashboard.exit_ip.layout().pixel_size();
+    anyhow::ensure!(
+        text.0 <= dashboard.exit_ip.width() && text.1 <= dashboard.exit_ip.height(),
+        "出口 IP 内容被裁切"
+    );
+    Ok(())
+}
+
+pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
+    let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
+    let content = ui.body.first_child().context("首页没有内容")?;
+    let scroll = ui.scroll.vadjustment().value();
+    for mode in ["global", "direct", "rule"] {
+        let button = dashboard
+            .modes
+            .iter()
+            .find(|(value, _)| *value == mode)
+            .unwrap()
+            .1
+            .clone();
+        let label = button.label();
+        button.emit_clicked();
+        let started = Instant::now();
+        while ui.jobs.get() > 0 {
+            anyhow::ensure!(started.elapsed() < Duration::from_secs(5), "切换模式未完成");
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        anyhow::ensure!(
+            ui.service.snapshot().settings.routing_mode == mode
+                && button.is_active()
+                && button.label() == label
+                && ui
+                    .dashboard
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(current, &dashboard))
+                && ui.body.first_child().as_ref() == Some(&content)
+                && ui.scroll.vadjustment().value() == scroll,
+            "切换模式重建了首页、改变了布局或未完成切换"
+        );
+        button.emit_clicked();
+        anyhow::ensure!(ui.jobs.get() == 0, "点击当前模式重复发起切换");
+    }
+    for (system, switch) in &dashboard.switches {
+        let original = switch.is_active();
+        for active in [!original, original] {
+            switch.set_active(active);
+            let started = Instant::now();
+            while ui.jobs.get() > 0 {
+                anyhow::ensure!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "更新首页开关未完成"
+                );
+                glib::timeout_future(Duration::from_millis(16)).await;
+            }
+            let settings = ui.service.snapshot().settings;
+            let saved = if *system {
+                settings.system_proxy
+            } else {
+                settings.tun_enabled
+            };
+            anyhow::ensure!(
+                saved == active
+                    && switch.state() == active
+                    && switch.is_active() == active
+                    && ui.body.first_child().as_ref() == Some(&content),
+                "更新首页开关后状态错误或页面被重建"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
     let before = ui.detect_count.get();
     let ipv6 = ui.service.snapshot().settings.ipv6;
     ui.service.update(|state| {
@@ -345,27 +465,74 @@ pub(super) fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
         ui.detect_key(),
         network::NetworkInfo {
             ipv4: Some("192.0.2.10".into()),
+            ipv6: Some("2001:db8:abcd:1234:5678:9abc:def0:1234".into()),
             ..Default::default()
         },
     )));
     ui.navigate(Page::Home);
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
     anyhow::ensure!(
-        dashboard.ipv4.text() == "192.0.2.10" && ui.detect_count.get() == before,
-        "返回首页时没有复用出口 IP"
+        dashboard.exit_ip.text() == "192.0.2.10" && ui.detect_count.get() == before,
+        "返回首页时未优先显示缓存的 IPv4"
     );
+    let info = network::NetworkInfo {
+        ipv6: Some("2001:db8:abcd:1234:5678:9abc:def0:1234".into()),
+        ..Default::default()
+    };
+    dashboard.show_info(&info);
+    anyhow::ensure!(
+        dashboard.exit_ip.text() == info.ipv6.as_deref().filter(|_| ipv6).unwrap_or("不可用"),
+        "出口 IP 未按 IPv6 开关回退显示"
+    );
+    glib::timeout_future(Duration::from_millis(100)).await;
+    smoke_cards(ui)?;
+    let bounds = dashboard
+        .network
+        .compute_bounds(&ui.window)
+        .context("出口 IP 卡片没有位置")?;
+    let hit = ui
+        .window
+        .pick(
+            f64::from(bounds.x() + bounds.width() / 2.0),
+            f64::from(bounds.y() + bounds.height() / 2.0),
+            gtk::PickFlags::DEFAULT,
+        )
+        .context("出口 IP 卡片无法点击")?;
+    anyhow::ensure!(
+        dashboard.network.is_mapped()
+            && dashboard.network.is_sensitive()
+            && dashboard.network.is_focusable()
+            && (hit == *dashboard.network.upcast_ref::<gtk::Widget>()
+                || hit.is_ancestor(&dashboard.network)),
+        "出口 IP 卡片无法整卡操作"
+    );
+    dashboard.network.emit_clicked();
+    anyhow::ensure!(
+        ui.detect_count.get() == before + 1
+            && !dashboard.network.is_sensitive()
+            && dashboard.exit_ip.text() == "检测中…",
+        "点击出口 IP 卡片未重新检测"
+    );
+    dashboard.network.emit_clicked();
+    anyhow::ensure!(
+        ui.detect_count.get() == before + 1,
+        "重复点击发起了重复检测"
+    );
+    ui.navigate(Page::Connections);
+    ui.navigate(Page::Home);
+    anyhow::ensure!(ui.detect_count.get() == before + 1, "返回首页重复发起检测");
     ui.navigate(Page::Connections);
     ui.service.update(|state| {
         state.settings.ipv6 = !ipv6;
         Ok(())
     })?;
     ui.navigate(Page::Home);
-    anyhow::ensure!(ui.detect_count.get() == before + 1, "IPv6 改变后未重新检测");
+    anyhow::ensure!(ui.detect_count.get() == before + 2, "IPv6 改变后未重新检测");
     ui.navigate(Page::Connections);
     ui.navigate(Page::Home);
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
     anyhow::ensure!(
-        ui.detect_count.get() == before + 1 && !dashboard.refresh.is_sensitive(),
+        ui.detect_count.get() == before + 2 && !dashboard.network.is_sensitive(),
         "切换页面后没有复用正在进行的检测"
     );
     ui.navigate(Page::Connections);
@@ -374,13 +541,86 @@ pub(super) fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
         state.settings.ipv6 = ipv6;
         Ok(())
     })?;
+    // The following narrow-window checks exercise a full-length IPv6 address.
+    ui.last_detected.replace(Some((ui.detect_key(), info)));
     Ok(())
 }
 
 impl Dashboard {
-    pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
+    pub(super) fn refresh(self: &Rc<Self>, ui: &Rc<Ui>) {
         self.controls.set_sensitive(ui.jobs.get() == 0);
+        let state = ui.service.snapshot();
         let status = ui.service.status();
+        if self.running.replace(status.running) != status.running
+            && let Some(button) = ui.home_action.borrow().as_ref()
+        {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+            content.append(&gtk::Image::from_icon_name(if status.running {
+                "media-playback-stop-symbolic"
+            } else {
+                "media-playback-start-symbolic"
+            }));
+            content.append(&label(if status.running { "停止" } else { "启动" }, ""));
+            button.set_child(Some(&content));
+            // A running child can be stopped while startup waits for rules or API readiness.
+            button.set_sensitive(status.running);
+            for (class, active) in [
+                ("suggested-action", !status.running),
+                ("destructive-action", status.running),
+            ] {
+                if active {
+                    button.add_css_class(class);
+                } else {
+                    button.remove_css_class(class);
+                }
+            }
+        }
+        if ui.jobs.get() > 0 {
+            return;
+        }
+        self.syncing.set(true);
+        for (value, button) in &self.modes {
+            button.set_active(*value == state.settings.routing_mode);
+        }
+        for (system, switch) in &self.switches {
+            let active = if *system {
+                if status.running {
+                    status.proxy
+                } else {
+                    state.settings.system_proxy
+                }
+            } else {
+                state.settings.tun_enabled
+            };
+            switch.set_state(active);
+            switch.set_active(active);
+        }
+        self.syncing.set(false);
+        let key = ui.detect_key();
+        let before = self.exit_key.replace(key.clone());
+        if before.pid != key.pid {
+            self.unavailable("");
+        }
+        if before != key {
+            if state.settings.auto_detect_ip {
+                self.detect(ui, key);
+            } else {
+                self.exit_ip.set_text("—");
+                self.network.set_sensitive(true);
+                self.network.set_tooltip_text(Some("点击检测出口 IP"));
+                self.network
+                    .update_property(&[gtk::accessible::Property::Label("检测出口 IP")]);
+            }
+        }
+    }
+
+    pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
+        let status = ui.service.status();
+        let changed = self.exit_key.borrow().pid != status.pid;
+        if ui.jobs.get() == 0 && changed {
+            self.refresh(ui);
+        }
+        self.controls.set_sensitive(ui.jobs.get() == 0);
         if let Some(button) = ui.home_action.borrow().as_ref() {
             if ui.jobs.get() == 0 {
                 let state = ui.service.snapshot();
@@ -407,6 +647,7 @@ impl Dashboard {
             self.memory_at.set(Some(Instant::now()));
         }
         let running = status.running;
+        let saved_mode = ui.service.snapshot().settings.routing_mode;
         let (tx, rx) = mpsc::channel();
         let service = ui.service.clone();
         std::thread::spawn(move || {
@@ -426,13 +667,16 @@ impl Dashboard {
                     dashboard.pending.set(false);
                     if ui.service.status().pid == status.pid {
                         if ui.jobs.get() == 0
+                            && ui.service.snapshot().settings.routing_mode == saved_mode
                             && let Ok(mode) = mode
                         {
+                            dashboard.syncing.set(true);
                             for (value, button) in &dashboard.modes {
                                 if *value == mode {
                                     button.set_active(true);
                                 }
                             }
+                            dashboard.syncing.set(false);
                         }
                         if let Some(memory) = memory {
                             dashboard.memory.set_text(
@@ -462,25 +706,25 @@ impl Dashboard {
         });
     }
     fn show_info(&self, info: &aerobox_for_linux::network::NetworkInfo) {
-        self.ipv4.set_text(info.ipv4.as_deref().unwrap_or("不可用"));
-        if self.show_ipv6 {
-            self.ipv6.set_text(info.ipv6.as_deref().unwrap_or("不可用"));
-        }
-        self.network_status.set_text(if info.via_proxy {
-            "当前出口"
-        } else {
-            "直连出口"
-        });
-        self.network_status.set_tooltip_text(None);
+        let ip = info
+            .ipv4
+            .as_deref()
+            .or_else(|| info.ipv6.as_deref().filter(|_| self.show_ipv6))
+            .unwrap_or("不可用");
+        self.exit_ip.set_text(ip);
+        self.network.set_tooltip_text(Some("点击检测出口 IP"));
+        self.network
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "出口 IP {ip}，点击重新检测"
+            ))]);
     }
 
     fn show_detecting(&self) {
-        self.refresh.set_sensitive(false);
-        self.network_status.set_text("检测中…");
-        self.network_status.set_tooltip_text(None);
-        self.ipv4.set_text("—");
-        self.ipv6
-            .set_text(if self.show_ipv6 { "—" } else { "已关闭" });
+        self.network.set_sensitive(false);
+        self.exit_ip.set_text("检测中…");
+        self.network.set_tooltip_text(None);
+        self.network
+            .update_property(&[gtk::accessible::Property::Label("正在检测出口 IP")]);
     }
 
     fn detect(&self, ui: &Rc<Ui>, key: ExitIpKey) {
@@ -513,15 +757,17 @@ impl Dashboard {
             let dashboard = ui.dashboard.borrow().clone();
             if ui.detect_key() != key {
                 if let Some(view) = dashboard
-                    && !view.refresh.is_sensitive()
+                    && !view.network.is_sensitive()
                 {
-                    view.refresh.set_sensitive(true);
-                    view.network_status.set_text("请重新检测");
+                    view.network.set_sensitive(true);
+                    view.exit_ip.set_text("点击重新检测");
+                    view.network
+                        .update_property(&[gtk::accessible::Property::Label("重新检测出口 IP")]);
                 }
                 return glib::ControlFlow::Break;
             }
             if let Some(view) = &dashboard {
-                view.refresh.set_sensitive(true);
+                view.network.set_sensitive(true);
             }
             match result {
                 Ok(info) => {
@@ -533,9 +779,12 @@ impl Dashboard {
                 Err(e) => {
                     ui.last_detected.take();
                     if let Some(view) = dashboard {
-                        view.network_status.set_text("检测失败");
-                        view.network_status
-                            .set_tooltip_text(Some(&format!("{e:#}")));
+                        view.exit_ip.set_text("检测失败");
+                        view.network.set_tooltip_text(Some(&format!("{e:#}")));
+                        view.network
+                            .update_property(&[gtk::accessible::Property::Label(
+                                "出口 IP 检测失败，点击重试",
+                            )]);
                     }
                 }
             }
@@ -568,7 +817,8 @@ impl Dashboard {
         self.connections.set_text("—");
         self.download_total.set_text("累计 —");
         self.upload_total.set_text("累计 —");
-        self.connections.set_tooltip_text(Some(error));
+        self.connections
+            .set_tooltip_text((!error.is_empty()).then_some(error));
     }
 }
 fn flow(min: u32, max: u32) -> gtk::FlowBox {
@@ -587,8 +837,9 @@ fn speed_card(
     title: &str,
     accent: &str,
 ) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label) {
-    let card = card(gtk::Orientation::Vertical, 14);
+    let card = card(gtk::Orientation::Vertical, 6);
     card.add_css_class("speed-card");
+    card.set_widget_name(accent);
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     heading.add_css_class(accent);
     heading.append(&gtk::Image::from_icon_name(icon));
@@ -632,24 +883,4 @@ fn stat(icon: &str, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
     let value = label(value, "home-stat-value");
     box_.append(&value);
     (box_, value)
-}
-fn ip_row(parent: &gtk::Box, title: &str, prominent: bool) -> gtk::Label {
-    let row = gtk::Box::new(
-        if prominent {
-            gtk::Orientation::Vertical
-        } else {
-            gtk::Orientation::Horizontal
-        },
-        6,
-    );
-    row.append(&label(title, "muted small"));
-    let value = label("—", "ip-address");
-    value.set_selectable(true);
-    value.set_hexpand(true);
-    value.set_wrap(true);
-    value.set_wrap_mode(gtk::pango::WrapMode::Char);
-    value.set_max_width_chars(30);
-    row.append(&value);
-    parent.append(&row);
-    value
 }

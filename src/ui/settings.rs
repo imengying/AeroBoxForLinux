@@ -56,15 +56,7 @@ impl SettingsPanel {
                             .replace((ui.service.snapshot().settings, login));
                         ui.notify("设置已保存");
                         if let Some(after) = after {
-                            // Rebuilding a same-page form clears the global
-                            // pending callback, so continue this captured action
-                            // only after the rebuild has finished.
-                            if ui.page.get() == Page::Settings {
-                                ui.refresh(Page::Settings);
-                            }
                             after();
-                        } else {
-                            ui.refresh(Page::Settings);
                         }
                     }
                     Err(error) => {
