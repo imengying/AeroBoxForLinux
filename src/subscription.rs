@@ -8,6 +8,14 @@ use serde_json::{Value, json};
 use std::{cell::RefCell, collections::HashSet};
 use url::Url;
 
+const DIAL_FIELDS: [&str; 5] = [
+    "bind_interface",
+    "connect_timeout",
+    "disable_tcp_keep_alive",
+    "tcp_keep_alive",
+    "tcp_keep_alive_interval",
+];
+
 fn decode(text: &str) -> Result<String> {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     for e in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
@@ -216,30 +224,28 @@ pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
 pub fn uri(input: &str) -> Result<Value> {
     if let Some(v) = input.strip_prefix("vmess://") {
         let v: Value = serde_json::from_str(&decode(v)?)?;
-        known_fields(
-            &v,
-            &[
-                "v",
-                "ps",
-                "add",
-                "port",
-                "id",
-                "aid",
-                "scy",
-                "net",
-                "type",
-                "host",
-                "path",
-                "tls",
-                "sni",
-                "alpn",
-                "fp",
-                "packetEncoding",
-                "packet_encoding",
-                "packet-encoding",
-            ],
-            "VMess 链接",
-        )?;
+        let mut fields = vec![
+            "v",
+            "ps",
+            "add",
+            "port",
+            "id",
+            "aid",
+            "scy",
+            "net",
+            "type",
+            "host",
+            "path",
+            "tls",
+            "sni",
+            "alpn",
+            "fp",
+            "packetEncoding",
+            "packet_encoding",
+            "packet-encoding",
+        ];
+        fields.extend(DIAL_FIELDS);
+        known_fields(&v, &fields, "VMess 链接")?;
         ensure!(
             v.get("v").is_none_or(|v| v == "2" || v == 2),
             "不支持的 VMess 链接版本"
@@ -255,6 +261,11 @@ pub fn uri(input: &str) -> Result<Value> {
             "不支持的 VMess TLS 设置"
         );
         let mut node = json!({"type":"vmess","tag":v["ps"].as_str().unwrap_or("VMess"),"server":v["add"],"server_port":number(&v["port"]),"uuid":v["id"],"security":v["scy"].as_str().filter(|value| !value.is_empty()).unwrap_or("auto"),"alter_id":number(&v["aid"])});
+        for field in DIAL_FIELDS {
+            if let Some(value) = v.get(field) {
+                node[field] = value.clone();
+            }
+        }
         for field in ["packetEncoding", "packet_encoding", "packet-encoding"] {
             if let Some(encoding) = v.get(field) {
                 ensure!(
@@ -488,6 +499,15 @@ pub fn uri(input: &str) -> Result<Value> {
         }
         other => bail!("不支持的传输方式: {other}"),
     }
+    for key in DIAL_FIELDS {
+        if query_keys.contains(key) {
+            node[key] = if key == "disable_tcp_keep_alive" {
+                query_bool(&q(key), key)?.into()
+            } else {
+                q(key).into()
+            };
+        }
+    }
     for key in query_keys {
         ensure!(
             consumed.borrow().contains(&key),
@@ -562,6 +582,15 @@ fn clash(v: &Value) -> Result<Value> {
         "obfs",
         "obfs-password",
     ];
+    const DIAL_ALIASES: [(&str, &str); 5] = [
+        ("interface-name", "bind_interface"),
+        ("connect-timeout", "connect_timeout"),
+        ("disable-tcp-keep-alive", "disable_tcp_keep_alive"),
+        ("tcp-keep-alive", "tcp_keep_alive"),
+        ("tcp-keep-alive-interval", "tcp_keep_alive_interval"),
+    ];
+    fields.extend(DIAL_FIELDS);
+    fields.extend(DIAL_ALIASES.iter().map(|(alias, _)| *alias));
     if matches!(typ, "shadowsocks" | "vmess") {
         fields.push("cipher");
     }
@@ -618,6 +647,15 @@ fn clash(v: &Value) -> Result<Value> {
     let mut n = json!({"type":typ,"tag":v["name"]});
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
+    for (alias, field) in DIAL_ALIASES {
+        ensure!(
+            v.get(alias).is_none() || v.get(field).is_none(),
+            "Clash 节点重复设置 {field}"
+        );
+        if let Some(value) = v.get(alias).or_else(|| v.get(field)) {
+            n[field] = value.clone();
+        }
+    }
     if typ == "naive" {
         // Naive is HTTP/2 by default; `quic: true` switches it to HTTP/3.
         let quic = v["quic"] == true || v["type"] == "naive+quic";

@@ -700,6 +700,19 @@ impl CarrierDialer for PrefixDialer {
         target: Option<ResolvedLocation>,
     ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
         let mut target = target.unwrap_or_else(|| self.target.clone());
+        if self.route.last_proxy().is_none()
+            && target.resolved_addr().is_none()
+            && target.location().address().hostname().is_some()
+            && let Some(config) = &self.domain_resolver
+        {
+            // Keep first-hop endpoint DNS inside the socket dial deadline.
+            let resolver = crate::dns::routing::endpoint_resolver(&self.route.resolver, config)?;
+            return self
+                .route
+                .socket()
+                .connect_proxy_datagram(&resolver, target)
+                .await;
+        }
         if let Some(config) = &self.domain_resolver
             && target.resolved_addr().is_none()
             && target.location().address().hostname().is_some()
@@ -733,6 +746,16 @@ impl CarrierDialer for PrefixDialer {
     }
 
     async fn open_stream(&self) -> std::io::Result<Box<dyn crate::async_stream::AsyncStream>> {
+        if self.route.last_proxy().is_none()
+            && self.target.resolved_addr().is_none()
+            && self.target.location().address().hostname().is_some()
+            && let Some(config) = &self.domain_resolver
+        {
+            // The socket connector owns one deadline for DNS and every address
+            // attempt. Resolving here would reset it once per candidate.
+            let resolver = crate::dns::routing::endpoint_resolver(&self.route.resolver, config)?;
+            return self.route.socket().connect(&resolver, &self.target).await;
+        }
         if let Some(config) = &self.domain_resolver
             && self.target.resolved_addr().is_none()
             && self.target.location().address().hostname().is_some()
@@ -806,6 +829,10 @@ impl CarrierDialer for PrefixDialer {
         let resolver = self
             .domain_resolver
             .as_ref()
+            .filter(|_| {
+                self.target.resolved_addr().is_none()
+                    && self.target.location().address().hostname().is_some()
+            })
             .map(|config| crate::dns::routing::endpoint_resolver(&self.route.resolver, config))
             .transpose()?
             .unwrap_or_else(|| self.route.resolver.clone());

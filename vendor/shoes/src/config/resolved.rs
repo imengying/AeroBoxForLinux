@@ -172,6 +172,7 @@ impl Default for ResolvedClientConfig {
             bind_interface: crate::option_util::NoneOrOne::None,
             address: super::types::common::unspecified_address(),
             domain_resolver: None,
+            connect_timeout_ms: None,
             protocol: ResolvedClientProxyConfig::Direct,
             transport: super::Transport::default(),
             tcp_settings: None,

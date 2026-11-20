@@ -48,6 +48,11 @@ impl App {
                 state.settings.bypass_lan = false;
                 state.settings.sniff = false;
                 state.settings.dns_cache = false;
+                // Fixtures use literal loopback addresses. Tests that exercise
+                // DNS install their own resolver; never bootstrap a public DoH
+                // hostname just to start a local protocol test.
+                state.settings.direct_dns = "udp://127.0.0.1:9".into();
+                state.settings.remote_dns = "tcp://127.0.0.1:9".into();
                 state.settings.routing_mode = "global".into();
                 state.settings.mixed_port = free_port();
                 state.rulesets.clear();

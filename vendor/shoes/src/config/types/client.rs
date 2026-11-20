@@ -377,6 +377,9 @@ pub struct ClientRecord<P> {
     pub address: NetLocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_resolver: Option<super::dns::DomainResolverConfig>,
+    /// Total socket dial deadline, including DNS and all address attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<std::num::NonZeroU32>,
     pub protocol: P,
     #[serde(default, skip_serializing_if = "Transport::is_default")]
     pub transport: Transport,
@@ -406,6 +409,8 @@ impl<'de> Deserialize<'de> for ClientConfig {
             address: NetLocation,
             #[serde(default)]
             domain_resolver: Option<super::dns::DomainResolverConfig>,
+            #[serde(default)]
+            connect_timeout_ms: Option<std::num::NonZeroU32>,
             protocol: ClientProxyConfig,
             #[serde(default, deserialize_with = "explicit_transport")]
             transport: Option<Transport>,
@@ -428,6 +433,7 @@ impl<'de> Deserialize<'de> for ClientConfig {
             bind_interface: fields.bind_interface,
             address: fields.address,
             domain_resolver: fields.domain_resolver,
+            connect_timeout_ms: fields.connect_timeout_ms,
             protocol: fields.protocol,
             transport,
             tcp_settings: fields.tcp_settings,
@@ -444,6 +450,7 @@ impl Default for ClientConfig {
             bind_interface: NoneOrOne::None,
             address: unspecified_address(),
             domain_resolver: None,
+            connect_timeout_ms: None,
             protocol: ClientProxyConfig::Direct,
             transport: Transport::default(),
             tcp_settings: None,
@@ -1005,6 +1012,7 @@ mod tests {
     fn create_test_client_config() -> ClientConfig {
         ClientConfig {
             domain_resolver: None,
+            connect_timeout_ms: None,
             name: None,
             control: None,
             bind_interface: NoneOrOne::One("eth0".to_string()),

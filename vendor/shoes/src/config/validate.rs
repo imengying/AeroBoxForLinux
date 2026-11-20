@@ -1285,6 +1285,9 @@ fn resolve_server_config(
     global_limits: GlobalLimits,
 ) -> std::io::Result<ResolvedServerConfig> {
     crate::sudoku_mask::validate_server(&server_config.protocol, &server_config.transport)?;
+    if let Some(tcp_settings) = &server_config.tcp_settings {
+        tcp_settings.validate()?;
+    }
     if let ServerProxyConfig::Wireguard(config) = &server_config.protocol {
         if server_config.transport != Transport::Udp
             || server_config.tcp_settings.is_some()
@@ -1827,6 +1830,9 @@ fn validate_client_parameters(
     crate::sudoku_mask::validate_client(&client_config.protocol, &client_config.transport)?;
     client_config.validate_quic_key_exchange(true)?;
     crate::quic_client::validate(client_config, true)?;
+    if let Some(tcp_settings) = &client_config.tcp_settings {
+        tcp_settings.validate()?;
+    }
     if client_config.transport != Transport::Tcp && client_config.tcp_settings.is_some() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

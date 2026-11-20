@@ -57,7 +57,7 @@ fn create_test_server_config_http() -> ServerConfig {
             password: Some("pass".to_string()),
         },
         transport: Transport::Tcp,
-        tcp_settings: Some(TcpConfig { no_delay: true }),
+        tcp_settings: Some(TcpConfig::default()),
         quic_settings: None,
         rules: NoneOrSome::None,
         dns: None,

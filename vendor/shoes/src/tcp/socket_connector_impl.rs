@@ -18,7 +18,9 @@ use tokio::net::UdpSocket;
 
 use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncStream;
-use crate::config::{ClientQuicConfig, ResolvedClientConfig, Transport, quic_client::Obfuscation};
+use crate::config::{
+    ClientQuicConfig, ResolvedClientConfig, TcpConfig, Transport, quic_client::Obfuscation,
+};
 use crate::quic_endpoint::QuicEndpoint;
 use crate::quic_stream::QuicStream;
 use crate::resolver::{Resolver, resolve_addresses, resolve_location};
@@ -140,7 +142,7 @@ where
 #[derive(Debug)]
 enum TransportConfig {
     Tcp {
-        no_delay: bool,
+        settings: TcpConfig,
     },
     Quic {
         sni_hostname: Option<String>,
@@ -205,6 +207,7 @@ fn wrap_quic_socket(
 #[derive(Debug)]
 pub struct SocketConnectorImpl {
     bind_interface: Option<String>,
+    connect_timeout: Option<std::time::Duration>,
     transport: TransportConfig,
 }
 
@@ -246,12 +249,9 @@ impl SocketConnectorImpl {
 
         let transport = match *effective_transport {
             Transport::Tcp | Transport::Udp => {
-                let no_delay = config
-                    .tcp_settings
-                    .as_ref()
-                    .map(|tc| tc.no_delay)
-                    .unwrap_or(true);
-                TransportConfig::Tcp { no_delay }
+                let settings = config.tcp_settings.clone().unwrap_or_default();
+                settings.validate()?;
+                TransportConfig::Tcp { settings }
             }
             Transport::Quic => {
                 // QUIC requires a target address for endpoint creation
@@ -335,16 +335,28 @@ impl SocketConnectorImpl {
                     &mut transport_config,
                     limits,
                 );
-                if let crate::config::ResolvedClientProxyConfig::Naiveproxy{settings,..} = &config.protocol {
-                    transport_config.congestion_controller_factory(settings.quic_congestion_control.factory());
+                if let crate::config::ResolvedClientProxyConfig::Naiveproxy { settings, .. } =
+                    &config.protocol
+                {
+                    transport_config
+                        .congestion_controller_factory(settings.quic_congestion_control.factory());
                     // Include configured receive memory in admission accounting as well.
-                    memory_bytes = memory_bytes - limits.quic_receive_window + settings.session_receive_window as usize;
-                    transport_config.receive_window(settings.session_receive_window.into())
-                        .stream_receive_window(settings.stream_receive_window.min(settings.session_receive_window).into())
-                        .datagram_receive_buffer_size(None).datagram_send_buffer_size(0);
+                    memory_bytes = memory_bytes - limits.quic_receive_window
+                        + settings.session_receive_window as usize;
+                    transport_config
+                        .receive_window(settings.session_receive_window.into())
+                        .stream_receive_window(
+                            settings
+                                .stream_receive_window
+                                .min(settings.session_receive_window)
+                                .into(),
+                        )
+                        .datagram_receive_buffer_size(None)
+                        .datagram_send_buffer_size(0);
                 }
                 if let crate::config::ResolvedClientProxyConfig::Tuic(settings) = &config.protocol {
-                    transport_config.congestion_controller_factory(settings.congestion_control.factory());
+                    transport_config
+                        .congestion_controller_factory(settings.congestion_control.factory());
                 }
                 let max_uni_streams = if is_tuic {
                     limits.max_streams_per_connection.unwrap_or(1024).min(1024) as u32
@@ -417,6 +429,9 @@ impl SocketConnectorImpl {
 
         Ok(Self {
             bind_interface,
+            connect_timeout: config
+                .connect_timeout_ms
+                .map(|value| std::time::Duration::from_millis(u64::from(value.get()))),
             transport,
         })
     }
@@ -428,7 +443,28 @@ impl SocketConnectorImpl {
     pub fn new_tcp(bind_interface: Option<String>, no_delay: bool) -> Self {
         Self {
             bind_interface,
-            transport: TransportConfig::Tcp { no_delay },
+            connect_timeout: None,
+            transport: TransportConfig::Tcp {
+                settings: TcpConfig {
+                    no_delay,
+                    ..TcpConfig::default()
+                },
+            },
+        }
+    }
+
+    async fn with_timeout<T>(
+        &self,
+        dial: impl std::future::Future<Output = std::io::Result<T>>,
+    ) -> std::io::Result<T> {
+        match self.connect_timeout {
+            Some(duration) => tokio::time::timeout(duration, dial).await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "node connection timed out (including DNS and address retries)",
+                )
+            })?,
+            None => dial.await,
         }
     }
     async fn connect_quic_candidates<T>(
@@ -514,8 +550,10 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<super::carrier_dialer::QuicCarrier> {
-        self.connect_quic_candidates(resolver, address, async |carrier| Ok(carrier))
-            .await
+        self.with_timeout(
+            self.connect_quic_candidates(resolver, address, async |carrier| Ok(carrier)),
+        )
+        .await
     }
 
     async fn connect(
@@ -523,42 +561,43 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncStream>> {
-        match &self.transport {
-            TransportConfig::Tcp { no_delay } => {
-                let target_addrs = match address.resolved_addr() {
-                    Some(r) => vec![r],
-                    None => resolve_addresses(resolver, address.location()).await?,
-                };
+        self.with_timeout(async {
+            match &self.transport {
+                TransportConfig::Tcp { settings } => {
+                    let target_addrs = match address.resolved_addr() {
+                        Some(r) => vec![r],
+                        None => resolve_addresses(resolver, address.location()).await?,
+                    };
 
-                let stream = connect_tcp_candidates(target_addrs, |address| {
-                    let socket = new_tcp_socket(self.bind_interface.clone(), address.is_ipv6())?;
-                    Ok(socket.connect(address))
-                })
-                .await?;
-                if let Err(e) = set_tcp_keepalive(
-                    &stream,
-                    std::time::Duration::from_secs(120),
-                    std::time::Duration::from_secs(30),
-                ) {
-                    error!("Failed to set TCP keepalive: {e}");
+                    let stream = connect_tcp_candidates(target_addrs, |address| {
+                        let socket =
+                            new_tcp_socket(self.bind_interface.clone(), address.is_ipv6())?;
+                        Ok(socket.connect(address))
+                    })
+                    .await?;
+                    let (idle, interval) = settings.keepalive_durations(120, 30);
+                    set_tcp_keepalive(&stream, idle, interval)?;
+                    if settings.no_delay
+                        && let Err(e) = stream.set_nodelay(true)
+                    {
+                        error!("Failed to set TCP no-delay: {e}");
+                    }
+                    Ok(Box::new(stream) as Box<dyn AsyncStream>)
                 }
-                if *no_delay && let Err(e) = stream.set_nodelay(true) {
-                    error!("Failed to set TCP no-delay: {e}");
+                TransportConfig::Quic { .. } => {
+                    self.connect_quic_candidates(resolver, address, async |carrier| {
+                        let (send, recv) = carrier
+                            .connection
+                            .open_bi()
+                            .await
+                            .map_err(std::io::Error::other)?;
+                        Ok(Box::new(QuicStream::from(send, recv)) as Box<dyn AsyncStream>)
+                    })
+                    .await
                 }
-                Ok(Box::new(stream))
             }
-            TransportConfig::Quic { .. } => {
-                self.connect_quic_candidates(resolver, address, async |carrier| {
-                    let (send, recv) = carrier
-                        .connection
-                        .open_bi()
-                        .await
-                        .map_err(std::io::Error::other)?;
-                    Ok(Box::new(QuicStream::from(send, recv)) as Box<dyn AsyncStream>)
-                })
-                .await
-            }
-        }
+        })
+        .await
     }
 
     async fn connect_udp_bidirectional(
@@ -571,17 +610,20 @@ impl SocketConnector for SocketConnectorImpl {
             target.location()
         );
 
-        let remote_addr = resolve_location(&mut target, resolver).await?;
-        let client_socket = new_udp_socket(remote_addr.is_ipv6(), self.bind_interface.clone())?;
+        self.with_timeout(async {
+            let remote_addr = resolve_location(&mut target, resolver).await?;
+            let client_socket = new_udp_socket(remote_addr.is_ipv6(), self.bind_interface.clone())?;
 
-        // Don't use connect() - wrap in UnconnectedUdpSocket instead.
-        // A connected UDP socket filters incoming packets by source address,
-        // which breaks when bind_interface causes packets to arrive from
-        // a different source than the target address.
-        Ok(Box::new(UnconnectedUdpSocket::new(
-            client_socket,
-            remote_addr,
-        )))
+            // Don't use connect() - wrap in UnconnectedUdpSocket instead.
+            // A connected UDP socket filters incoming packets by source address,
+            // which breaks when bind_interface causes packets to arrive from
+            // a different source than the target address.
+            Ok(
+                Box::new(UnconnectedUdpSocket::new(client_socket, remote_addr))
+                    as Box<dyn crate::async_stream::AsyncMessageStream>,
+            )
+        })
+        .await
     }
 
     fn bind_interface(&self) -> Option<&str> {
@@ -593,10 +635,13 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         mut target: ResolvedLocation,
     ) -> std::io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
-        let address = resolve_location(&mut target, resolver).await?;
-        let socket = new_udp_socket(address.is_ipv6(), self.bind_interface.clone())?;
-        socket.connect(address).await?;
-        Ok(Box::new(socket))
+        self.with_timeout(async {
+            let address = resolve_location(&mut target, resolver).await?;
+            let socket = new_udp_socket(address.is_ipv6(), self.bind_interface.clone())?;
+            socket.connect(address).await?;
+            Ok(Box::new(socket) as Box<dyn crate::async_stream::AsyncMessageStream>)
+        })
+        .await
     }
 }
 
@@ -823,18 +868,19 @@ mod tests {
             rcgen::generate_simple_self_signed(vec![certificate_name.into()]).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(certificate.cert.der().clone()).unwrap();
-        let mut server_tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-            aerobox_crypto::provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![certificate.cert.der().clone()],
-            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der())
-                .into(),
-        )
-        .unwrap();
+        let mut server_tls =
+            rustls::ServerConfig::builder_with_provider(Arc::new(aerobox_crypto::provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![certificate.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        certificate.signing_key.serialize_der(),
+                    )
+                    .into(),
+                )
+                .unwrap();
         server_tls.alpn_protocols = vec![b"h3".to_vec()];
         let server = quinn::Endpoint::server(
             quinn::ServerConfig::with_crypto(Arc::new(
@@ -1259,7 +1305,9 @@ mod tests {
         let connector = SocketConnectorImpl::new_tcp(Some("eth0".to_string()), true);
         assert!(matches!(
             connector.transport,
-            TransportConfig::Tcp { no_delay: true }
+            TransportConfig::Tcp {
+                settings: TcpConfig { no_delay: true, .. }
+            }
         ));
         assert_eq!(connector.bind_interface, Some("eth0".to_string()));
     }

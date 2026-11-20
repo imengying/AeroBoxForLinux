@@ -279,13 +279,9 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     if quic_transport {
         client["transport"] = "quic".into();
     }
+    dial_options(&mut f, &mut client, quic_transport)?;
     // Disabled optional features are accepted; enabled variants are never discarded.
-    for key in [
-        "tcp_fast_open",
-        "tcp_multi_path",
-        "udp_fragment",
-        "disable_tcp_keep_alive",
-    ] {
+    for key in ["tcp_fast_open", "tcp_multi_path", "udp_fragment"] {
         f.default_only(key, &[json!(false)])?;
     }
     if let Some(uot) = f.take("udp_over_tcp") {
@@ -327,6 +323,121 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     f.finish()?;
     Ok(json!({"client_group":tag, "client_chains":[{"chain":[client]}]}))
 }
+
+fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
+    if let Some(value) = f.take("connect_timeout") {
+        client["connect_timeout_ms"] =
+            duration_millis(value, &format!("{}.connect_timeout", f.path))?.into();
+    }
+    let disable_keep_alive = f.boolean("disable_tcp_keep_alive", false)?;
+    if quic && disable_keep_alive {
+        return Err(error(
+            format!("{}.disable_tcp_keep_alive", f.path),
+            "TCP keepalive does not apply to QUIC transport",
+        ));
+    }
+    let mut tcp = json!({});
+    if disable_keep_alive {
+        tcp["keep_alive"] = false.into();
+    }
+    for (field, target) in [
+        ("tcp_keep_alive", "keep_alive_time_secs"),
+        ("tcp_keep_alive_interval", "keep_alive_interval_secs"),
+    ] {
+        if let Some(value) = f.take(field) {
+            let path = format!("{}.{}", f.path, field);
+            if quic {
+                return Err(error(
+                    path,
+                    "TCP keepalive does not apply to QUIC transport",
+                ));
+            }
+            let millis = duration_millis(value, &path)?;
+            if !millis.is_multiple_of(1000) || millis / 1000 > 32767 {
+                return Err(error(
+                    path,
+                    "TCP keepalive requires whole seconds in 1..32767",
+                ));
+            }
+            tcp[target] = (millis / 1000).into();
+        }
+    }
+    if !tcp.as_object().unwrap().is_empty() {
+        client["tcp_settings"] = tcp;
+    }
+    Ok(())
+}
+
+/// Android duration strings use Go's unit notation. Preserve fractions and
+/// compound values exactly; socket deadlines have millisecond precision.
+fn duration_millis(value: Value, path: &str) -> Result<u32> {
+    let invalid = || {
+        error(
+            path,
+            "expected a positive duration in whole milliseconds (for example 250ms, 1.5s, 1m30s)",
+        )
+    };
+    let text = value.as_str().ok_or_else(invalid)?;
+    let mut remaining = text.strip_prefix('+').unwrap_or(text);
+    let mut nanos = 0u128;
+    while !remaining.is_empty() {
+        let end = remaining
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or_else(invalid)?;
+        let (number, rest) = remaining.split_at(end);
+        let (unit, multiplier) = [
+            ("ns", 1u128),
+            ("us", 1_000),
+            ("µs", 1_000),
+            ("μs", 1_000),
+            ("ms", 1_000_000),
+            ("s", 1_000_000_000),
+            ("m", 60_000_000_000),
+            ("h", 3_600_000_000_000),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit))
+        .ok_or_else(invalid)?;
+        let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+        if (whole.is_empty() && fraction.is_empty())
+            || fraction.len() > 9
+            || !fraction.bytes().all(|v| v.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let whole = if whole.is_empty() {
+            0
+        } else {
+            whole.parse::<u128>().map_err(|_| invalid())?
+        };
+        let fraction = if fraction.is_empty() {
+            0
+        } else {
+            let divisor = 10u128.pow(fraction.len() as u32);
+            let product = fraction
+                .parse::<u128>()
+                .map_err(|_| invalid())?
+                .checked_mul(multiplier)
+                .ok_or_else(invalid)?;
+            if !product.is_multiple_of(divisor) {
+                return Err(invalid());
+            }
+            product / divisor
+        };
+        nanos = whole
+            .checked_mul(multiplier)
+            .and_then(|whole| whole.checked_add(fraction))
+            .and_then(|part| nanos.checked_add(part))
+            .ok_or_else(invalid)?;
+        remaining = &rest[unit.len()..];
+    }
+    if nanos == 0 || !nanos.is_multiple_of(1_000_000) {
+        return Err(invalid());
+    }
+    u32::try_from(nanos / 1_000_000)
+        .map_err(|_| error(path, "duration exceeds 4294967295 milliseconds"))
+}
+
 fn packet_encoding(f: &mut Fields, default_xudp: bool) -> Result<String> {
     let encoding = f.string("packet_encoding")?.unwrap_or_else(|| {
         if default_xudp {

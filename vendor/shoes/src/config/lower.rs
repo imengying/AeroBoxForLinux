@@ -13,6 +13,7 @@ pub(super) fn client(
         bind_interface: source.bind_interface,
         address: source.address,
         domain_resolver: source.domain_resolver,
+        connect_timeout_ms: source.connect_timeout_ms,
         protocol: client_protocol(source.protocol, carrier),
         transport: source.transport,
         tcp_settings: source.tcp_settings,

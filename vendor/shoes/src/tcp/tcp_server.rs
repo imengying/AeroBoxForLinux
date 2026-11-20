@@ -46,7 +46,7 @@ async fn run_tcp_server(
     resolver: Arc<dyn Resolver>,
     server_handler: Arc<dyn TcpServerHandler>,
 ) -> std::io::Result<()> {
-    let TcpConfig { no_delay } = tcp_config;
+    let (keepalive_idle, keepalive_interval) = tcp_config.keepalive_durations(300, 60);
 
     let mut tasks = crate::listener_tasks::ListenerTasks::new();
 
@@ -67,15 +67,14 @@ async fn run_tcp_server(
             continue;
         };
 
-        if let Err(e) = set_tcp_keepalive(
-            &stream,
-            std::time::Duration::from_secs(300),
-            std::time::Duration::from_secs(60),
-        ) {
+        if let Err(e) = set_tcp_keepalive(&stream, keepalive_idle, keepalive_interval) {
             error!("Failed to set TCP keepalive: {e}");
+            continue;
         }
 
-        if no_delay && let Err(e) = stream.set_nodelay(true) {
+        if tcp_config.no_delay
+            && let Err(e) = stream.set_nodelay(true)
+        {
             error!("Failed to set TCP nodelay: {e}");
         }
 
@@ -637,7 +636,12 @@ async fn start_tcp_servers(
     let tcp_config = tcp_settings.unwrap_or_else(TcpConfig::default);
 
     let client_proxy_selector = Arc::new(
-        create_tcp_client_proxy_selector(rules.clone(), resolver.clone())?.with_sniff(sniff).with_dns_interception(resolver.clone(), dns_hijack || resolver.fake_dns_context().is_some()),
+        create_tcp_client_proxy_selector(rules.clone(), resolver.clone())?
+            .with_sniff(sniff)
+            .with_dns_interception(
+                resolver.clone(),
+                dns_hijack || resolver.fake_dns_context().is_some(),
+            ),
     );
 
     let mut handles = vec![];

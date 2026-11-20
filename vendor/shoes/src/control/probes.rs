@@ -843,6 +843,14 @@ impl ProbeResolver {
 }
 
 impl Resolver for ProbeResolver {
+    fn named(&self, name: &str) -> Option<Arc<dyn Resolver>> {
+        // A node's endpoint resolver must survive the probe wrapper while
+        // retaining the same target policy if the requested names coincide.
+        self.inner.named(name).map(|inner| {
+            Arc::new(Self { inner, ..self.clone() }) as Arc<dyn Resolver>
+        })
+    }
+
     fn resolve_location(&self, location: &NetLocation) -> crate::resolver::ResolveFuture {
         let resolve = self.inner.resolve_location(location);
         if location != &self.target {

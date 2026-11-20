@@ -80,20 +80,44 @@ fn node_hostnames_use_the_configured_direct_resolver() {
     let app = App::new();
     let direct_dns = Dns::new(true);
     let remote_dns = Dns::new(false);
-    let (node, _) = support::socks_http(b"resolved node".to_vec());
+    let (node, hits) = support::socks_http(b"resolved node".to_vec());
     let hostname = format!("proxy-{}.example.test", uuid::Uuid::new_v4());
     let mut settings = app.service.snapshot().settings;
     settings.direct_dns = format!("udp://127.0.0.1:{}", direct_dns.port);
     settings.remote_dns = format!("udp://127.0.0.1:{}", remote_dns.port);
+    settings.test_url = "http://1.1.1.1:12345/probe".into();
     app.service.apply_settings(settings).unwrap();
-    app.import("domain node", vec![json!({"type":"socks","tag":"resolved","server":hostname,"server_port":node.address.port()})]);
+    let id = app.import("domain node", vec![json!({"type":"socks","tag":"resolved","server":hostname,"server_port":node.address.port()})]);
     app.service.start().unwrap();
     assert_eq!(
         support::request(&app.service, "http://127.0.0.1:12345/probe").unwrap(),
         "resolved node"
     );
+    let delay = app.service.test_subscription_node(&id, "resolved").unwrap();
+    assert!(delay > 0);
+    assert_eq!(
+        app.service.subscription_nodes(&id).unwrap()[0].delay_ms,
+        Some(delay)
+    );
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        2,
+        "measurement must traverse the selected hostname node"
+    );
     assert!(direct_dns.queries.load(Ordering::Relaxed) > 0);
     assert_eq!(remote_dns.queries.load(Ordering::Relaxed), 0);
+
+    // When the probe URL happens to equal the node endpoint, the named DNS
+    // context must still enforce the probe's ban on loopback destinations.
+    let mut settings = app.service.snapshot().settings;
+    settings.test_url = format!("http://{hostname}:{}/probe", node.address.port());
+    app.service.apply_settings(settings).unwrap();
+    assert!(app.service.test_subscription_node(&id, "resolved").is_err());
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        2,
+        "named DNS bypassed probe destination policy"
+    );
 }
 
 #[test]

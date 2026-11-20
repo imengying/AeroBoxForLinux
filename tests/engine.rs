@@ -728,7 +728,13 @@ fn stopping_a_speed_test_discards_its_result_and_restart_can_measure_again() {
     let worker = app.service.clone();
     let measured_id = id.clone();
     let measurement = thread::spawn(move || worker.test_subscription_node(&measured_id, "slow"));
-    entered_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+    if let Err(error) = entered_rx.recv_timeout(Duration::from_secs(4)) {
+        let result = measurement.join().unwrap();
+        panic!(
+            "probe did not reach fixture: {error}; result: {result:?}\n{}",
+            app.service.logs()
+        );
+    }
     app.service.stop().unwrap();
     release_tx.send(()).unwrap();
     assert!(measurement.join().unwrap().is_err());

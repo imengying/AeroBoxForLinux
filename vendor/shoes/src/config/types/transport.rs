@@ -58,11 +58,59 @@ impl Transport {
 pub struct TcpConfig {
     #[serde(default = "default_true")]
     pub no_delay: bool,
+    #[serde(default = "default_true")]
+    pub keep_alive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive_time_secs: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive_interval_secs: Option<u16>,
 }
 
 impl Default for TcpConfig {
     fn default() -> Self {
-        TcpConfig { no_delay: true }
+        Self {
+            no_delay: true,
+            keep_alive: true,
+            keep_alive_time_secs: None,
+            keep_alive_interval_secs: None,
+        }
+    }
+}
+
+impl TcpConfig {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        for (name, value) in [
+            ("keep_alive_time_secs", self.keep_alive_time_secs),
+            ("keep_alive_interval_secs", self.keep_alive_interval_secs),
+        ] {
+            if value.is_some_and(|value| !(1..=32767).contains(&value)) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name} must be in 1..32767 seconds"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn keepalive_durations(
+        &self,
+        default_time: u16,
+        default_interval: u16,
+    ) -> (std::time::Duration, std::time::Duration) {
+        if !self.keep_alive {
+            return (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        }
+        (
+            std::time::Duration::from_secs(
+                self.keep_alive_time_secs.unwrap_or(default_time).into(),
+            ),
+            std::time::Duration::from_secs(
+                self.keep_alive_interval_secs
+                    .unwrap_or(default_interval)
+                    .into(),
+            ),
+        )
     }
 }
 
@@ -94,7 +142,10 @@ pub struct ServerQuicConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClientQuicConfig {
-    #[serde(default, skip_serializing_if = "super::tls::TlsClientOptions::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "super::tls::TlsClientOptions::is_default"
+    )]
     pub options: super::tls::TlsClientOptions,
     #[serde(
         default,
