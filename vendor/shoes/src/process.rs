@@ -1579,6 +1579,12 @@ impl EmbeddedProcess {
             return Err(error);
         }
         self.reconnecting = true;
+        // Keep capture installed while the physical network is absent. Starting
+        // listeners here would publish an active generation before connectivity
+        // returns and repeatedly rebuild its DNS/transport pools while offline.
+        if !self.network.available() {
+            return Ok(());
+        }
         self.lifetime = crate::network_tasks::NetworkLifetime::default();
         let result = self
             .lifetime
@@ -1653,6 +1659,9 @@ impl EmbeddedProcess {
         }
         let mut shutdown_reply = None;
         let mut terminal = None;
+        // Stats/connection polling must not restart the recovery delay each
+        // time it wins select. Only completed recovery attempts move this date.
+        let mut retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let event = tokio::select! {
                 biased;
@@ -1660,7 +1669,7 @@ impl EmbeddedProcess {
                 error = self.running.tun_failure(), if !self.reconnecting => Event::Failed(error),
                 _ = self.network.changed() => Event::Network,
                 _ = self.lifetime.scope(remote_rule_change(&mut self.prepared)), if !self.reconnecting => Event::Rules,
-                _ = tokio::time::sleep(Duration::from_secs(2)), if self.reconnecting => Event::Retry,
+                _ = tokio::time::sleep_until(retry_at), if self.reconnecting && self.network.available() => Event::Retry,
             };
             match event {
                 Event::Command(None) => break,
@@ -1674,8 +1683,11 @@ impl EmbeddedProcess {
                 }
                 Event::Network => {
                     match self.network.reconcile().await {
-                        Ok(true) => if let Err(error) = self.network_changed(&platform).await {
-                            log::warn!("Network recovery deferred: {error}");
+                        Ok(true) => {
+                            if let Err(error) = self.network_changed(&platform).await {
+                                log::warn!("Network recovery deferred: {error}");
+                            }
+                            retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
                         },
                         Ok(false) => {},
                         Err(error) => { terminal = Some(error); break; }
@@ -1690,6 +1702,7 @@ impl EmbeddedProcess {
                     if let Err(error) = self.network_changed(&platform).await {
                         log::warn!("Embedded network recovery deferred: {error}");
                     }
+                    retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
                 }
                 Event::Command(Some(Command::Reload(configs, reply))) => {
                     let result = if self.reconnecting {
@@ -1703,7 +1716,9 @@ impl EmbeddedProcess {
                     let _ = reply.send(result);
                 }
                 Event::Command(Some(Command::NetworkChanged(reply))) => {
-                    let _ = reply.send(self.network_changed(&platform).await);
+                    let result = self.network_changed(&platform).await;
+                    retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
+                    let _ = reply.send(result);
                 }
                 Event::Command(Some(Command::Stats(reply))) => {
                     let _ = reply.send(self.snapshot().map(|snapshot| crate::embedding::Stats {

@@ -38,13 +38,15 @@ VLESS 的 `xtls-rprx-vision` 使用 TLS 或 REALITY，不与 WebSocket、gRPC �
 
 VMess / VLESS 支持普通 UDP 与 XUDP 编码；VLESS 默认 XUDP，VMess 默认普通 UDP，`packet_encoding` 可设为 `"xudp"` 或空字符串。暂不支持 `packetaddr`。导入时检查 UUID、密钥、TLS 参数和内联证书，订阅更新保留有效节点并报告无效项；证书文件在启动时读取检查。
 
+节点支持 `connect_timeout`，例如 `250ms`、`1.5s`、`1m30s`，统一限制节点 DNS 解析和连接尝试的耗时。TCP 节点还支持 `disable_tcp_keep_alive`、`tcp_keep_alive` 和 `tcp_keep_alive_interval`，保活时间使用 1–32767 秒的整数时长；这些 TCP 设置不适用于 QUIC。
+
 ### 系统代理与虚拟网卡
 
 系统代理支持 GNOME 和 KDE Plasma；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。其他应用可填写本地 HTTP / SOCKS 入口，默认 `127.0.0.1:2080`。
 
 TUN 使用固定的内部 Rust 网络栈，需要 `/dev/net/tun`、`nftables` 命令及网络管理权限。Arch Linux 可安装 `nftables libcap polkit`。在设置中授权后，**完全退出并重新启动 AeroBox** 才会获得当前进程需要的 `CAP_NET_ADMIN` / `CAP_NET_RAW`；授权作用于应用可执行文件，界面仍以当前用户身份运行。更新替换程序后需重新授权。
 
-TUN 的路由与防回环由引擎统一管理，停止时恢复；没有额外的协议栈或严格路由选择项。关闭主窗口会停止网络运行并恢复桌面代理。
+TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络断开时保留接管并暂停转发，恢复联网后自动重建连接；异常退出留下的网络状态在下次启动 TUN 时清理。关闭主窗口会停止网络运行并恢复桌面代理。
 
 ### DNS 与规则
 
@@ -90,7 +92,7 @@ make clean
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 
 ```sh
-# 隔离的 user/network namespace 内验证 IPv4/IPv6 TUN 与停止后的网络清理
+# 隔离命名空间内验证 TUN TCP/UDP/DNS、断网与崩溃恢复、停止清理
 cargo test --test tun managed_tun_routes_traffic_and_restores_network_in_namespace -- --ignored
 # 与独立 sing-box 测试服务端验证协议及 WS/gRPC/HTTP/Vision/REALITY 传输互通
 AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
@@ -99,7 +101,7 @@ AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
 AEROBOX_NAIVE_PEER=/tmp/aerobox-naive-peer cargo test --test naive_interop -- --ignored
 ```
 
-TUN 测试需要 `unshare`、`ip`、`nft` 和 `/dev/net/tun`；所有路由更改均限制在测试命名空间内。
+TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使用独立 SOCKS 测试服务端，覆盖 IPv4/IPv6 数据报、UDP/TCP DNS 接管、切换网关、断网恢复与停止，以及强制结束进程后的恢复；所有路由更改均限制在测试命名空间内。
 
 界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放；截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
 
