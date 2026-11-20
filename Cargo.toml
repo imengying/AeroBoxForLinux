@@ -4,7 +4,7 @@ version = "0.1.5"
 edition = "2024"
 rust-version = "1.100"
 license = "GPL-3.0-only"
-description = "A native sing-box desktop client for Wayland"
+description = "A native Rust proxy application for Linux and Wayland"
 
 [[bin]]
 name = "AeroBox"
@@ -24,10 +24,16 @@ base64 = "0.23.1"
 url = "2.5.8"
 percent-encoding = "2.3.2"
 sha2 = "0.11.1"
-flate2 = "1.1.11"
-tar = "0.4.46"
 libc = "0.2.191"
 tempfile = "3.27.0"
+
+shoes = { path = "vendor/shoes" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "net", "sync"] }
+log = { version = "0.4.32", features = ["std"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+rcgen = { path = "vendor/rcgen", default-features = false, features = ["rustcrypto", "pem"] }
 
 [lints.cargo]
 unused_dependencies = "deny"
@@ -39,3 +45,19 @@ debug = 0
 strip = true
 lto = "thin"
 codegen-units = 8
+
+[patch.crates-io]
+tendns = { path = "vendor/tendns" }
+rustls = { path = "vendor/rustls/rustls" }
+blake3 = { path = "vendor/blake3" }
+h3 = { path = "vendor/h3/h3" }
+h3-quinn = { path = "vendor/h3/h3-quinn" }
+hickory-net = { path = "vendor/hickory-dns/crates/net" }
+hickory-proto = { path = "vendor/hickory-dns/crates/proto" }
+hickory-resolver = { path = "vendor/hickory-dns/crates/resolver" }
+nix = { path = "vendor/nix" }
+smoltcp = { path = "vendor/smoltcp" }
+quinn = { path = "vendor/quinn" }
+quinn-proto = { path = "vendor/quinn-proto" }
+rcgen = { path = "vendor/rcgen" }
+gotatun = { path = "vendor/gotatun" }

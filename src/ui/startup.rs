@@ -27,7 +27,7 @@ pub fn recover_store(
         content.append(&heading);
         let explanation = gtk::Label::builder()
             .label(format!(
-                "{error:#}\n\n位置：{}\n\n重置会备份当前数据，重新建立订阅、规则和设置。已安装的内核会保留。",
+                "{error:#}\n\n位置：{}\n\n重置会备份当前数据，重新建立订阅、规则和设置。",
                 path.display()
             ))
             .xalign(0.0)

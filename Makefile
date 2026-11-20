@@ -5,7 +5,7 @@ BINARY := $(TARGET_DIR)/release/AeroBox
 build:
 	cargo build --release --locked
 test:
-	cargo fmt --all --check
+	cargo fmt --package aerobox-for-linux --check
 	cargo clippy --all-targets --locked -- -D warnings
 	cargo test --locked
 wayland: build

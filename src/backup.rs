@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{collections::HashMap, fs, path::Path};
 
 const FORMAT: &str = "aerobox-linux-backup";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -81,6 +81,7 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
     ensure!(backup.rulesets.len() <= 5000, "备份中的规则集过多");
     let mut files = HashMap::new();
     let mut state = State {
+        schema_version: 2,
         settings: backup.settings,
         subscriptions: backup.subscriptions,
         rulesets: backup
@@ -90,7 +91,8 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
                 if let Some(encoded) = item.binary_data.take() {
                     ensure!(item.rule.binary, "JSON 规则集不能包含 SRS 数据");
                     let bytes = STANDARD.decode(encoded).context("SRS 规则数据无效")?;
-                    ensure!(bytes.starts_with(b"SRS"), "文件不是有效 SRS 规则集");
+                    shoes::rule_set::validate_bytes(&bytes, true)
+                        .map_err(|error| anyhow::anyhow!("SRS 规则数据无效：{error}"))?;
                     files.insert(item.rule.id.clone(), bytes);
                 }
                 Ok(item.rule)

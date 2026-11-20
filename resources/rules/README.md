@@ -2,7 +2,7 @@
 
 规则列表与 `AeroBoxForAndroid/app/src/main/kotlin/com/aerobox/core/geo/GeoAssetManager.kt` 相同。当前 Android 源码目录没有打包的 `.srs` / `.xz` 文件，因此直接取得该管理器指定的三个 SagerNet 官方二进制规则，作为 Linux 离线首启的完整种子。
 
-取得日期：2026-11-11。运行时使用对应 `rule-set` 分支地址，每 24 小时由 sing-box 后台更新。下载缓存优先于种子；本地种子不是最新更新时间证明。
+取得日期：2026-11-11。运行时使用对应 `rule-set` 分支地址，每 24 小时由内置 Rust 引擎后台更新。下载缓存优先于种子；本地种子不是最新更新时间证明。
 
 | 文件 | 官方来源 | 种子所在提交 | SHA-256 |
 |---|---|---|---|

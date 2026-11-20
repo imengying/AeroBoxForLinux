@@ -293,7 +293,7 @@ impl NodesPanel {
         }
         let id = self.subscription_id.clone();
         let revision = self.revision.get();
-        let pid = ui.service.status().pid;
+        let generation = ui.service.status().generation;
         let weak = Rc::downgrade(self);
         ui.task_result(
             move |s| s.subscription_nodes_runtime(&id),
@@ -302,7 +302,7 @@ impl NodesPanel {
                     && panel.revision.get() == revision
                     && !panel.selecting.get()
                     && panel.pending.borrow().is_empty()
-                    && ui.service.status().pid == pid
+                    && ui.service.status().generation == generation
                 {
                     match result {
                         Ok(nodes) => panel.display(ui, nodes),
@@ -375,7 +375,7 @@ impl NodesPanel {
         self.pending.borrow_mut().insert(tag.into());
         self.revision.set(self.revision.get() + 1);
         self.controls();
-        let pid = ui.service.status().pid;
+        let generation = ui.service.status().generation;
         let tag = tag.to_owned();
         let weak = Rc::downgrade(self);
         ui.task_result(
@@ -386,11 +386,11 @@ impl NodesPanel {
                 };
                 panel.pending.borrow_mut().remove(&tag);
                 panel.controls();
-                if ui.service.status().pid != pid {
+                if ui.service.status().generation != generation {
                     panel.reload_local(ui);
                     return;
                 }
-                panel.show_delay(&tag, result, pid.is_none());
+                panel.show_delay(&tag, result, generation.is_none());
             },
         );
     }
@@ -440,7 +440,7 @@ impl NodesPanel {
             .borrow_mut()
             .extend(nodes.iter().map(|(_, tag)| tag.clone()));
         self.controls();
-        let pid = ui.service.status().pid;
+        let generation = ui.service.status().generation;
         let weak = Rc::downgrade(self);
         ui.button_task(
             &self.test,
@@ -477,7 +477,7 @@ impl NodesPanel {
                 panel.testing.set(false);
                 panel.pending.borrow_mut().clear();
                 panel.controls();
-                if ui.service.status().pid != pid {
+                if ui.service.status().generation != generation {
                     panel.reload_local(ui);
                     return;
                 }

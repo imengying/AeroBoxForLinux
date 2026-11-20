@@ -1,3 +1,5 @@
+mod support;
+
 use aerobox_for_linux::{
     backup,
     engine::Service,
@@ -5,6 +7,8 @@ use aerobox_for_linux::{
 };
 use serde_json::{Value, json};
 use std::{fs, sync::Arc};
+
+const SRS: &[u8] = include_bytes!("../resources/rules/geoip-cn.srs");
 
 fn json_eq<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap()
@@ -35,6 +39,7 @@ fn service() -> (tempfile::TempDir, Arc<Service>) {
     store
         .update(|state| {
             state.settings.system_proxy = false;
+            state.settings.mixed_port = support::free_port();
             state.rulesets.clear();
             Ok(())
         })
@@ -61,7 +66,7 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
             ..Default::default()
         },
     ];
-    let bytes = b"SRS\x01portable fixture".to_vec();
+    let bytes = SRS.to_vec();
     backup::export(&path, &original, |rule| {
         assert_eq!(rule.name, "本地规则");
         Some(bytes.clone())
@@ -143,7 +148,8 @@ fn malformed_and_incomplete_backups_are_rejected_before_merging() {
         br#"{"format":"other","version":1}"#,
         br#"{"format":"aerobox-android-backup","version":1}"#,
         br#"{"format":"aerobox-linux-backup","version":0}"#,
-        br#"{"format":"aerobox-linux-backup","version":2}"#,
+        br#"{"format":"aerobox-linux-backup","version":1}"#,
+        br#"{"format":"aerobox-linux-backup","version":3}"#,
     ] {
         fs::write(&path, content).unwrap();
         assert!(backup::read(&path).is_err());
@@ -172,7 +178,7 @@ fn malformed_and_incomplete_backups_are_rejected_before_merging() {
         ..Default::default()
     };
     with_rule.rulesets = vec![remote];
-    backup::export(&path, &with_rule, |_| Some(b"SRS fixture".to_vec())).unwrap();
+    backup::export(&path, &with_rule, |_| Some(SRS.to_vec())).unwrap();
     let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["rulesets"][0]["binary_data"] = Value::Null;
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -182,7 +188,7 @@ fn malformed_and_incomplete_backups_are_rejected_before_merging() {
             .to_string()
             .contains("缺少二进制数据")
     );
-    backup::export(&path, &with_rule, |_| Some(b"SRS fixture".to_vec())).unwrap();
+    backup::export(&path, &with_rule, |_| Some(SRS.to_vec())).unwrap();
     let (imported, mut files) = backup::read(&path).unwrap();
     files.clear();
     assert!(backup::merge(&state(), imported, files).is_err());
@@ -216,11 +222,7 @@ fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() 
         })
         .unwrap();
     fs::create_dir_all(source.dir().join("rules")).unwrap();
-    fs::write(
-        source.dir().join("rules").join(format!("{id}.srs")),
-        b"SRS service fixture",
-    )
-    .unwrap();
+    fs::write(source.dir().join("rules").join(format!("{id}.srs")), SRS).unwrap();
     let path = source.dir().join("backup.json");
     source.export_backup(&path).unwrap();
 
@@ -247,7 +249,7 @@ fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() 
         .unwrap();
     assert_eq!(
         fs::read(target.dir().join("rules").join(format!("{}.srs", rule.id))).unwrap(),
-        b"SRS service fixture"
+        SRS
     );
     let reopened = Service::new(Store::open(Some(target.dir().to_path_buf())).unwrap());
     assert_eq!(json_eq(&reopened.snapshot()), json_eq(&restored));
@@ -285,7 +287,7 @@ fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() 
     let rules_dir = target.dir().join("rules");
     fs::create_dir_all(&rules_dir).unwrap();
     let existing_path = rules_dir.join(format!("{}.srs", existing.id));
-    fs::write(&existing_path, b"SRS existing cache").unwrap();
+    fs::write(&existing_path, SRS).unwrap();
     target
         .update(|state| {
             state.rulesets.push(existing);
@@ -304,10 +306,7 @@ fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() 
         })
         .collect();
     let backup_path = target.dir().join("backup.json");
-    backup::export(&backup_path, &imported, |_| {
-        Some(b"SRS imported cache".to_vec())
-    })
-    .unwrap();
+    backup::export(&backup_path, &imported, |_| Some(SRS.to_vec())).unwrap();
 
     // Rule writes succeed, but the final atomic state replacement must fail.
     // Using a directory also works when the tests run with root privileges.
@@ -327,7 +326,7 @@ fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() 
     );
     assert_eq!(json_eq(&target.snapshot()), json_eq(&before));
     assert_eq!(fs::read(&state_path).unwrap(), saved_bytes);
-    assert_eq!(fs::read(&existing_path).unwrap(), b"SRS existing cache");
+    assert_eq!(fs::read(&existing_path).unwrap(), SRS);
     let remaining = fs::read_dir(&rules_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -448,67 +447,90 @@ fn reset_settings_preserves_resources_selection_and_window() {
 }
 
 #[test]
-fn running_restore_failure_rolls_back_new_rule_files_and_preserves_the_core() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let (dir, source) = service();
-    source
-        .update(|state| {
-            state.settings.core_path = binary;
-            state.settings.routing_mode = "global".into();
-            Ok(())
-        })
-        .unwrap();
-    source
-        .import_subscription(Subscription {
-            nodes: vec![
-                json!({"type":"socks","tag":"fixture","server":"127.0.0.1","server_port":9}),
-            ],
-            ..Default::default()
-        })
-        .unwrap();
+fn running_restore_failure_rolls_back_rule_files_and_actual_traffic() {
+    let _serial = support::runtime_lock();
+    let app = support::App::new();
+    let (node, _) = support::socks_http(b"original proxy".to_vec());
+    let (origin, _) = support::http(b"direct destination".to_vec());
+    let url = format!("http://{}/backup", origin.address);
+    app.import(
+        "original",
+        vec![support::socks_node("original", node.address)],
+    );
     let rule = RuleSet {
-        name: "回滚检查".into(),
+        name: "original binary rule".into(),
         binary: true,
         enabled: false,
-        ..Default::default()
+        ..RuleSet::default()
     };
     let rule_id = rule.id.clone();
-    source
-        .update(|state| {
-            state.rulesets.push(rule);
-            Ok(())
-        })
-        .unwrap();
-    fs::create_dir_all(source.dir().join("rules")).unwrap();
-    fs::write(
-        source.dir().join("rules").join(format!("{rule_id}.srs")),
-        include_bytes!("../resources/rules/geoip-cn.srs"),
-    )
-    .unwrap();
-    source.start().unwrap();
-    source
-        .api("PATCH", "/configs", Some(&json!({"mode":"direct"})))
-        .unwrap();
-    assert_eq!(source.runtime_mode().unwrap(), "direct");
-    assert_eq!(source.snapshot().settings.routing_mode, "global");
-    let pid = source.status().pid;
-    let before = source.snapshot();
-    let path = dir.path().join("running-backup.json");
-    source.export_backup(&path).unwrap();
+    app.service.save_ruleset(rule).unwrap();
+    let rules_dir = app.dir.path().join("rules");
+    fs::create_dir_all(&rules_dir).unwrap();
+    let original_file = rules_dir.join(format!("{rule_id}.srs"));
+    let rule_bytes = include_bytes!("../resources/rules/geoip-cn.srs");
+    fs::write(&original_file, rule_bytes).unwrap();
+    app.service.start().unwrap();
+    let before = app.service.snapshot();
+    let path = app.dir.path().join("backup.json");
+    app.service.export_backup(&path).unwrap();
     let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    value["subscriptions"][0]["nodes"][0]["server_port"] = json!("not-a-port");
+    assert_eq!(value["version"], 2);
+    value["settings"]["routing_mode"] = json!("direct");
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-    source.restore_backup(&path).unwrap_err();
-    assert_eq!(source.status().pid, pid);
-    assert_eq!(source.runtime_mode().unwrap(), "direct");
-    assert_eq!(json_eq(&source.snapshot()), json_eq(&before));
-    assert_eq!(fs::read_dir(source.dir().join("rules")).unwrap().count(), 1);
+    let generation = app.service.status().generation;
+    let block = support::BlockStateWrite::new(app.dir.path());
+    app.service.restore_backup(&path).unwrap_err();
+    drop(block);
+    assert_eq!(app.service.status().generation, generation);
+    assert_eq!(app.service.runtime_mode().unwrap(), "global");
+    assert_eq!(json_eq(&app.service.snapshot()), json_eq(&before));
     assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(source.dir().join("state.json")).unwrap())
-            .unwrap(),
-        serde_json::to_value(before).unwrap()
+        support::request(&app.service, &url).unwrap(),
+        "original proxy"
     );
-    source.stop().unwrap();
+    let remaining = fs::read_dir(&rules_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, vec![original_file.clone()]);
+    assert_eq!(fs::read(&original_file).unwrap(), rule_bytes);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(app.dir.path().join("state.json")).unwrap())
+            .unwrap(),
+        json_eq(&before)
+    );
+}
+
+#[test]
+fn corrupted_binary_rule_backups_are_rejected_without_changing_saved_data() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let (_dir, service) = service();
+    let mut imported = state();
+    imported.rulesets.push(RuleSet {
+        name: "binary rule".into(),
+        binary: true,
+        enabled: false,
+        ..RuleSet::default()
+    });
+    let path = service.dir().join("corrupt-backup.json");
+    backup::export(&path, &imported, |_| Some(SRS.to_vec())).unwrap();
+    let valid: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let before = json_eq(&service.snapshot());
+    let saved = fs::read(service.dir().join("state.json")).unwrap();
+    for bytes in [
+        b"SRS".as_slice(),
+        b"SRS\x01broken payload",
+        &SRS[..SRS.len() / 2],
+    ] {
+        let mut invalid = valid.clone();
+        invalid["rulesets"][0]["binary_data"] = json!(STANDARD.encode(bytes));
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let error = service.restore_backup(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("SRS 规则数据无效"));
+        assert_eq!(json_eq(&service.snapshot()), before);
+        assert_eq!(fs::read(service.dir().join("state.json")).unwrap(), saved);
+        assert!(!service.dir().join("rules").exists());
+    }
 }

@@ -508,7 +508,7 @@ fn desktop_entry(exe: &Path, autostart: bool) -> Result<String> {
         format!("\"{quoted}\"")
     };
     let mut text = format!(
-        "[Desktop Entry]\nType=Application\nName=AeroBox\nComment=Native sing-box manager for Wayland\nComment[zh_CN]=原生 Wayland sing-box 管理器\nExec={command}\nIcon={APP_ID}\nTerminal=false\nCategories=Network;Settings;\nStartupNotify=true\n"
+        "[Desktop Entry]\nType=Application\nName=AeroBox\nComment=Native Rust proxy client for Wayland\nComment[zh_CN]=内置 Rust 引擎的 Wayland 代理客户端\nExec={command}\nIcon={APP_ID}\nTerminal=false\nCategories=Network;Settings;\nStartupNotify=true\n"
     );
     if autostart {
         text.push_str("X-GNOME-Autostart-enabled=true\n");

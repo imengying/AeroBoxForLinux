@@ -358,35 +358,22 @@ impl Ui {
         let tun_group = group("虚拟网卡");
         let tun = switch_row("启用 TUN", "", settings.tun_enabled);
         tun_group.add(&tun);
-        let stack = combo(
-            "协议栈",
-            &["System", "gVisor", "Mixed"],
-            match settings.tun_stack.as_str() {
-                "gvisor" => 1,
-                "mixed" => 2,
-                _ => 0,
-            },
-        );
-        tun_group.add(&stack);
         let mtu = number_entry("MTU", &settings.tun_mtu.to_string());
         tun_group.add(&mtu.root);
-        let strict = switch_row("严格路由", "", settings.strict_route);
-        tun_group.add(&strict);
-        for widget in [
-            stack.clone().upcast::<gtk::Widget>(),
-            mtu.root.clone().upcast(),
-            strict.clone().upcast(),
-        ] {
-            widget.set_sensitive(settings.tun_enabled);
-            tun.connect_active_notify(move |row| widget.set_sensitive(row.is_active()));
-        }
+        mtu.root.set_sensitive(settings.tun_enabled);
+        let mtu_row = mtu.root.downgrade();
+        tun.connect_active_notify(move |row| {
+            if let Some(mtu) = mtu_row.upgrade() {
+                mtu.set_sensitive(row.is_active());
+            }
+        });
         let permissions = adw::ActionRow::builder()
             .title("网络权限")
             .subtitle("读取中…")
             .build();
         let authorize = gtk::Button::with_label("授权");
         authorize.set_valign(gtk::Align::Center);
-        authorize.set_tooltip_text(Some("为 sing-box 内核授予创建虚拟网卡所需的权限"));
+        authorize.set_tooltip_text(Some("允许 AeroBox 创建虚拟网卡"));
         permissions.add_suffix(&authorize);
         tun_group.add(&permissions);
         tun_page.append(&tun_group);
@@ -400,7 +387,6 @@ impl Ui {
                 };
                 let request = generation.get().wrapping_add(1);
                 generation.set(request);
-                let path = ui.service.snapshot().settings.core_path;
                 row.set_subtitle("读取中…");
                 row.set_tooltip_text(None);
                 button.set_sensitive(false);
@@ -415,12 +401,10 @@ impl Ui {
                 let generation = generation.clone();
                 let weak_ui = Rc::downgrade(ui);
                 glib::timeout_add_local(Duration::from_millis(100), move || {
-                    let Some(ui) = weak_ui.upgrade() else {
+                    if weak_ui.upgrade().is_none() {
                         return glib::ControlFlow::Break;
-                    };
-                    if generation.get() != request
-                        || ui.service.snapshot().settings.core_path != path
-                    {
+                    }
+                    if generation.get() != request {
                         return glib::ControlFlow::Break;
                     }
                     let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade())
@@ -442,7 +426,7 @@ impl Ui {
                             glib::ControlFlow::Break
                         }
                         Ok(Err(error)) => {
-                            row.set_subtitle("无法读取权限，请先选择有效内核");
+                            row.set_subtitle("无法读取网络权限");
                             row.set_tooltip_text(Some(&format!("{error:#}")));
                             button.set_sensitive(true);
                             button.set_label("授权");
@@ -471,7 +455,7 @@ impl Ui {
                     |s| Ok(s.authorize_tun()),
                     move |ui, result| {
                         match result {
-                            Ok(()) => ui.notify("已授权"),
+                            Ok(()) => ui.notify("授权已保存，重启 AeroBox 后生效"),
                             Err(e) => ui.error("授权失败", format!("{e:#}")),
                         }
                         if let Some(button) = button.upgrade() {
@@ -484,28 +468,8 @@ impl Ui {
         });
 
         self.core_panel(&core_page);
-        let core = group("内核设置");
-        let core_path = LabeledEntry::new("内核路径（留空自动检测）", &settings.core_path);
-        let browse = icon_button("folder-open-symbolic", "选择 sing-box 内核");
-        core_path.with_suffix(&browse);
-        let parent = self.window.clone();
-        let path_entry = core_path.entry.clone();
-        browse.connect_clicked(move |_| {
-            let entry = path_entry.clone();
-            gtk::FileDialog::builder().title("选择内核").build().open(
-                Some(&parent),
-                None::<&gio::Cancellable>,
-                move |result| {
-                    if let Ok(file) = result
-                        && let Some(path) = file.path()
-                    {
-                        entry.set_text(&path.to_string_lossy());
-                    }
-                },
-            );
-        });
-        core.add(&core_path.root);
-        let levels = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
+        let core = group("日志");
+        let levels = ["trace", "debug", "info", "warn", "error"];
         let log = combo(
             "日志级别",
             &levels,
@@ -795,7 +759,6 @@ impl Ui {
                         _ => "system",
                     }
                     .into(),
-                    core_path: core_path.text().trim().into(),
                     system_proxy: proxy.is_active(),
                     ipv6: ipv6.is_active(),
                     allow_lan: lan.is_active(),
@@ -808,14 +771,7 @@ impl Ui {
                     remote_dns: remote_dns.text().trim().into(),
                     auto_detect_ip: detect_ip.is_active(),
                     tun_enabled: tun.is_active(),
-                    tun_stack: match stack.selected() {
-                        1 => "gvisor",
-                        2 => "mixed",
-                        _ => "system",
-                    }
-                    .into(),
                     tun_mtu: mtu.text().trim().parse().unwrap_or(0),
-                    strict_route: strict.is_active(),
                     log_level: levels[log.selected() as usize].into(),
                     test_url: test_url.text().trim().into(),
                     test_timeout: timeout.text().trim().parse().unwrap_or(0),
@@ -999,7 +955,7 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             let backup: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
             ensure!(
                 backup["format"] == "aerobox-linux-backup"
-                    && backup["version"] == 1
+                    && backup["version"] == 2
                     && backup["settings"]["remote_dns"] == settings.remote_dns
                     && backup["subscriptions"]
                         .as_array()
@@ -1149,7 +1105,6 @@ pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
 
 pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
-    use std::os::unix::fs::PermissionsExt;
 
     let row = descendants(&ui.body)
         .iter()
@@ -1157,10 +1112,6 @@ pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
         .find(|row| row.title().as_str() == "网络权限")
         .context("缺少网络权限行")?;
     ensure!(row.is_visible(), "网络权限行不可见");
-    ensure!(
-        matches!(row.subtitle().as_deref(), Some(text) if text != "读取中…" && !text.is_empty()),
-        "权限状态仍停留在读取中"
-    );
     ensure!(
         !ui.service.status().running,
         "权限自检不能更改正在运行的内核"
@@ -1172,23 +1123,20 @@ pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
         .cloned()
         .context("缺少设置页")?;
     let authorize = smoke_data_button(ui, "网络权限")?;
-    let path_entry = descendants(&ui.body)
+    let mtu = descendants(&ui.body)
         .into_iter()
         .filter_map(|widget| widget.downcast::<gtk::Entry>().ok())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("内核路径（留空自动检测）"))
-        .context("缺少内核路径输入")?;
-    let original_path = ui.service.snapshot().settings.core_path;
-    let directory = tempfile::tempdir()?;
-    let binary = directory.path().join("sing-box");
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\nprintf 'sing-box version smoke-permissions\\n'\n",
-    )?;
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
-    let valid_path = binary.display().to_string();
-    let missing_path = directory.path().join("missing").display().to_string();
-    for path in [&valid_path, &missing_path, &valid_path, &original_path] {
-        path_entry.set_text(path);
+        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .context("缺少 MTU 输入")?;
+    let original_mtu = ui.service.snapshot().settings.tun_mtu;
+    let changed_mtu = if original_mtu == 1400 { 1500 } else { 1400 };
+    for value in [changed_mtu, original_mtu] {
+        // Seed stale feedback to prove that saving refreshes the retained row,
+        // including a previous error, without invoking privileged authorization.
+        row.set_subtitle("权限自检：旧状态");
+        row.set_tooltip_text(Some("权限自检：旧错误"));
+        authorize.set_label("旧状态");
+        mtu.set_text(&value.to_string());
         panel.save.emit_clicked();
         smoke_saving(ui)?;
         let start = std::time::Instant::now();
@@ -1200,33 +1148,35 @@ pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
             glib::timeout_future(Duration::from_millis(16)).await;
         }
         ensure!(
-            ui.service.snapshot().settings.core_path == *path,
-            "权限自检的内核路径未保存"
+            ui.service.snapshot().settings.tun_mtu == value,
+            "虚拟网卡设置未保存"
         );
         ensure!(
             ui.settings_panel
                 .borrow()
                 .as_ref()
                 .is_some_and(|current| Rc::ptr_eq(current, &panel))
-                && row.is_ancestor(&ui.body),
-            "保存内核路径后重建了设置表单"
+                && row.is_ancestor(&ui.body)
+                && panel.stack.visible_child_name().as_deref() == Some("tun"),
+            "保存后重建了设置表单或切换了设置分组"
         );
-        let (subtitle, button_label, sensitive) = match ui.service.tun_available() {
+        let expected = ui.service.tun_available();
+        let (subtitle, button_label, sensitive) = match &expected {
             Ok(true) => ("已授权，可创建虚拟网卡", "已授权", false),
             Ok(false) => ("未授权；TUN 需要网络管理权限", "授权", true),
-            Err(_) => ("无法读取权限，请先选择有效内核", "授权", true),
+            Err(_) => ("无法读取网络权限", "授权", true),
         };
         ensure!(
             row.subtitle().as_deref() == Some(subtitle)
                 && authorize.label().as_deref() == Some(button_label)
                 && authorize.is_sensitive() == sensitive,
-            "保存内核路径后权限显示没有更新: {:?}, {:?}, {}",
+            "保存后权限显示没有更新: {:?}, {:?}, {}",
             row.subtitle(),
             authorize.label(),
             authorize.is_sensitive()
         );
-        if path == &valid_path {
-            ensure!(row.tooltip_text().is_none(), "有效内核保留了旧权限错误提示");
+        if expected.is_ok() {
+            ensure!(row.tooltip_text().is_none(), "权限刷新保留了旧错误提示");
         }
     }
     Ok(())
@@ -1430,7 +1380,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.allow_lan
                 && !settings.dns_cache
                 && settings.tun_enabled
-                && settings.tun_stack == "gvisor"
                 && settings.tun_mtu == 1400
                 && settings.direct_dns == "tcp://223.5.5.5:5353"
                 && settings.remote_dns == "tls://one.one.one.one",
@@ -1461,18 +1410,19 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
             .with_context(|| format!("缺少开关 {title}"))?;
         row.set_active(value);
     }
-    let stack = body
+    ensure!(
+        !body.iter().any(|widget| widget
+            .downcast_ref::<adw::ComboRow>()
+            .is_some_and(|row| row.title() == "协议栈")),
+        "设置仍显示外部内核协议栈选项"
+    );
+    let mtu = body
         .iter()
-        .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
-        .find(|row| row.title() == "协议栈")
-        .context("缺少 TUN 协议栈")?;
-    ensure!(stack.is_sensitive(), "启用 TUN 后无法选择协议栈");
-    stack.set_selected(1);
-    body.iter()
         .filter_map(|w| w.clone().downcast::<gtk::Entry>().ok())
         .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
-        .context("缺少 MTU 输入")?
-        .set_text("1400");
+        .context("缺少 MTU 输入")?;
+    ensure!(mtu.is_sensitive(), "启用 TUN 后无法设置 MTU");
+    mtu.set_text("1400");
     body.iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
         .find(|row| row.title() == "字体大小")

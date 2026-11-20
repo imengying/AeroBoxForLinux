@@ -12,7 +12,7 @@ pub struct NetworkInfo {
 
 #[derive(Clone, Debug, Default)]
 pub struct MemoryUsage {
-    /// Total for AeroBox and its running core, never a partial process total.
+    /// Application and integrated networking share one process.
     pub total_bytes: Option<u64>,
     pub basis: MemoryBasis,
 }
@@ -33,53 +33,34 @@ impl MemoryBasis {
     }
 }
 
-/// None means the running configuration has TUN routing and no usable local
-/// HTTP/SOCKS listener. A stopped core is handled separately by the caller.
-pub(crate) fn proxy_url(config: &Value) -> Result<Option<url::Url>> {
-    let inbounds = config["inbounds"]
-        .as_array()
-        .context("运行配置缺少代理入口")?;
+/// Every native configuration has a local mixed listener. Missing listeners
+/// are errors, so an active connection can never fall back to direct downloads.
+pub(crate) fn proxy_url(config: &Value) -> Result<url::Url> {
+    let inbounds = config.as_array().context("运行配置缺少代理入口")?;
     let inbound = inbounds
         .iter()
-        .filter(|inbound| {
-            matches!(inbound["type"].as_str(), Some("mixed" | "http" | "socks"))
-                && inbound["users"].as_array().is_none_or(Vec::is_empty)
-                && inbound["listen_port"]
-                    .as_u64()
-                    .is_some_and(|port| (1..=65535).contains(&port))
-        })
-        .min_by_key(|inbound| {
-            if inbound["tag"] == "aerobox-download-in" {
-                0
-            } else {
-                1
-            }
-        });
-    let Some(inbound) = inbound else {
-        if inbounds.iter().any(|inbound| inbound["type"] == "tun") {
-            return Ok(None);
+        .find(|inbound| inbound["name"] == "mixed-in")
+        .context("运行配置没有本地代理入口")?;
+    let address: std::net::SocketAddr = inbound["address"]
+        .as_str()
+        .context("入站缺少地址")?
+        .parse()?;
+    let host = if address.ip().is_unspecified() {
+        if address.is_ipv4() {
+            "127.0.0.1"
+        } else {
+            "[::1]"
         }
-        bail!("运行配置没有可用的本地下载代理入口")
-    };
-    let host = match inbound["listen"].as_str().unwrap_or("127.0.0.1") {
-        "0.0.0.0" | "" => "127.0.0.1",
-        "::" => "::1",
-        host => host,
-    };
-    let host: IpAddr = host.parse().context("代理监听地址无效")?;
-    let scheme = if inbound["type"] == "socks" {
-        "socks5h"
+        .to_owned()
+    } else if address.is_ipv4() {
+        address.ip().to_string()
     } else {
-        "http"
+        format!("[{}]", address.ip())
     };
-    let mut endpoint = url::Url::parse(&format!("{scheme}://127.0.0.1"))?;
-    endpoint
-        .set_ip_host(host)
-        .map_err(|_| anyhow::anyhow!("代理监听地址无效"))?;
-    endpoint
-        .set_port(Some(inbound["listen_port"].as_u64().unwrap() as u16))
-        .map_err(|_| anyhow::anyhow!("代理端口无效"))?;
-    Ok(Some(endpoint))
+    Ok(url::Url::parse(&format!(
+        "http://{host}:{}",
+        address.port()
+    ))?)
 }
 
 pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client> {
@@ -89,10 +70,8 @@ pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("AeroBox/", env!("CARGO_PKG_VERSION")));
-    if let Some(config) = config
-        && let Some(endpoint) = proxy_url(config)?
-    {
-        builder = builder.proxy(Proxy::all(endpoint)?);
+    if let Some(config) = config {
+        builder = builder.proxy(Proxy::all(proxy_url(config)?)?);
     }
     Ok(builder.build()?)
 }
@@ -199,7 +178,9 @@ fn parse_ip(body: &str, ipv6: bool) -> Result<String> {
 pub(crate) fn memory_usage(core_pid: Option<u32>) -> MemoryUsage {
     aggregate_memory(
         process_memory(std::process::id()),
-        core_pid.map(process_memory),
+        core_pid
+            .filter(|pid| *pid != std::process::id())
+            .map(process_memory),
     )
 }
 
@@ -264,38 +245,23 @@ mod tests {
     use std::{io::Write, net::TcpListener};
 
     #[test]
-    fn resolves_ipv4_ipv6_and_socks_listeners() {
-        for (kind, listen, expected) in [
-            ("mixed", "0.0.0.0", "http://127.0.0.1:2080/"),
-            ("http", "::", "http://[::1]:2080/"),
-            ("socks", "::1", "socks5h://[::1]:2080"),
+    fn resolves_ipv4_and_ipv6_native_listeners() {
+        for (address, expected) in [
+            ("0.0.0.0:2080", "http://127.0.0.1:2080/"),
+            ("[::]:2080", "http://[::1]:2080/"),
         ] {
-            let config = json!({"inbounds":[{"type":kind,"listen":listen,"listen_port":2080}]});
-            assert_eq!(proxy_url(&config).unwrap().unwrap().as_str(), expected);
+            let config = json!([{"name":"mixed-in","address":address,"protocol":{"type":"mixed"}}]);
+            assert_eq!(proxy_url(&config).unwrap().as_str(), expected);
         }
+        assert!(proxy_url(&json!([])).is_err());
     }
 
     #[test]
-    fn only_tun_allows_a_running_core_without_a_local_proxy() {
-        assert!(proxy_url(&json!({"inbounds":[]})).is_err());
-        assert!(
-            proxy_url(&json!({"inbounds":[{"type":"tun"}]}))
-                .unwrap()
-                .is_none()
-        );
-        assert!(proxy_url(&json!({"inbounds":[{"type":"mixed","listen_port":0}]})).is_err());
-        assert!(proxy_url(&json!({"inbounds":[{"type":"mixed","listen_port":80,"users":[{"username":"user","password":"pass"}]}]})).is_err());
-    }
-
-    #[test]
-    fn prefers_the_dedicated_listener_and_sends_requests_through_it() {
+    fn download_requests_use_the_native_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
             let mut request = [0; 4096];
             let size = stream.read(&mut request).unwrap();
             assert!(
@@ -306,10 +272,8 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
-        let config = json!({"inbounds":[
-            {"type":"mixed","listen":"127.0.0.1","listen_port":1},
-            {"type":"mixed","tag":"aerobox-download-in","listen":"0.0.0.0","listen_port":port}
-        ]});
+        let config =
+            json!([{"name":"mixed-in","address":address.to_string(),"protocol":{"type":"mixed"}}]);
         let body = client(Some(&config), Duration::from_secs(2))
             .unwrap()
             .get("http://download.invalid/file")
@@ -328,8 +292,7 @@ mod tests {
         let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy_port = proxy.local_addr().unwrap().port();
         drop(proxy);
-        let config =
-            json!({"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":proxy_port}]});
+        let config = json!([{"name":"mixed-in","address":format!("127.0.0.1:{proxy_port}"),"protocol":{"type":"mixed"}}]);
         assert!(
             client(Some(&config), Duration::from_secs(1))
                 .unwrap()

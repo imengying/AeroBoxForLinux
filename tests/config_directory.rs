@@ -7,6 +7,8 @@ fn default_configuration_uses_the_user_config_directory() {
         let store = Store::open(None).unwrap();
         assert_eq!(store.dir, std::path::PathBuf::from(expected));
         assert!(store.dir.join("state.json").is_file());
+        assert_eq!(store.state.schema_version, 2);
+        assert!(!store.dir.join("sing-box").exists());
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -34,5 +36,15 @@ fn default_configuration_uses_the_user_config_directory() {
         }
         assert!(child.status().unwrap().success());
     }
-    assert!(!root.path().join("data/singbox").exists());
+    assert!(!root.path().join("data").exists());
+}
+
+#[test]
+fn relative_data_directory_is_anchored_for_native_rule_and_network_paths() {
+    let cwd = std::env::current_dir().unwrap();
+    let directory = tempfile::tempdir_in(&cwd).unwrap();
+    let relative = directory.path().strip_prefix(&cwd).unwrap();
+    let store = Store::open(Some(relative.into())).unwrap();
+    assert_eq!(store.dir, directory.path());
+    assert!(store.dir.is_absolute());
 }

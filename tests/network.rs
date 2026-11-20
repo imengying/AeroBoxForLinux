@@ -1,289 +1,255 @@
-use aerobox_for_linux::{
-    engine::Service,
-    model::{Store, Subscription},
-    subscription,
-};
-use serde_json::{Value, json};
+mod support;
+
+use aerobox_for_linux::model::{RuleSet, Subscription};
+use serde_json::json;
 use std::{
-    fs,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream, UdpSocket},
-    path::Path,
-    process::{Child, Command, Stdio},
+    io::Write,
+    net::UdpSocket,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use support::{App, Server, runtime_lock, socks_node};
 
-struct Core(Child);
-impl Drop for Core {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn start_core(binary: &str, dir: &Path, name: &str, config: &Value, port: u16) -> Core {
-    let path = dir.join(format!("{name}.json"));
-    let log_path = dir.join(format!("{name}.log"));
-    fs::write(&path, serde_json::to_vec(config).unwrap()).unwrap();
-    let log = fs::File::create(&log_path).unwrap();
-    let mut core = Core(
-        Command::new(binary)
-            .args(["run", "-c"])
-            .arg(path)
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(
-            Instant::now() < deadline && core.0.try_wait().unwrap().is_none(),
-            "{name} failed to start: {}",
-            fs::read_to_string(&log_path).unwrap()
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    core
-}
-
-struct Worker {
+struct Dns {
+    port: u16,
+    queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
-impl Worker {
-    fn spawn(work: impl FnOnce(Arc<AtomicBool>) + Send + 'static) -> Self {
+impl Dns {
+    fn new(answer: bool) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
+        let done = stop.clone();
+        let queries = Arc::new(AtomicUsize::new(0));
+        let count = queries.clone();
+        let worker = thread::spawn(move || {
+            let mut data = [0; 4096];
+            while !done.load(Ordering::Relaxed) {
+                if let Ok((n, peer)) = socket.recv_from(&mut data) {
+                    assert!(n >= 12);
+                    count.fetch_add(1, Ordering::Relaxed);
+                    let mut end = 12;
+                    while data[end] != 0 {
+                        end += data[end] as usize + 1;
+                    }
+                    end += 1;
+                    let query_type = u16::from_be_bytes([data[end], data[end + 1]]);
+                    let has_answer = answer && query_type == 1;
+                    let mut response = data[..end + 4].to_vec();
+                    response[2] = 0x81;
+                    response[3] = if answer { 0x80 } else { 0x83 };
+                    response[6] = 0;
+                    response[7] = u8::from(has_answer);
+                    response[8..12].fill(0);
+                    if has_answer {
+                        response.extend_from_slice(&[
+                            0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1,
+                        ]);
+                    }
+                    let _ = socket.send_to(&response, peer);
+                }
+            }
+        });
         Self {
+            port,
+            queries,
             stop,
-            thread: Some(thread::spawn(move || work(worker_stop))),
+            worker: Some(worker),
         }
     }
 }
-impl Drop for Worker {
+impl Drop for Dns {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.thread.take().unwrap().join();
+        self.worker.take().unwrap().join().unwrap();
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn origin() -> (u16, Worker) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    listener.set_nonblocking(true).unwrap();
-    let worker = Worker::spawn(move |stop| {
-        while !stop.load(Ordering::Relaxed) {
-            if let Ok((mut stream, _)) = listener.accept() {
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                if stream.read(&mut [0; 4096]).unwrap_or(0) > 0 {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
-                    );
-                }
-            } else {
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    });
-    (port, worker)
-}
-
-fn service(dir: &Path, binary: &str) -> Arc<Service> {
-    let service = Service::new(Store::open(Some(dir.join("app"))).unwrap());
-    service
-        .update(|state| {
-            state.settings.core_path = binary.into();
-            state.settings.system_proxy = false;
-            state.settings.ipv6 = false;
-            state.settings.routing_mode = "global".into();
-            state.settings.mixed_port = free_port();
-            state.rulesets.clear();
-            Ok(())
-        })
-        .unwrap();
-    service
-}
-
-fn proxy_request(port: u16, origin_port: u16) -> reqwest::Result<String> {
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))?)
-        .timeout(Duration::from_secs(3))
-        .build()?
-        .get(format!("http://127.0.0.1:{origin_port}/"))
-        .send()?
-        .error_for_status()?
-        .text()
-}
-
-/// Check the imported node against a real server that rejects the wrong Host,
-/// path or method. All traffic stays on loopback, including TLS.
 #[test]
-fn real_core_connects_through_clash_http_and_h2_nodes() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let cert = dir.path().join("cert.pem");
-    let key = dir.path().join("key.pem");
-    assert!(
-        Command::new("openssl")
-            .args([
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-days",
-                "1",
-                "-subj",
-                "/CN=127.0.0.1",
-                "-keyout"
-            ])
-            .arg(&key)
-            .arg("-out")
-            .arg(&cert)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success()
+fn node_hostnames_use_the_configured_direct_resolver() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let direct_dns = Dns::new(true);
+    let remote_dns = Dns::new(false);
+    let (node, _) = support::socks_http(b"resolved node".to_vec());
+    let hostname = format!("proxy-{}.example.test", uuid::Uuid::new_v4());
+    let mut settings = app.service.snapshot().settings;
+    settings.direct_dns = format!("udp://127.0.0.1:{}", direct_dns.port);
+    settings.remote_dns = format!("udp://127.0.0.1:{}", remote_dns.port);
+    app.service.apply_settings(settings).unwrap();
+    app.import("domain node", vec![json!({"type":"socks","tag":"resolved","server":hostname,"server_port":node.address.port()})]);
+    app.service.start().unwrap();
+    assert_eq!(
+        support::request(&app.service, "http://127.0.0.1:12345/probe").unwrap(),
+        "resolved node"
     );
-    let (origin_port, _origin) = origin();
-    let service = service(dir.path(), &binary);
-    let uuid = "00000000-0000-4000-8000-000000000001";
-    for network in ["h2", "http"] {
-        let port = free_port();
-        let mut inbound = json!({
-            "type":"vless", "listen":"127.0.0.1", "listen_port":port,
-            "users":[{"uuid":uuid}],
-            "transport":{"type":"http","host":["front.example.test"],"path":"/secret","method":"GET"}
-        });
-        let mut node = json!({
-            "name":network, "type":"vless", "server":"127.0.0.1", "port":port,
-            "uuid":uuid, "network":network
-        });
-        if network == "h2" {
-            inbound["tls"] = json!({"enabled":true,"certificate_path":cert,"key_path":key});
-            inbound["transport"]["method"] = json!("PUT");
-            node["tls"] = json!(true);
-            node["skip-cert-verify"] = json!(true);
-            node["h2-opts"] = json!({"host":["front.example.test"],"path":"/secret"});
-        } else {
-            node["http-opts"] = json!({"path":["/secret","/alternate"],"headers":{"Host":["front.example.test"],"X-Token":["fixture"]}});
-        }
-        let config =
-            json!({"log":{"level":"error"},"inbounds":[inbound],"outbounds":[{"type":"direct"}]});
-        let _node = start_core(&binary, dir.path(), "node", &config, port);
-        let nodes = subscription::parse(&json!({"proxies":[node]}).to_string()).unwrap();
-        let subscription = Subscription {
-            name: network.into(),
-            nodes,
-            ..Subscription::default()
-        };
-        let id = subscription.id.clone();
-        service.import_subscription(subscription).unwrap();
-        service.select_subscription(&id).unwrap();
-        let mut generated = service.generate_current().unwrap();
-        generated["experimental"]["cache_file"]["enabled"] = json!(false);
-        let proxy_port = service.snapshot().settings.mixed_port;
-        let _client = start_core(&binary, dir.path(), "client", &generated, proxy_port);
-        let result = proxy_request(proxy_port, origin_port);
-        assert!(
-            result.is_ok(),
-            "{network}: {result:?}\n{}",
-            fs::read_to_string(dir.path().join("client.log")).unwrap()
-        );
-        assert_eq!(result.unwrap(), "OK");
-    }
-}
-
-fn dns(answer: bool) -> (u16, Arc<AtomicUsize>, Worker) {
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = socket.local_addr().unwrap().port();
-    socket
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .unwrap();
-    let count = Arc::new(AtomicUsize::new(0));
-    let queries = count.clone();
-    let worker = Worker::spawn(move |stop| {
-        let mut data = [0; 4096];
-        while !stop.load(Ordering::Relaxed) {
-            if let Ok((n, peer)) = socket.recv_from(&mut data) {
-                assert!(n >= 12);
-                queries.fetch_add(1, Ordering::Relaxed);
-                let mut response = data[..n].to_vec();
-                response[2] = 0x81;
-                response[3] = if answer { 0x80 } else { 0x83 };
-                response[6] = 0;
-                response[7] = u8::from(answer);
-                response[8..12].fill(0);
-                if answer {
-                    response.extend_from_slice(&[
-                        0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1,
-                    ]);
-                }
-                let _ = socket.send_to(&response, peer);
-            }
-        }
-    });
-    (port, count, worker)
+    assert!(direct_dns.queries.load(Ordering::Relaxed) > 0);
+    assert_eq!(remote_dns.queries.load(Ordering::Relaxed), 0);
 }
 
 #[test]
-fn real_core_resolves_node_hostnames_using_the_configured_direct_dns() {
-    let Ok(binary) = std::env::var("SINGBOX_TEST_CORE") else {
-        return;
+fn http_nodes_receive_authentication_and_connect_the_requested_destination() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let node = Server::spawn(move |mut stream| {
+        let Ok(connect) = support::headers(&mut stream) else {
+            return;
+        };
+        observed.lock().unwrap().push(connect);
+        stream
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .unwrap();
+        if let Ok(request) = support::headers(&mut stream) {
+            observed.lock().unwrap().push(request);
+            let _ = support::respond(&mut stream, b"authenticated HTTP node");
+        }
+    });
+    app.import("HTTP", vec![json!({"type":"http","tag":"HTTP","server":"127.0.0.1","server_port":node.address.port(),"username":"fixture","password":"secret"})]);
+    app.service.start().unwrap();
+    let url = "http://127.0.0.1:12345/probe";
+    assert_eq!(
+        support::request(&app.service, url).unwrap(),
+        "authenticated HTTP node"
+    );
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].starts_with("CONNECT 127.0.0.1:12345 HTTP/1.1"));
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("proxy-authorization: basic zml4dhvyztpzzwnyzxq=")
+    );
+    assert!(requests[1].starts_with("GET /probe HTTP/1.1"));
+}
+
+#[test]
+fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when_stopped() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let origin_body = r#"{"outbounds":[{"type":"socks","tag":"downloaded directly","server":"127.0.0.1","server_port":9}]}"#;
+    let (origin, origin_hits) = support::http(origin_body.as_bytes().to_vec());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    let node = Server::spawn(move |mut stream| {
+        if support::socks_handshake(&mut stream).is_err() {
+            return;
+        }
+        let Ok(request) = support::headers(&mut stream) else {
+            return;
+        };
+        counted.fetch_add(1, Ordering::Relaxed);
+        let body = if request.contains("/rules") {
+            r#"{"version":3,"rules":[{"domain":["proxied.example.test"]}]}"#
+        } else {
+            r#"{"outbounds":[{"type":"socks","tag":"downloaded through proxy","server":"127.0.0.1","server_port":9}]}"#
+        };
+        let _ = support::respond(&mut stream, body.as_bytes());
+    });
+    let original = app.import("connected", vec![socks_node("connected", node.address)]);
+    app.service.start().unwrap();
+    let rule = RuleSet {
+        name: "downloaded rule".into(),
+        source: format!("http://{}/rules", origin.address),
+        enabled: false,
+        ..RuleSet::default()
     };
-    let dir = tempfile::tempdir().unwrap();
-    let (default_port, default_queries, _default_dns) = dns(false);
-    let (custom_port, custom_queries, _custom_dns) = dns(true);
-    let (origin_port, _origin) = origin();
-    let node_port = free_port();
-    let config = json!({"log":{"level":"error"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":node_port}],"outbounds":[{"type":"direct"}]});
-    let _node = start_core(&binary, dir.path(), "node", &config, node_port);
-    let service = service(dir.path(), &binary);
-    service
-        .update(|state| {
-            state.settings.direct_dns = format!("udp://127.0.0.1:{custom_port}");
-            Ok(())
+    let rule_id = rule.id.clone();
+    app.service.save_ruleset(rule).unwrap();
+    app.service.update_ruleset(&rule_id).unwrap();
+    assert_eq!(
+        app.service.snapshot().rulesets[0].content["rules"][0]["domain"][0],
+        "proxied.example.test"
+    );
+    app.service
+        .import_subscription(Subscription {
+            source: format!("http://{}/proxied", origin.address),
+            ..Subscription::default()
         })
         .unwrap();
-    service.import_subscription(Subscription {
-        name:"domain node".into(),
-        nodes:vec![json!({"type":"socks","tag":"fixture","server":"private-proxy.example.test","server_port":node_port})],
-        ..Subscription::default()
-    }).unwrap();
-    let mut generated = service.generate_current().unwrap();
-    // Make a wrong resolver fail locally instead of querying public DNS.
-    for server in generated["dns"]["servers"].as_array_mut().unwrap() {
-        if server["tag"] == "dns-local" || server["tag"] == "aerobox-dns-proxy" {
-            *server = json!({"type":"udp","tag":server["tag"],"server":"127.0.0.1","server_port":default_port});
+    assert_eq!(
+        app.service.snapshot().subscriptions[1].nodes[0]["tag"],
+        "downloaded through proxy"
+    );
+    assert_eq!(requests.load(Ordering::Relaxed), 2);
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 0);
+    app.service.select_subscription(&original).unwrap();
+    app.service.stop().unwrap();
+    app.service
+        .import_subscription(Subscription {
+            source: format!("http://{}/direct", origin.address),
+            ..Subscription::default()
+        })
+        .unwrap();
+    assert_eq!(
+        app.service.snapshot().subscriptions[2].nodes[0]["tag"],
+        "downloaded directly"
+    );
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(requests.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn failed_proxy_downloads_do_not_fall_back_to_direct() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let (origin, hits) = support::http(br#"{"outbounds":[]}"#.to_vec());
+    let node = Server::spawn(|mut stream| {
+        let _ = support::socks_handshake(&mut stream);
+    });
+    app.import("broken proxy", vec![socks_node("broken", node.address)]);
+    app.service.start().unwrap();
+    assert!(
+        app.service
+            .import_subscription(Subscription {
+                source: format!("http://{}/must-use-proxy", origin.address),
+                ..Subscription::default()
+            })
+            .is_err()
+    );
+    assert_eq!(hits.load(Ordering::Relaxed), 0);
+    assert_eq!(app.service.snapshot().subscriptions.len(), 1);
+}
+
+#[test]
+fn exit_ip_detection_uses_the_selected_proxy_and_respects_disabled_ipv6() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let targets = Arc::new(Mutex::new(Vec::new()));
+    let observed = targets.clone();
+    let node = Server::spawn(move |mut stream| {
+        if let Ok(target) = support::socks_handshake(&mut stream) {
+            observed.lock().unwrap().push(target);
         }
-    }
-    generated["experimental"]["cache_file"]["enabled"] = json!(false);
-    let proxy_port = service.snapshot().settings.mixed_port;
-    let _client = start_core(&binary, dir.path(), "client", &generated, proxy_port);
-    assert_eq!(proxy_request(proxy_port, origin_port).unwrap(), "OK");
-    assert!(custom_queries.load(Ordering::Relaxed) > 0);
-    assert_eq!(default_queries.load(Ordering::Relaxed), 0);
+    });
+    app.import("ip probe", vec![socks_node("probe", node.address)]);
+    app.service.start().unwrap();
+    // The fixture rejects TLS, so this checks routing without reaching public
+    // IP services or trusting a test certificate in the application.
+    assert!(app.service.network_info().is_err());
+    let targets = targets.lock().unwrap();
+    assert!(
+        targets
+            .iter()
+            .any(|(host, port)| host == "api4.ipify.org" && *port == 443)
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|(host, port)| host == "ipv4.icanhazip.com" && *port == 443)
+    );
+    assert!(
+        targets
+            .iter()
+            .all(|(host, _)| !host.contains("api6") && !host.contains("ipv6"))
+    );
 }

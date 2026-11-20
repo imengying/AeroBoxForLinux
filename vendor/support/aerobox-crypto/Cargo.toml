@@ -1,0 +1,37 @@
+[package]
+name = "aerobox-crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license = "GPL-3.0-only"
+description = "Explicit RustCrypto provider for AeroBox TLS and QUIC"
+
+# This isolated workspace can be validated before the protocol backend is added
+# to AeroBox's main workspace. Remove this section when integrating it there.
+[workspace]
+resolver = "3"
+
+[dependencies]
+p256 = { version = "0.13", features = ["pkcs8"] }
+p384 = { version = "0.13", features = ["pkcs8"] }
+rsa = "0.9.10"
+ed25519-dalek = { version = "2.2", features = ["pkcs8"] }
+aes = { version = "=0.8.4", features = ["zeroize"] }
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "zeroize"] }
+chacha20 = { version = "=0.9.1", features = ["zeroize"] }
+chacha20poly1305 = { version = "=0.10.1", default-features = false }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = { version = "=0.0.2-alpha", default-features = false, features = ["std", "tls12", "zeroize"] }
+subtle = "2"
+zeroize = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+debug = 1
+incremental = false
+
+[patch.crates-io]
+rustls = { path = "../../rustls/rustls" }

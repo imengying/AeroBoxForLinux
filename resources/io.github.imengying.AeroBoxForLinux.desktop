@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=AeroBox
-Comment=Native sing-box manager for Wayland
-Comment[zh_CN]=原生 Wayland sing-box 管理器
+Comment=Native Rust proxy client for Wayland
+Comment[zh_CN]=内置 Rust 引擎的 Wayland 代理客户端
 Exec=AeroBox
 Icon=io.github.imengying.AeroBoxForLinux
 Terminal=false

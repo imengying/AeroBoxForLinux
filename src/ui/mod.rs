@@ -172,7 +172,7 @@ struct Ui {
     page: Cell<Page>,
     split: adw::OverlaySplitView,
     jobs: Cell<usize>,
-    last_pid: Cell<Option<u32>>,
+    last_generation: Cell<Option<u64>>,
     subscription_revision: Cell<u64>,
     subscription_update_pending: Cell<bool>,
     dashboard: RefCell<Option<Rc<home::Dashboard>>>,
@@ -325,7 +325,7 @@ impl Ui {
             page: Cell::new(Page::Home),
             split,
             jobs: Cell::new(0),
-            last_pid: Cell::new(None),
+            last_generation: Cell::new(None),
             subscription_revision: Cell::new(0),
             subscription_update_pending: Cell::new(false),
             dashboard: RefCell::new(None),
@@ -397,10 +397,10 @@ impl Ui {
                 return glib::ControlFlow::Break;
             };
             let status = ui.service.status();
-            if ui.last_pid.get() != status.pid
+            if ui.last_generation.get() != status.generation
                 && (ui.jobs.get() == 0 || ui.page.get() == Page::Home)
             {
-                ui.last_pid.set(status.pid);
+                ui.last_generation.set(status.generation);
                 if ui.page.get() == Page::Home {
                     ui.refresh(Page::Home);
                 } else if let Some(panel) = ui.node_panel.borrow().clone() {
@@ -938,7 +938,7 @@ impl Ui {
             if let Some(ui) = weak.upgrade() {
                 ui.task(
                     "关闭连接",
-                    |s| s.api("DELETE", "/connections", None),
+                    |s| s.close_all_connections(),
                     |ui, _| {
                         ui.notify("所有连接已关闭");
                         ui.refresh(Page::Connections)
@@ -952,7 +952,7 @@ impl Ui {
             return;
         }
         let search = gtk::SearchEntry::new();
-        search.set_placeholder_text(Some("搜索域名、地址或进程"));
+        search.set_placeholder_text(Some("搜索域名或地址"));
         search.add_css_class("search");
         search.set_widget_name("connections-search");
         search.set_key_capture_widget(Some(&self.window));
@@ -975,7 +975,7 @@ impl Ui {
         area.append(&label("正在读取连接…", "muted"));
         self.task(
             "读取连接",
-            |s| s.api("GET", "/connections", None),
+            |s| s.connections(),
             move |ui, value| {
                 clear_box(&area);
                 let connections = value["connections"].as_array().cloned().unwrap_or_default();
@@ -1055,7 +1055,7 @@ impl Ui {
                     let id = id.clone();
                     ui.task(
                         "关闭连接",
-                        move |s| s.api("DELETE", &format!("/connections/{}", urlpart(&id)), None),
+                        move |s| s.close_connection(&id),
                         |ui, _| ui.refresh(Page::Connections),
                     )
                 }
@@ -1444,9 +1444,6 @@ fn bytes(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
-fn urlpart(text: &str) -> String {
-    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
-}
 fn seed_smoke(service: &Service) -> Result<()> {
     service.update(|state| {
         state.settings.theme="light".into();state.settings.auto_detect_ip=false;
@@ -1457,20 +1454,37 @@ fn seed_smoke(service: &Service) -> Result<()> {
             json!({"type":"shadowsocks","tag":"美国 · 01","server":"us.example.invalid","server_port":443,"method":"aes-128-gcm","password":"smoke-fixture"}),
             json!({"type":"trojan","tag":"德国 · 01","server":"de.example.invalid","server_port":443,"password":"smoke-fixture","tls":{"enabled":true}}),
             json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080}),
-            json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
-            json!({"type":"urltest","tag":"自动选择","outbounds":["香港 · 01"]}),
-            json!({"type":"direct","tag":"默认"})],updated:model::now()-1200,expires:model::now()+30*86400,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
+        ],updated:model::now()-1200,expires:model::now()+30*86400,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
         let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
         let backup = Subscription { name: "备用订阅".into(), expires:model::now()+60*86400,updated:model::now()-7200,total:100*1024*1024*1024,download:62*1024*1024*1024, selected_node:Some("香港 · 01".into()), nodes: vec![
             json!({"type":"socks","tag":"香港 · 01","server":"127.0.0.1","server_port":1081}),
             json!({"type":"socks","tag":"备用 · 02","server":"127.0.0.1","server_port":1082}),
-            json!({"type":"selector","tag":"代理","outbounds":["香港 · 01"]}),
-            json!({"type":"direct","tag":"默认"})], ..Subscription::default() };
+        ], ..Subscription::default() };
         state.settings.active_subscription=subscription.id.clone();state.subscriptions=vec![subscription,backup];state.rulesets=model::builtin_resources();state.rulesets.push(rules);Ok(())
     })
 }
 
-fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
+async fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match screenshot_frame(window, path) {
+            Err(error)
+                if matches!(
+                    error.to_string().as_str(),
+                    "窗口没有渲染内容" | "窗口尚未分配尺寸"
+                ) && std::time::Instant::now() < deadline =>
+            {
+                // Under load a page can be allocated before its first painted
+                // frame. Await rendering without repeating page actions.
+                window.as_ref().queue_draw();
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn screenshot_frame(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
     let window = window.as_ref();
     let width = window.width();
     let height = window.height();
@@ -1597,7 +1611,7 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 } else {
                     ui.window.clone().upcast::<gtk::Window>()
                 };
-                screenshot(&window, &parent.join(name))?;
+                screenshot(&window, &parent.join(name)).await?;
             }
             if current == 0 {
                 let scale = std::env::var("AEROBOX_TEST_SCALE")
@@ -1663,7 +1677,7 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                 }
                 2 => {
                     let window = subscriptions::smoke_import_window(&ui)?;
-                    screenshot(&window, &parent.join("subscription-import-default.png"))?;
+                    screenshot(&window, &parent.join("subscription-import-default.png")).await?;
                     window.close();
                 }
                 3 => {
@@ -1794,7 +1808,10 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
                     ui.navigate(Page::Settings);
                     settings::smoke_section(&ui, "core")?;
                 }
-                23 => ui.navigate(Page::Nodes),
+                23 => {
+                    core::smoke_info(&ui).await?;
+                    ui.navigate(Page::Nodes);
+                }
                 24 => {
                     nodes::smoke_nodes(&ui, "导入检查", 1, None, None)?;
                     startup::smoke_recovery()?;
@@ -1980,14 +1997,13 @@ async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
             Ok(())
         }.await;
         if let Err(error) = result {
-            if current == 0 && error.to_string() == "窗口没有渲染内容" {
-                continue;
-            }
             eprintln!("Wayland smoke step {current}: {error:#}");
             if let Err(screenshot_error) = screenshot(
                 &ui.window.clone().upcast::<gtk::Window>(),
                 &parent.join("smoke-failure.png"),
-            ) {
+            )
+            .await
+            {
                 eprintln!("failure screenshot: {screenshot_error:#}");
             }
             failed.set(true);

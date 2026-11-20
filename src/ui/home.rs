@@ -4,7 +4,7 @@ use std::time::Instant;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ExitIpKey {
-    pid: Option<u32>,
+    generation: Option<u64>,
     subscription: String,
     node: Option<String>,
     mode: String,
@@ -344,7 +344,7 @@ impl Ui {
             .find(|sub| sub.id == state.settings.active_subscription)
             .and_then(|sub| sub.selected_node.clone());
         ExitIpKey {
-            pid: status.pid,
+            generation: status.generation,
             subscription: state.settings.active_subscription,
             node,
             mode: state.settings.routing_mode,
@@ -450,7 +450,7 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
     }
     // A selection can finish after the user has already returned home.
     // Neither switching a stopped subscription nor a hot node switch changes
-    // the PID; the regular dashboard tick must still invalidate the old IP.
+    // the runtime generation; the dashboard must still invalidate the old IP.
     let state = ui.service.snapshot();
     let active = state
         .subscriptions
@@ -467,7 +467,7 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
         .iter()
         .find(|sub| sub.id != active.id)
         .context("缺少备用订阅")?;
-    let pid = ui.service.status().pid;
+    let generation = ui.service.status().generation;
     let reading = network::NetworkInfo {
         ipv4: Some("192.0.2.10".into()),
         ..Default::default()
@@ -481,7 +481,7 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
         }
         dashboard.tick(ui);
         anyhow::ensure!(
-            ui.service.status().pid == pid
+            ui.service.status().generation == generation
                 && *dashboard.exit_key.borrow() == ui.detect_key()
                 && dashboard.exit_ip.text() == "—"
                 && dashboard.network.is_sensitive()
@@ -656,7 +656,7 @@ impl Dashboard {
         self.syncing.set(false);
         let key = ui.detect_key();
         let before = self.exit_key.replace(key.clone());
-        if before.pid != key.pid {
+        if before.generation != key.generation {
             self.unavailable("");
         }
         if before != key {
@@ -722,7 +722,7 @@ impl Dashboard {
             match rx.try_recv() {
                 Ok((at, memory, traffic, mode)) => {
                     dashboard.pending.set(false);
-                    if ui.service.status().pid == status.pid {
+                    if ui.service.status().generation == status.generation {
                         if ui.jobs.get() == 0
                             && ui.service.snapshot().settings.routing_mode == saved_mode
                             && let Ok(mode) = mode
@@ -740,7 +740,7 @@ impl Dashboard {
                                 &memory.total_bytes.map(bytes).unwrap_or_else(|| "—".into()),
                             );
                             dashboard.memory.set_tooltip_text(Some(&format!(
-                                "AeroBox 与内核合计（{}）",
+                                "AeroBox 整体内存（{}）",
                                 memory.basis.label()
                             )));
                         }

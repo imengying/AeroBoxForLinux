@@ -2,31 +2,23 @@ use super::*;
 
 pub(super) struct CorePanel {
     version: adw::ActionRow,
-    path: adw::ActionRow,
     status: adw::ActionRow,
     toggle: gtk::Button,
     restart: gtk::Button,
     check: gtk::Button,
-    install: gtk::Button,
     pending: Cell<bool>,
-    key: RefCell<Option<(String, Option<u32>)>>,
+    key: Cell<Option<Option<u64>>>,
 }
 
 impl Ui {
     pub(super) fn core_panel(self: &Rc<Self>, page: &gtk::Box) {
         let group = adw::PreferencesGroup::builder().title("运行状态").build();
         let version = adw::ActionRow::builder()
-            .title("sing-box")
+            .title("AeroBox 内置引擎")
             .subtitle("读取中…")
             .build();
-        let install = gtk::Button::with_label("下载 / 更新");
-        install.set_valign(gtk::Align::Center);
-        version.add_suffix(&install);
+        version.set_widget_name("embedded-engine-version");
         group.add(&version);
-        let path = adw::ActionRow::builder().title("当前内核").build();
-        path.set_subtitle_selectable(true);
-        path.set_subtitle_lines(2);
-        group.add(&path);
         let status = adw::ActionRow::builder().title("状态").build();
         let toggle = gtk::Button::with_label("启动");
         toggle.set_valign(gtk::Align::Center);
@@ -82,14 +74,12 @@ impl Ui {
         });
         let panel = Rc::new(CorePanel {
             version,
-            path,
             status,
             toggle: toggle.clone(),
             restart: restart.clone(),
             check: check.clone(),
-            install: install.clone(),
             pending: Cell::new(false),
-            key: RefCell::new(None),
+            key: Cell::new(None),
         });
         self.core.replace(Some(panel.clone()));
         panel.tick(self);
@@ -98,6 +88,9 @@ impl Ui {
         toggle.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
                 let running = ui.service.status().running;
+                if ui.jobs.get() > 0 && !running {
+                    return;
+                }
                 ui.button_task(
                     button,
                     if running {
@@ -119,7 +112,9 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         restart.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = weak.upgrade()
+                && ui.jobs.get() == 0
+            {
                 ui.button_task(
                     button,
                     "重启中…",
@@ -138,7 +133,9 @@ impl Ui {
         });
         let weak = Rc::downgrade(self);
         check.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = weak.upgrade()
+                && ui.jobs.get() == 0
+            {
                 ui.button_task(
                     button,
                     "检查中…",
@@ -146,31 +143,6 @@ impl Ui {
                     |ui, result| match result {
                         Ok(()) => ui.notify("配置检查通过"),
                         Err(e) => ui.error("配置检查失败", format!("{e:#}")),
-                    },
-                );
-            }
-        });
-        let weak = Rc::downgrade(self);
-        install.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                ui.button_task(
-                    button,
-                    "安装中…",
-                    |s| s.install_core(),
-                    |ui, result| {
-                        match result {
-                            Ok(()) => {
-                                ui.notify("内核已安装");
-                                if let Some(panel) = ui.settings_panel.borrow().as_ref() {
-                                    panel.refresh_permissions(ui);
-                                }
-                            }
-                            Err(e) => ui.error("安装失败", format!("{e:#}")),
-                        }
-                        if let Some(panel) = ui.core.borrow().as_ref() {
-                            panel.key.replace(None);
-                            panel.tick(ui);
-                        }
                     },
                 );
             }
@@ -188,12 +160,9 @@ impl CorePanel {
     pub(super) fn tick(self: &Rc<Self>, ui: &Rc<Ui>) {
         let status = ui.service.status();
         let idle = ui.jobs.get() == 0;
-        self.toggle.set_sensitive(idle);
+        self.toggle.set_sensitive(idle || status.running);
         self.restart.set_sensitive(idle && status.running);
         self.check.set_sensitive(idle);
-        self.install.set_sensitive(idle && !status.running);
-        self.install
-            .set_tooltip_text(status.running.then_some("停止内核后可更新"));
         if idle {
             self.toggle
                 .set_label(if status.running { "停止" } else { "启动" });
@@ -203,55 +172,78 @@ impl CorePanel {
         } else {
             "已停止".into()
         });
-        let key = (ui.service.snapshot().settings.core_path, status.pid);
-        if !idle || self.key.borrow().as_ref() == Some(&key) || self.pending.replace(true) {
+        let generation = status.generation;
+        if !idle || self.key.get() == Some(generation) || self.pending.replace(true) {
             return;
         }
-        self.key.replace(Some(key));
+        self.key.set(Some(generation));
         self.version.set_subtitle("读取中…");
         let service = ui.service.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let binary = service.core_binary();
-            let _ = tx.send((binary, service.core_info()));
+            let _ = tx.send(service.core_info());
         });
         let weak = Rc::downgrade(self);
+        let weak_ui = Rc::downgrade(ui);
         glib::timeout_add_local(Duration::from_millis(100), move || {
-            let Some(panel) = weak.upgrade() else {
+            let (Some(panel), Some(ui)) = (weak.upgrade(), weak_ui.upgrade()) else {
                 return glib::ControlFlow::Break;
             };
-            let (binary, result) = match rx.try_recv() {
+            let result = match rx.try_recv() {
                 Ok(result) => result,
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(_) => (
-                    Err(anyhow::anyhow!("读取任务已结束")),
-                    Err(anyhow::anyhow!("读取任务已结束")),
-                ),
+                Err(_) => Err(anyhow::anyhow!("读取任务已结束")),
             };
             panel.pending.set(false);
+            if ui.service.status().generation != generation {
+                panel.key.set(None);
+                panel.tick(&ui);
+                return glib::ControlFlow::Break;
+            }
             match result {
                 Ok(info) => {
+                    panel.version.set_title(&info.name);
                     panel.version.set_subtitle(&info.version);
                     panel.version.set_tooltip_text(None);
-                    panel.path.set_subtitle(&info.binary.to_string_lossy());
-                    panel.path.set_visible(true);
                 }
                 Err(error) => {
-                    panel.version.set_subtitle(if binary.is_ok() {
-                        "无法读取版本"
-                    } else {
-                        "未安装"
-                    });
+                    panel.version.set_subtitle("无法读取引擎状态");
                     panel.version.set_tooltip_text(Some(&format!("{error:#}")));
-                    if let Ok(binary) = binary {
-                        panel.path.set_subtitle(&binary.to_string_lossy());
-                        panel.path.set_visible(true);
-                    } else {
-                        panel.path.set_visible(false);
-                    }
                 }
             }
             glib::ControlFlow::Break
         });
     }
+}
+
+pub(super) async fn smoke_info(ui: &Rc<Ui>) -> Result<()> {
+    let panel = ui.core.borrow().clone().context("缺少内置引擎状态")?;
+    let start = std::time::Instant::now();
+    while panel.pending.get() {
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "内置引擎状态读取超时"
+        );
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    let info = ui.service.core_info()?;
+    anyhow::ensure!(
+        !info.name.is_empty()
+            && !info.version.is_empty()
+            && panel.version.title() == info.name
+            && panel.version.subtitle().as_deref() == Some(info.version.as_str()),
+        "内置引擎信息未显示"
+    );
+    anyhow::ensure!(
+        !descendants(&ui.body).iter().any(|widget| {
+            widget
+                .downcast_ref::<gtk::Button>()
+                .is_some_and(|button| button.label().as_deref() == Some("下载 / 更新"))
+                || widget.downcast_ref::<gtk::Entry>().is_some_and(|entry| {
+                    entry.placeholder_text().as_deref() == Some("内核路径（留空自动检测）")
+                })
+        }),
+        "设置仍需要外部内核"
+    );
+    Ok(())
 }

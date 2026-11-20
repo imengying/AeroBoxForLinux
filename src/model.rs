@@ -38,16 +38,13 @@ pub struct Settings {
     /// Base UI font size in points. Row heights and paddings derive from it,
     /// so text and layout scale together instead of only the glyphs.
     pub font_size: u32,
-    pub core_path: String,
     pub active_subscription: String,
     pub mixed_port: u16,
     pub system_proxy: bool,
     pub routing_mode: String,
     pub ipv6: bool,
     pub tun_enabled: bool,
-    pub tun_stack: String,
     pub tun_mtu: u32,
-    pub strict_route: bool,
     pub allow_lan: bool,
     pub sniff: bool,
     pub dns_hijack: bool,
@@ -67,16 +64,13 @@ impl Default for Settings {
         Self {
             theme: "system".into(),
             font_size: 11,
-            core_path: String::new(),
             active_subscription: String::new(),
             mixed_port: 2080,
             system_proxy: true,
             routing_mode: "rule".into(),
             ipv6: true,
             tun_enabled: false,
-            tun_stack: "system".into(),
             tun_mtu: 1500,
-            strict_route: true,
             allow_lan: false,
             sniff: true,
             dns_hijack: true,
@@ -116,10 +110,6 @@ impl Settings {
             "无效的出站模式"
         );
         ensure!(
-            matches!(self.tun_stack.as_str(), "system" | "gvisor" | "mixed"),
-            "无效的 TUN 协议栈"
-        );
-        ensure!(
             (576..=9000).contains(&self.tun_mtu),
             "MTU 必须在 576 到 9000 之间"
         );
@@ -130,7 +120,7 @@ impl Settings {
         ensure!(
             matches!(
                 self.log_level.as_str(),
-                "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "panic"
+                "trace" | "debug" | "info" | "warn" | "error"
             ),
             "无效的日志级别"
         );
@@ -152,38 +142,6 @@ impl Settings {
 pub struct NodeSelection {
     pub subscription_id: String,
     pub node_tag: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    pub name: String,
-    pub config: Value,
-    #[serde(default)]
-    pub subscriptions: Vec<String>,
-    #[serde(default)]
-    pub rulesets: Vec<String>,
-    #[serde(default)]
-    pub selected_node: Option<NodeSelection>,
-}
-impl Profile {
-    pub fn new(name: &str) -> Self {
-        Self {
-            id: id(),
-            name: name.into(),
-            subscriptions: vec![],
-            rulesets: vec![],
-            selected_node: None,
-            config: json!({
-                "log":{"level":"error","timestamp":true},
-                "dns":{"servers":[{"type":"udp","tag":"dns-local","server":"223.5.5.5"}],"final":"dns-local"},
-                "inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080}],
-                "outbounds":[{"type":"selector","tag":"proxy","outbounds":["direct"],"interrupt_exist_connections":true},{"type":"direct","tag":"direct"}],
-                "route":{"auto_detect_interface":true,"default_domain_resolver":"dns-local","rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"},{"ip_is_private":true,"outbound":"direct"}],"final":"proxy"},
-                "experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":id(),"default_mode":"rule"},"cache_file":{"enabled":true}}
-            }),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -319,6 +277,7 @@ pub fn builtin_seed(id: &str) -> Option<&'static [u8]> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    pub schema_version: u32,
     pub settings: Settings,
     pub subscriptions: Vec<Subscription>,
     pub rulesets: Vec<RuleSet>,
@@ -326,6 +285,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            schema_version: 2,
             settings: Settings::default(),
             subscriptions: vec![],
             rulesets: builtin_resources(),
@@ -361,60 +321,11 @@ impl State {
         }
     }
 
-    /// A transient generation helper; configurations are never stored separately.
-    pub fn current_profile(&self) -> Result<Profile> {
-        let sub = self
-            .subscriptions
-            .iter()
-            .find(|s| s.id == self.settings.active_subscription)
-            .context("请先导入并选择订阅")?;
-        let node = sub
-            .selected_node
-            .as_deref()
-            .and_then(|tag| selectable_nodes(&sub.nodes).find(|n| n["tag"] == tag))
-            .or_else(|| selectable_nodes(&sub.nodes).next())
-            .context("当前订阅没有可连接节点，请更新或更换订阅")?;
-        let mut profile = Profile::new(&sub.name);
-        profile.id = sub.id.clone();
-        profile.subscriptions = vec![sub.id.clone()];
-        profile.selected_node = Some(NodeSelection {
-            subscription_id: sub.id.clone(),
-            node_tag: node["tag"].as_str().unwrap().into(),
-        });
-        profile.rulesets = self
-            .rulesets
-            .iter()
-            .filter(|r| r.enabled)
-            .map(|r| r.id.clone())
-            .collect();
-        profile.config["inbounds"][0]["listen_port"] = json!(self.settings.mixed_port);
-        // The Clash API endpoint is private runtime state, selected by Service.
-        profile.config["experimental"]["clash_api"]["secret"] = json!(sub.id);
-        profile.config["dns"]["final"] = json!("aerobox-dns-proxy");
-        let mut routes = vec![];
-        let mut dns = vec![];
-        // Reject policy precedes domestic direct rules. Mode overrides are
-        // inserted by config::apply_settings ahead of all these rules.
-        let mut rules: Vec<_> = self.rulesets.iter().filter(|r| r.enabled).collect();
-        rules.sort_by_key(|r| r.action != "reject");
-        for rule in rules {
-            routes.push(if rule.action == "reject" {
-                json!({"rule_set":rule.name,"action":"reject"})
-            } else {
-                json!({"rule_set":rule.name,"action":"route","outbound":rule.action})
-            });
-            if matches!(rule.id.as_str(), BUILTIN_DOMESTIC_ID | BUILTIN_ADS_ID) {
-                dns.push(if rule.action == "reject" { json!({"rule_set":rule.name,"action":"reject"}) } else {
-                    json!({"rule_set":rule.name,"action":"route","server":if rule.action == "direct" {"aerobox-dns-direct"} else {"aerobox-dns-proxy"}})
-                });
-            }
-        }
-        profile.config["route"]["rules"] = json!(routes);
-        profile.config["dns"]["rules"] = json!(dns);
-        Ok(profile)
-    }
-
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == 2,
+            "不支持的配置版本，请备份后重置数据"
+        );
         self.settings.validate()?;
         let mut ids = HashSet::new();
         for (id, name) in self
@@ -450,6 +361,10 @@ impl State {
         }
         let mut rule_tags = HashSet::new();
         for rule in &self.rulesets {
+            if !rule.binary {
+                shoes::rule_set::validate_bytes(&serde_json::to_vec(&rule.content)?, false)
+                    .with_context(|| format!("规则集「{}」无效", rule.name))?;
+            }
             ensure!(rule_tags.insert(&rule.name), "规则名称重复");
             ensure!(
                 matches!(rule.action.as_str(), "direct" | "proxy" | "reject"),
@@ -479,7 +394,7 @@ pub fn validate_nodes(nodes: &[Value]) -> Result<()> {
             !tag.is_empty() && tags.insert(tag),
             "节点名称为空或重复: {tag}"
         );
-        ensure!(node["type"].is_string(), "节点缺少协议");
+        crate::protocol::validate(node)?;
     }
     Ok(())
 }
@@ -487,36 +402,29 @@ pub fn validate_nodes(nodes: &[Value]) -> Result<()> {
 /// Only dialable subscription outbounds belong in the node picker. Helper
 /// groups and terminal routing actions stay available to generated references.
 pub fn is_connection_node(node: &Value) -> bool {
-    node["type"].as_str().is_some_and(|kind| {
-        !matches!(
-            kind,
-            "selector" | "urltest" | "direct" | "block" | "dns" | "reject" | "hysteria-realm"
-        )
-    }) && node["server"]
+    node["server"]
         .as_str()
-        .is_some_and(|host| !host.trim().is_empty())
+        .is_some_and(|s| !s.trim().is_empty())
         && node["server_port"]
             .as_u64()
-            .is_some_and(|port| (1..=65535).contains(&port))
+            .is_some_and(|p| (1..=65535).contains(&p))
+        && [
+            "shadowsocks",
+            "vmess",
+            "vless",
+            "trojan",
+            "anytls",
+            "hysteria2",
+            "tuic",
+            "naive",
+            "socks",
+            "http",
+        ]
+        .contains(&node["type"].as_str().unwrap_or_default())
 }
 
-/// A ShadowTLS outbound used as another node's `detour` is a transport layer,
-/// not a selectable proxy. Used standalone it remains selectable.
-pub fn is_hidden_transport(nodes: &[Value], node: &Value) -> bool {
-    if node["type"] != "shadowtls" {
-        return false;
-    }
-    let tag = node["tag"].as_str().unwrap_or("");
-    nodes
-        .iter()
-        .any(|other| other["detour"].as_str() == Some(tag))
-}
-
-/// The nodes a person can actually pick from a subscription.
 pub fn selectable_nodes(nodes: &[Value]) -> impl Iterator<Item = &Value> {
-    nodes
-        .iter()
-        .filter(|node| is_connection_node(node) && !is_hidden_transport(nodes, node))
+    nodes.iter().filter(|node| is_connection_node(node))
 }
 
 pub fn has_selectable_node(nodes: &[Value]) -> bool {
@@ -535,6 +443,7 @@ impl Store {
             Some(dir) => dir,
             None => config_home()?.join("AeroBoxForLinux"),
         };
+        let dir = std::path::absolute(dir)?;
         fs::create_dir_all(&dir)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         let path = dir.join("state.json");
@@ -560,6 +469,7 @@ impl Store {
             Some(p) => p,
             None => config_home()?.join("AeroBoxForLinux"),
         };
+        let dir = std::path::absolute(dir)?;
         fs::create_dir_all(&dir)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         let path = dir.join("state.json");
@@ -632,18 +542,17 @@ pub fn remove_resource(state: &mut State, kind: &str, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn explicit_reset_archives_invalid_state_without_touching_the_core() {
+    fn explicit_reset_archives_invalid_state_without_touching_unrelated_files() {
         let dir = tempfile::tempdir().unwrap();
         let invalid = br#"{"profiles":[]}"#;
         fs::write(dir.path().join("state.json"), invalid).unwrap();
-        fs::create_dir(dir.path().join("core")).unwrap();
-        fs::write(dir.path().join("core/sing-box"), b"core fixture").unwrap();
+        fs::write(dir.path().join("unrelated.txt"), b"unrelated fixture").unwrap();
         let (store, backup) = Store::reset(Some(dir.path().into())).unwrap();
         assert!(store.state.subscriptions.is_empty());
         assert_eq!(fs::read(backup.unwrap()).unwrap(), invalid);
         assert_eq!(
-            fs::read(dir.path().join("core/sing-box")).unwrap(),
-            b"core fixture"
+            fs::read(dir.path().join("unrelated.txt")).unwrap(),
+            b"unrelated fixture"
         );
     }
     #[test]
@@ -651,7 +560,7 @@ mod tests {
         let state = State::default();
         assert!(state.settings.system_proxy);
         assert_eq!(state.settings.log_level, "error");
-        assert!(state.current_profile().is_err());
+        assert!(state.settings.active_subscription.is_empty());
         let value = serde_json::to_value(&state).unwrap();
         assert!(value.get("profiles").is_none());
         assert!(value["settings"].get("active_profile").is_none());
@@ -735,6 +644,5 @@ mod tests {
             .update(|s| remove_resource(s, "subscriptions", &id))
             .unwrap();
         assert!(store.state.settings.active_subscription.is_empty());
-        assert!(store.state.current_profile().is_err());
     }
 }

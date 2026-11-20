@@ -417,7 +417,7 @@ fn common_rule(kind: &str, text: &str) -> Result<Value> {
             );
             json!([value.trim_start_matches('.')])
         }
-        "domain_keyword" | "process_name" => json!([value]),
+        "domain_keyword" => json!([value]),
         _ => anyhow::bail!("不支持的匹配类型"),
     };
     Ok(json!({kind: field}))
@@ -479,17 +479,9 @@ pub fn ruleset(
         "domain_suffix",
         "domain_keyword",
         "ip_cidr",
-        "process_name",
         "port",
     ];
-    let kind = gtk::DropDown::from_strings(&[
-        "域名",
-        "域名后缀",
-        "域名关键字",
-        "IP 网段",
-        "进程名",
-        "端口",
-    ]);
+    let kind = gtk::DropDown::from_strings(&["域名", "域名后缀", "域名关键字", "IP 网段", "端口"]);
     let value = gtk::Entry::builder()
         .placeholder_text("匹配值")
         .hexpand(true)
@@ -877,7 +869,7 @@ pub fn rule_content(
         );
         return;
     }
-    let editor = EditorWindow::new(parent, &format!("{} · 规则", item.name), "SRS 编译与反编译");
+    let editor = EditorWindow::new(parent, &format!("{} · 规则", item.name), "");
     editor.save.set_sensitive(false);
     let loading = gtk::Spinner::builder()
         .spinning(true)
@@ -907,12 +899,8 @@ pub fn rule_content(
                 body.remove(&loading);
                 match result {
                     Ok(text) => {
-                        let source = SourceEditor::new(
-                            &text,
-                            "json",
-                            true,
-                            "保存时使用 sing-box 编译为 SRS；编译失败会保留输入。",
-                        );
+                        let source =
+                            SourceEditor::new(&text, "json", true, "修改后保存为 JSON 规则。");
                         body.append(&source.root);
                         save.set_sensitive(true);
                         let service = service.clone();
@@ -960,7 +948,7 @@ pub fn rule_content(
                                             glib::ControlFlow::Break
                                         };
                                     }
-                                    Err(_) => Err(anyhow::anyhow!("编译任务意外结束")),
+                                    Err(_) => Err(anyhow::anyhow!("保存任务意外结束")),
                                 };
                                 let Some(window) = weak.upgrade() else {
                                     return glib::ControlFlow::Break;
