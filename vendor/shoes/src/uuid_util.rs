@@ -2,55 +2,23 @@ use std::fmt::Write;
 
 use aerobox_primitives::rand::{SecureRandom, SystemRandom};
 
-/// Parse a UUID v4 string (with or without dashes) into 16 bytes.
-/// Validates that the UUID has version 4 and RFC 4122 variant.
+/// Parse a protocol's 128-bit identity in compact or canonical UUID notation.
+/// VMess/VLESS identifiers need not have v4 or RFC variant bits. Reject syntax
+/// errors without including the credential in diagnostics.
 #[inline]
 pub fn parse_uuid(uuid_str: &str) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(16);
-    let mut first_nibble: Option<u8> = None;
-    for &c in uuid_str.as_bytes() {
-        let hex = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'f' => c - b'a' + 10,
-            b'A'..=b'F' => c - b'A' + 10,
-            b'-' => continue,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Invalid uuid: {uuid_str}"),
-                ));
-            }
-        };
-        if let Some(first) = first_nibble.take() {
-            bytes.push((first << 4) | hex);
-        } else {
-            first_nibble = Some(hex);
-        }
-    }
-    if first_nibble.is_some() || bytes.len() != 16 {
-        return Err(std::io::Error::new(
+    let invalid = || {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Invalid uuid: {uuid_str}"),
-        ));
+            "invalid UUID: expected 32 hexadecimal digits or canonical 8-4-4-4-12 notation",
+        )
+    };
+    if !matches!(uuid_str.len(), 32 | 36) {
+        return Err(invalid());
     }
-
-    // Validate version 4: upper nibble of byte 6 must be 4
-    if (bytes[6] >> 4) != 4 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("UUID is not version 4: {uuid_str}"),
-        ));
-    }
-
-    // Validate variant (RFC 4122): upper 2 bits of byte 8 must be 10
-    if (bytes[8] >> 6) != 2 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("UUID does not have RFC 4122 variant: {uuid_str}"),
-        ));
-    }
-
-    Ok(bytes)
+    uuid::Uuid::parse_str(uuid_str)
+        .map(|id| id.as_bytes().to_vec())
+        .map_err(|_| invalid())
 }
 
 /// Generate a random UUID v4 and return it as a formatted string.
@@ -137,16 +105,35 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_uuid_rejects_non_v4() {
+    fn test_parse_uuid_accepts_non_v4() {
         // Version 1 UUID (version nibble = 1)
         let uuid = "550e8400-e29b-11d4-a716-446655440000";
-        assert!(parse_uuid(uuid).is_err());
+        assert_eq!(parse_uuid(uuid).unwrap().len(), 16);
     }
 
     #[test]
-    fn test_parse_uuid_rejects_wrong_variant() {
+    fn test_parse_uuid_accepts_non_rfc_variant() {
         // Wrong variant (upper 2 bits of byte 8 = 11 instead of 10)
         let uuid = "550e8400-e29b-41d4-c716-446655440000";
-        assert!(parse_uuid(uuid).is_err());
+        assert_eq!(parse_uuid(uuid).unwrap().len(), 16);
+    }
+}
+
+#[cfg(test)]
+mod malformed_tests {
+    use super::parse_uuid;
+
+    #[test]
+    fn malformed_identities_do_not_expose_secrets() {
+        for input in [
+            "secret-value",
+            "550e8400e29b41d4a71644665544000",
+            "550e8400-e29b41d4-a716-446655440000",
+            "-550e8400e29b41d4a716446655440000---",
+            "550e8400-e29b-41d4-a716-44665544000z",
+        ] {
+            let error = parse_uuid(input).unwrap_err();
+            assert!(!error.to_string().contains(input));
+        }
     }
 }

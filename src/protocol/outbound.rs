@@ -75,7 +75,16 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             json!({"type":"shadowsocks", "cipher":f.text("method")?, "password":f.text("password")?, "udp_enabled":udp})
         }
         "vmess" => {
-            f.default_only("alter_id", &[json!(0)])?;
+            let alter_id = f.take("alter_id").unwrap_or(json!(0));
+            let alter_id = alter_id
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| {
+                    error(
+                        format!("{path}.alter_id"),
+                        "expected an integer in 0..65535",
+                    )
+                })?;
             f.default_only("global_padding", &[json!(false)])?;
             f.default_only("authenticated_length", &[json!(false)])?;
             let packet_encoding = packet_encoding(&mut f, false)?;
@@ -85,7 +94,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             } else {
                 cipher
             };
-            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "udp_enabled":udp, "packet_encoding":packet_encoding})
+            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "alter_id":alter_id, "udp_enabled":udp, "packet_encoding":packet_encoding})
         }
         "vless" => {
             let packet_encoding = packet_encoding(&mut f, true)?;

@@ -163,12 +163,14 @@ fn client_protocol(
         ClientProxyConfig::Vmess {
             cipher,
             user_id,
+            alter_id,
             udp_enabled,
             packet_encoding,
             h2mux,
         } => ResolvedClientProxyConfig::Vmess {
             cipher,
             user_id,
+            alter_id,
             udp_enabled,
             packet_encoding,
             h2mux,

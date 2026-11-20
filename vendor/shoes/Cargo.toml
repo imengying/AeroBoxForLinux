@@ -123,6 +123,9 @@ required-features = ["stress-tests"]
 aho-corasick = "1"
 anyhow = "1"
 async-trait = "*"
+aes = "0.8.4"
+cfb-mode = "0.8.2"
+hmac = "0.13.0"
 aerobox-primitives = { path = "../support/aerobox-primitives" }
 aerobox-crypto = { path = "../support/aerobox-crypto" }
 base64 = "*"

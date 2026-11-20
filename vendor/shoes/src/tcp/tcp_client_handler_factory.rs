@@ -403,12 +403,14 @@ pub(crate) fn create_with_hop_context(
         ResolvedClientProxyConfig::Vmess {
             cipher,
             user_id,
+            alter_id,
             udp_enabled,
             packet_encoding,
             h2mux,
         } => {
             let handler: Box<dyn TcpClientHandler> = Box::new(
                 VmessTcpClientHandler::new(&cipher, &user_id, udp_enabled)?
+                    .with_alter_id(alter_id)
                     .with_packet_encoding(packet_encoding),
             );
             if let Some(h2mux_config) = h2mux {

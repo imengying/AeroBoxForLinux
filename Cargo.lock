@@ -73,7 +73,7 @@ dependencies = [
  "ctr",
  "ed25519-dalek",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "ml-dsa",
  "ml-kem",
  "rand_core 0.6.4",
@@ -458,6 +458,15 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfb-mode"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "738b8d467867f80a71351933f70461f5b56f24d5c93e0cf216e59229c968d330"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -1416,7 +1425,7 @@ dependencies = [
  "either",
  "eyre",
  "futures",
- "hmac",
+ "hmac 0.12.1",
  "ip_network",
  "ip_network_table",
  "ipnetwork",
@@ -1727,7 +1736,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -1737,6 +1746,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -3280,7 +3298,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
  "subtle",
 ]
 
@@ -3461,7 +3479,7 @@ dependencies = [
  "digest 0.10.7",
  "ecdsa",
  "ed25519-dalek",
- "hmac",
+ "hmac 0.12.1",
  "p256",
  "p384",
  "paste",
@@ -3756,6 +3774,7 @@ version = "0.3.8"
 dependencies = [
  "aerobox-crypto",
  "aerobox-primitives",
+ "aes",
  "aho-corasick",
  "android_logger",
  "anyhow",
@@ -3764,6 +3783,7 @@ dependencies = [
  "blake2 0.11.0",
  "blake3",
  "bytes",
+ "cfb-mode",
  "chacha20poly1305",
  "chrono",
  "dashmap",
@@ -3776,6 +3796,7 @@ dependencies = [
  "h3",
  "h3-quinn",
  "hickory-resolver",
+ "hmac 0.13.0",
  "http",
  "http-body-util",
  "httparse",

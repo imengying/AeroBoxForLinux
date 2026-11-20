@@ -62,6 +62,38 @@ fn number(v: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// Share links commonly encode alterId as decimal text; malformed input must
+/// never silently switch a legacy VMess node back to AEAD authentication.
+fn alter_id(value: Option<&Value>, field: &str) -> Result<u16> {
+    let Some(value) = value else { return Ok(0) };
+    let parsed = value.as_u64().or_else(|| {
+        let text = value.as_str()?;
+        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse().ok())
+            .flatten()
+    });
+    parsed
+        .and_then(|value| u16::try_from(value).ok())
+        .with_context(|| format!("{field} 须为 0–65535 的整数；0 使用 AEAD，正数使用旧 VMess 认证"))
+}
+
+fn node_error(node: &Value, error: anyhow::Error) -> String {
+    if let Some(name) = node
+        .get("name")
+        .or_else(|| node.get("tag"))
+        .and_then(Value::as_str)
+    {
+        let message = format!("{error:#}");
+        if message.starts_with("节点「") {
+            message
+        } else {
+            format!("节点「{name}」：{message}")
+        }
+    } else {
+        format!("{error:#}")
+    }
+}
+
 fn known_fields(value: &Value, allowed: &[&str], context: &str) -> Result<()> {
     let fields = value
         .as_object()
@@ -122,7 +154,7 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
             });
             match result {
                 Ok(node) => nodes.push(node),
-                Err(error) if tolerant => skipped.push(format!("{error:#}")),
+                Err(error) if tolerant => skipped.push(node_error(v, error)),
                 Err(error) => return Err(error),
             }
         }
@@ -168,20 +200,40 @@ fn skip_hint(skipped: &[String]) -> String {
     if skipped.is_empty() {
         return String::new();
     }
-    // A short, de-duplicated sample explains the common cause without dumping
-    // every line of a large subscription.
-    let mut reasons: Vec<&str> = skipped
-        .iter()
-        .map(|reason| reason.split(':').next().unwrap_or(reason).trim())
-        .collect();
-    reasons.dedup();
-    let sample = reasons
-        .iter()
-        .take(2)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("；");
-    format!("（跳过 {} 个不支持的节点：{sample}）", skipped.len())
+    format!("（{}）", skipped_summary(skipped))
+}
+
+/// A bounded report shared by all-failed imports and partial-update logs.
+/// Keep field names and explanations after ':'; group equivalent errors even
+/// when they name different nodes.
+pub fn skipped_summary(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    let mut seen = HashSet::new();
+    let mut examples = Vec::new();
+    for message in skipped {
+        let key = message
+            .strip_prefix("节点「")
+            .and_then(|message| message.split_once('」').map(|(_, rest)| rest))
+            .unwrap_or(message)
+            .trim_start_matches(['：', ':', ' ']);
+        if seen.insert(key) {
+            let mut excerpt: String = message
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(200)
+                .collect();
+            if message.chars().count() > 200 {
+                excerpt.push('…');
+            }
+            examples.push(excerpt);
+            if examples.len() == 3 {
+                break;
+            }
+        }
+    }
+    format!("跳过 {} 个节点：{}", skipped.len(), examples.join("；"))
 }
 /// User-triggered URL, app share link or node content; never a clipboard path.
 pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
@@ -273,6 +325,14 @@ pub fn uri(input: &str) -> Result<Value> {
         fields.extend(DIAL_FIELDS);
         fields.extend(TRANSPORT_KEEPALIVE_FIELDS.iter().map(|(alias, _)| *alias));
         known_fields(&v, &fields, "VMess 链接")?;
+        for field in [
+            "type", "net", "scy", "tls", "sni", "alpn", "fp", "host", "path",
+        ] {
+            ensure!(
+                v.get(field).is_none_or(Value::is_string),
+                "VMess {field} 须为文本"
+            );
+        }
         ensure!(
             v.get("v").is_none_or(|v| v == "2" || v == 2),
             "不支持的 VMess 链接版本"
@@ -287,7 +347,8 @@ pub fn uri(input: &str) -> Result<Value> {
                 .is_none_or(|v| matches!(v, "" | "none" | "tls")),
             "不支持的 VMess TLS 设置"
         );
-        let mut node = json!({"type":"vmess","tag":v["ps"].as_str().unwrap_or("VMess"),"server":v["add"],"server_port":number(&v["port"]),"uuid":v["id"],"security":v["scy"].as_str().filter(|value| !value.is_empty()).unwrap_or("auto"),"alter_id":number(&v["aid"])});
+        let aid = alter_id(v.get("aid"), "VMess aid")?;
+        let mut node = json!({"type":"vmess","tag":v["ps"].as_str().unwrap_or("VMess"),"server":v["add"],"server_port":number(&v["port"]),"uuid":v["id"],"security":v["scy"].as_str().filter(|value| !value.is_empty()).unwrap_or("auto"),"alter_id":aid});
         for field in DIAL_FIELDS {
             if let Some(value) = v.get(field) {
                 node[field] = value.clone();
@@ -614,7 +675,6 @@ fn clash(v: &Value) -> Result<Value> {
         "password",
         "username",
         "uuid",
-        "alterId",
         "flow",
         "congestion-controller",
         "udp-relay-mode",
@@ -627,6 +687,8 @@ fn clash(v: &Value) -> Result<Value> {
         "network",
         "obfs",
         "obfs-password",
+        "tfo",
+        "mptcp",
     ];
     const DIAL_ALIASES: [(&str, &str); 5] = [
         ("interface-name", "bind_interface"),
@@ -639,6 +701,9 @@ fn clash(v: &Value) -> Result<Value> {
     fields.extend(DIAL_ALIASES.iter().map(|(alias, _)| *alias));
     if matches!(typ, "shadowsocks" | "vmess") {
         fields.push("cipher");
+    }
+    if typ == "vmess" {
+        fields.push("alterId");
     }
     if typ == "shadowsocks" {
         fields.extend(["udp-over-tcp", "udp_over_tcp", "udp-over-tcp-version"]);
@@ -672,15 +737,41 @@ fn clash(v: &Value) -> Result<Value> {
             "Clash quic 参数须为开关"
         );
     }
+    fields.extend([
+        "servername",
+        "sni",
+        "skip-cert-verify",
+        "alpn",
+        "client-fingerprint",
+    ]);
+    ensure!(
+        v.get("skip-cert-verify").is_none_or(Value::is_boolean),
+        "Clash skip-cert-verify 须为开关"
+    );
+    for field in ["servername", "sni", "client-fingerprint"] {
+        ensure!(
+            v.get(field).is_none_or(Value::is_string),
+            "Clash {field} 须为文本"
+        );
+    }
     if tls_enabled {
-        fields.extend([
-            "servername",
-            "sni",
-            "skip-cert-verify",
-            "alpn",
-            "client-fingerprint",
-            "reality-opts",
-        ]);
+        fields.push("reality-opts");
+    } else {
+        ensure!(
+            v["skip-cert-verify"] != true,
+            "未启用 TLS 时 skip-cert-verify 只能为 false"
+        );
+        for field in ["servername", "sni", "client-fingerprint"] {
+            ensure!(
+                v.get(field).is_none_or(|value| value == ""),
+                "未启用 TLS 时 {field} 只能为空"
+            );
+        }
+        ensure!(
+            v.get("alpn")
+                .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty)),
+            "未启用 TLS 时 alpn 只能为空列表"
+        );
     }
     match v["network"].as_str().unwrap_or("") {
         "ws" => fields.push("ws-opts"),
@@ -697,6 +788,15 @@ fn clash(v: &Value) -> Result<Value> {
     let mut n = json!({"type":typ,"tag":v["name"]});
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
+    for (alias, field) in [("tfo", "tcp_fast_open"), ("mptcp", "tcp_multi_path")] {
+        if let Some(value) = v.get(alias) {
+            ensure!(value.is_boolean(), "Clash {alias} 须为开关");
+            n[field] = value.clone();
+        }
+    }
+    if typ == "vmess" {
+        n["alter_id"] = alter_id(v.get("alterId"), "Clash alterId")?.into();
+    }
     for (alias, field) in DIAL_ALIASES {
         ensure!(
             v.get(alias).is_none() || v.get(field).is_none(),
@@ -726,7 +826,6 @@ fn clash(v: &Value) -> Result<Value> {
         ("password", "password"),
         ("username", "username"),
         ("uuid", "uuid"),
-        ("alterId", "alter_id"),
         ("flow", "flow"),
         ("congestion-controller", "congestion_control"),
         ("udp-relay-mode", "udp_relay_mode"),
@@ -768,10 +867,19 @@ fn clash(v: &Value) -> Result<Value> {
             ("alpn", "alpn"),
         ] {
             if let Some(value) = v.get(from) {
+                if to == "server_name" {
+                    if value == "" {
+                        continue;
+                    }
+                    ensure!(
+                        tls.get(to).is_none_or(|previous| previous == value),
+                        "Clash servername 与 sni 不能设置不同的服务器名"
+                    );
+                }
                 tls[to] = value.clone()
             }
         }
-        if let Some(fp) = v.get("client-fingerprint") {
+        if let Some(fp) = v.get("client-fingerprint").filter(|value| *value != "") {
             tls["utls"] = json!({"enabled":true,"fingerprint":fp})
         };
         if let Some(r) = v.get("reality-opts") {

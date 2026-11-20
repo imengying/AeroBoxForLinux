@@ -115,6 +115,7 @@ enum DecryptState {
 
 // Expected VMess header response, when we're a client.
 pub struct ReadHeaderInfo {
+    pub legacy: bool,
     pub response_header_key: [u8; 16],
     pub response_header_iv: [u8; 16],
     pub response_authentication_v: u8,
@@ -122,6 +123,8 @@ pub struct ReadHeaderInfo {
 
 #[derive(PartialEq, Eq, Debug)]
 enum ReadHeaderState {
+    ReadLegacy,
+    ReadLegacyCommand(usize),
     ReadAeadLength,
     ReadAeadContent(usize),
     Done,
@@ -199,7 +202,8 @@ impl VmessStream {
             (write_cache, write_packet)
         };
 
-        let read_header_state = match read_header_info {
+        let read_header_state = match &read_header_info {
+            Some(info) if info.legacy => ReadHeaderState::ReadLegacy,
             Some(_) => ReadHeaderState::ReadAeadLength,
             None => ReadHeaderState::Done,
         };
@@ -277,6 +281,8 @@ impl VmessStream {
 
     fn process_read_header(&mut self) -> std::io::Result<()> {
         match self.read_header_state {
+            ReadHeaderState::ReadLegacy => self.process_read_header_legacy(),
+            ReadHeaderState::ReadLegacyCommand(length) => self.skip_legacy_command(length),
             ReadHeaderState::ReadAeadLength => self.process_read_header_aead_length(),
             ReadHeaderState::ReadAeadContent(content_len) => {
                 self.process_read_header_aead_content(content_len)
@@ -285,6 +291,38 @@ impl VmessStream {
                 panic!("process_read_header called with Done state");
             }
         }
+    }
+
+    fn process_read_header_legacy(&mut self) -> std::io::Result<()> {
+        if self.unprocessed_end_offset - self.unprocessed_start_offset < 4 {
+            return Ok(());
+        }
+        let mut header: [u8; 4] = self.unprocessed_buf
+            [self.unprocessed_start_offset..self.unprocessed_start_offset + 4]
+            .try_into().unwrap();
+        let info = self.read_header_info.as_ref().unwrap();
+        super::legacy::response(&info.response_header_key, &info.response_header_iv, &mut header);
+        check_header_response(&header, info.response_authentication_v)?;
+        self.unprocessed_start_offset += 4;
+        let command_len = usize::from(header[3]);
+        self.read_header_state = ReadHeaderState::ReadLegacyCommand(command_len);
+        self.skip_legacy_command(command_len)
+    }
+
+    fn skip_legacy_command(&mut self, length: usize) -> std::io::Result<()> {
+        if self.unprocessed_end_offset - self.unprocessed_start_offset < length {
+            return Ok(());
+        }
+        // Dynamic server commands do not alter this connection's payload keys.
+        // Skip their exact wire length, preserving any coalesced payload bytes.
+        self.unprocessed_start_offset += length;
+        self.read_header_info = None;
+        self.read_header_state = ReadHeaderState::Done;
+        if self.unprocessed_start_offset == self.unprocessed_end_offset {
+            self.unprocessed_start_offset = 0;
+            self.unprocessed_end_offset = 0;
+        }
+        Ok(())
     }
 
     fn process_read_header_aead_length(&mut self) -> std::io::Result<()> {
@@ -324,6 +362,12 @@ impl VmessStream {
 
         let response_header_length =
             u16::from_be_bytes(encrypted_response_header_length[0..2].try_into().unwrap()) as usize;
+        if !(4..=259).contains(&response_header_length) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid VMess response header length",
+            ));
+        }
 
         self.read_header_state = ReadHeaderState::ReadAeadContent(response_header_length);
         self.unprocessed_start_offset += 2 + HEADER_TAG_LEN;
@@ -371,6 +415,12 @@ impl VmessStream {
         }
 
         let command_len = encrypted_response_header[3];
+        if content_len != 4 + usize::from(command_len) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid VMess response command length",
+            ));
+        }
         if command_len > 0 {
             warn!("Ignoring unused command bytes from AEAD block");
         }
@@ -699,7 +749,10 @@ impl AsyncRead for VmessStream {
                 let len = read_buf.filled().len();
                 if len == 0 {
                     this.is_eof = true;
-                    return Poll::Ready(Ok(()));
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "VMess response header was truncated",
+                    )));
                 }
                 this.unprocessed_end_offset += len;
                 this.process_read_header()?;
@@ -948,7 +1001,10 @@ impl AsyncReadMessage for VmessStream {
                 let len = read_buf.filled().len();
                 if len == 0 {
                     this.is_eof = true;
-                    return Poll::Ready(Ok(()));
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "VMess response header was truncated",
+                    )));
                 }
                 this.unprocessed_end_offset += len;
                 this.process_read_header()?;

@@ -191,56 +191,6 @@ where
     state.end()
 }
 
-/// Custom deserializer for ClientProxyConfig::Vmess that validates legacy aead field
-fn deserialize_vmess_client<'de, D>(
-    deserializer: D,
-) -> Result<(String, String, bool, PacketEncoding, Option<H2MuxConfig>), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct VmessClientTemp {
-        cipher: String,
-        user_id: String,
-        #[serde(default, alias = "force_aead")]
-        aead: Option<bool>,
-        #[serde(default = "default_true")]
-        udp_enabled: bool,
-        #[serde(default)]
-        packet_encoding: PacketEncoding,
-        #[serde(default)]
-        h2mux: Option<H2MuxConfig>,
-    }
-
-    let temp = VmessClientTemp::deserialize(deserializer)?;
-
-    // Check if aead/force_aead was explicitly set
-    if let Some(aead_value) = temp.aead {
-        if !aead_value {
-            return Err(Error::custom(
-                "Non-AEAD VMess mode (aead=false or force_aead=false) is no longer supported. \
-                 Please remove the aead/force_aead field from your configuration, or set it to true.",
-            ));
-        }
-        // Warn about deprecated field
-        log::warn!(
-            "The 'aead'/'force_aead' field in VMess client configuration is deprecated and will be removed in a future version. \
-             AEAD mode is now always enabled. Please remove this field from your configuration."
-        );
-    }
-
-    Ok((
-        temp.cipher,
-        temp.user_id,
-        temp.udp_enabled,
-        temp.packet_encoding,
-        temp.h2mux,
-    ))
-}
-
 /// Custom deserializer for TlsClientConfig that handles deprecated shadowtls_password field
 fn deserialize_tls_client_config<'de, D>(deserializer: D) -> Result<TlsClientConfig, D::Error>
 where
@@ -626,10 +576,11 @@ pub enum ClientProxyConfig {
     },
     #[serde(deserialize_with = "deserialize_tls_variant")]
     Tls(TlsClientConfig),
-    #[serde(deserialize_with = "deserialize_vmess_client")]
     Vmess {
         cipher: String,
         user_id: String,
+        #[serde(default)]
+        alter_id: u16,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         udp_enabled: bool,
         #[serde(default, skip_serializing_if = "PacketEncoding::is_raw")]
@@ -889,6 +840,7 @@ pub enum ResolvedClientProxyConfig {
     Vmess {
         cipher: String,
         user_id: String,
+        alter_id: u16,
         #[serde(skip_serializing_if = "is_true")]
         udp_enabled: bool,
         #[serde(skip_serializing_if = "PacketEncoding::is_raw")]

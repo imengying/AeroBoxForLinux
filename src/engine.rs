@@ -1210,9 +1210,9 @@ impl Service {
         let (nodes, skipped) = subscription::parse_with_skips(std::str::from_utf8(&bytes)?)?;
         if !skipped.is_empty() {
             self.log(format!(
-                "订阅「{}」跳过 {} 个不支持的节点",
+                "订阅「{}」{}",
                 sub.name,
-                skipped.len()
+                subscription::skipped_summary(&skipped)
             ));
         }
         sub.nodes = nodes;

@@ -1,5 +1,6 @@
 mod crc32;
 mod fnv1a;
+mod legacy;
 mod md5;
 mod nonce;
 mod replay;

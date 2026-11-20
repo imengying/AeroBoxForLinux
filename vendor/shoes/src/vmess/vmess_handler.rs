@@ -717,6 +717,8 @@ pub struct VmessTcpClientHandler {
     data_cipher: DataCipher,
     instruction_key: [u8; 16],
     aead_encrypting_key: CipherEncryptingKey,
+    legacy_auth_key: [u8; 16],
+    legacy: bool,
     udp_enabled: bool,
     packet_encoding: crate::config::client::PacketEncoding,
 }
@@ -733,6 +735,7 @@ impl std::fmt::Debug for VmessTcpClientHandler {
 impl VmessTcpClientHandler {
     pub fn new(cipher_name: &str, user_id: &str, udp_enabled: bool) -> std::io::Result<Self> {
         let mut user_id_bytes = parse_uuid(user_id)?;
+        let legacy_auth_key = super::legacy::alter_key(&user_id_bytes);
         user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
         let instruction_key: [u8; 16] = compute_md5(&user_id_bytes);
 
@@ -743,10 +746,92 @@ impl VmessTcpClientHandler {
         Ok(Self {
             data_cipher: DataCipher::try_from(cipher_name)?,
             aead_encrypting_key,
+            legacy_auth_key,
+            legacy: false,
             instruction_key,
             udp_enabled,
             packet_encoding: Default::default(),
         })
+    }
+
+    pub(crate) fn with_alter_id(mut self, alter_id: u16) -> Self {
+        // Servers accept any configured alternate identity; the first derived
+        // identity works for every positive alterId count, as in sing-vmess.
+        self.legacy = alter_id != 0;
+        self
+    }
+
+    fn response_key(&self, request_key: &[u8]) -> [u8; 16] {
+        if self.legacy {
+            compute_md5(request_key)
+        } else {
+            super::sha2::compute_sha256(request_key)[..16].try_into().unwrap()
+        }
+    }
+
+    fn encode_request(&self, header: &mut [u8]) -> std::io::Result<Vec<u8>> {
+        if self.legacy {
+            // Legacy authentication is keyed by a timestamp. Use the actual
+            // corrected clock; the AEAD timestamp randomization is unnecessary.
+            return Ok(super::legacy::request(
+                &self.legacy_auth_key,
+                &self.instruction_key,
+                unix_time_secs(crate::clock::now()?)?,
+                header,
+            ));
+        }
+
+        let mut auth_id = [0; 16];
+        auth_id[..8].copy_from_slice(&random_auth_id_timestamp()?.to_be_bytes());
+        rand::rng().fill_bytes(&mut auth_id[8..12]);
+        let checksum = super::crc32::crc32c(&auth_id[..12]);
+        auth_id[12..].copy_from_slice(&checksum.to_be_bytes());
+        self.aead_encrypting_key
+            .less_safe_encrypt(&mut auth_id, EncryptionContext::None)
+            .map_err(|_| std::io::Error::other("VMess auth ID encryption failed"))?;
+
+        let mut nonce = [0; 8];
+        rand::rng().fill_bytes(&mut nonce);
+        let length_key = super::sha2::kdf(
+            &self.instruction_key,
+            &[b"VMess Header AEAD Key_Length", &auth_id, &nonce],
+        );
+        let length_nonce = super::sha2::kdf(
+            &self.instruction_key,
+            &[b"VMess Header AEAD Nonce_Length", &auth_id, &nonce],
+        );
+        let mut length = (header.len() as u16).to_be_bytes();
+        let mut length_cipher = SealingKey::new(
+            UnboundKey::new(&AES_128_GCM, &length_key[..16]).unwrap(),
+            SingleUseNonce::new(&length_nonce[..12]),
+        );
+        let length_tag = length_cipher
+            .seal_in_place_separate_tag(Aad::from(&auth_id), &mut length)
+            .map_err(|_| std::io::Error::other("VMess header length encryption failed"))?;
+
+        let header_key = super::sha2::kdf(
+            &self.instruction_key,
+            &[b"VMess Header AEAD Key", &auth_id, &nonce],
+        );
+        let header_nonce = super::sha2::kdf(
+            &self.instruction_key,
+            &[b"VMess Header AEAD Nonce", &auth_id, &nonce],
+        );
+        let mut header_cipher = SealingKey::new(
+            UnboundKey::new(&AES_128_GCM, &header_key[..16]).unwrap(),
+            SingleUseNonce::new(&header_nonce[..12]),
+        );
+        let header_tag = header_cipher
+            .seal_in_place_separate_tag(Aad::from(&auth_id), header)
+            .map_err(|_| std::io::Error::other("VMess header encryption failed"))?;
+        let mut request = Vec::with_capacity(16 + 18 + 8 + header.len() + TAG_LEN);
+        request.extend_from_slice(&auth_id);
+        request.extend_from_slice(&length);
+        request.extend_from_slice(length_tag.as_ref());
+        request.extend_from_slice(&nonce);
+        request.extend_from_slice(header);
+        request.extend_from_slice(header_tag.as_ref());
+        Ok(request)
     }
 
     pub(crate) fn with_packet_encoding(
@@ -765,31 +850,6 @@ impl TcpClientHandler for VmessTcpClientHandler {
         mut client_stream: Box<dyn AsyncStream>,
         remote_location: ResolvedLocation,
     ) -> std::io::Result<TcpClientSetupResult> {
-        // AEAD allows 120 second delta from the current time.
-        // See authid.go in v2ray-core.
-        let time_secs = random_auth_id_timestamp()?;
-
-        let mut aead_bytes = [0u8; 16];
-        let time_bytes = time_secs.to_be_bytes();
-        aead_bytes[0..8].copy_from_slice(&time_bytes);
-
-        rand::rng().fill_bytes(&mut aead_bytes[8..12]);
-
-        let checksum_value = super::crc32::crc32c(&aead_bytes[0..12]);
-        let checksum = checksum_value.to_be_bytes();
-        aead_bytes[12..16].copy_from_slice(&checksum);
-
-        self.aead_encrypting_key
-            .less_safe_encrypt(&mut aead_bytes, EncryptionContext::None)
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "AEAD auth ID encryption failed",
-                )
-            })?;
-
-        let cert_hash = aead_bytes;
-
         // max length of encrypted header:
         // 41 (instructions up to addr type) + 256 (max domain name length 255 + 1 length byte) +
         // 15 (max margin length, 4 bits) + 4 (fnv1a hash) = 316 + TAG_LEN
@@ -809,13 +869,8 @@ impl TcpClientHandler for VmessTcpClientHandler {
 
         // construct everything where we need data_encryption_iv and data_encryption_key now,
         // because instructions_to_addr_type will be encrypted once it's filled.
-        // AEAD mode only - use SHA256 for response header keys
-        let mut truncated_iv = [0u8; 16];
-        let mut truncated_key = [0u8; 16];
-        truncated_iv.copy_from_slice(&super::sha2::compute_sha256(data_encryption_iv)[0..16]);
-        truncated_key.copy_from_slice(&super::sha2::compute_sha256(data_encryption_key)[0..16]);
-        let response_header_iv = truncated_iv;
-        let response_header_key = truncated_key;
+        let response_header_iv = self.response_key(data_encryption_iv);
+        let response_header_key = self.response_key(data_encryption_key);
 
         let (read_length_shake_reader, write_length_shake_reader) = {
             let mut request_hasher = Shake128::default();
@@ -929,66 +984,7 @@ impl TcpClientHandler for VmessTcpClientHandler {
         header_bytes[cursor..cursor + 4].copy_from_slice(&check_bytes);
         cursor += 4;
 
-        // AEAD mode only
-        let mut encrypted_payload_length = [0u8; 18];
-        let mut nonce = [0u8; 8];
-        rand::rng().fill_bytes(&mut nonce);
-
-        let header_length_aead_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key_Length", &cert_hash, &nonce],
-        );
-
-        let header_length_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce_Length", &cert_hash, &nonce],
-        );
-
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &header_length_aead_key[0..16]).unwrap();
-
-        let mut sealing_key = SealingKey::new(
-            unbound_key,
-            SingleUseNonce::new(&header_length_nonce[0..12]),
-        );
-
-        encrypted_payload_length[0] = (cursor >> 8) as u8;
-        encrypted_payload_length[1] = (cursor & 0xff) as u8;
-
-        let tag = sealing_key
-            .seal_in_place_separate_tag(Aad::from(&cert_hash), &mut encrypted_payload_length[0..2])
-            .unwrap();
-
-        encrypted_payload_length[2..].copy_from_slice(tag.as_ref());
-
-        let header_aead_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key", &cert_hash, &nonce],
-        );
-
-        let header_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce", &cert_hash, &nonce],
-        );
-
-        // TODO: don't unwrap
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &header_aead_key[0..16]).unwrap();
-        let mut sealing_key =
-            SealingKey::new(unbound_key, SingleUseNonce::new(&header_nonce[0..12]));
-        let tag = sealing_key
-            .seal_in_place_separate_tag(Aad::from(&cert_hash), &mut header_bytes[0..cursor])
-            .unwrap();
-
-        header_bytes[cursor..cursor + TAG_LEN].copy_from_slice(tag.as_ref());
-        cursor += TAG_LEN;
-
-        // Build complete AEAD request in a single buffer to avoid multiple writes as some
-        // servers expect to read the entire header in one shot
-        let total_len = 16 + 18 + 8 + cursor;
-        let mut complete_request = Vec::with_capacity(total_len);
-        complete_request.extend_from_slice(&cert_hash);
-        complete_request.extend_from_slice(&encrypted_payload_length);
-        complete_request.extend_from_slice(&nonce);
-        complete_request.extend_from_slice(&header_bytes[0..cursor]);
+        let complete_request = self.encode_request(&mut header_bytes[..cursor])?;
 
         write_all(&mut client_stream, &complete_request).await?;
 
@@ -996,8 +992,8 @@ impl TcpClientHandler for VmessTcpClientHandler {
         client_stream.flush().await?;
 
         // Info for reading the server response, which arrives along with the initial data.
-        // Always AEAD mode
         let read_header_info = ReadHeaderInfo {
+            legacy: self.legacy,
             response_header_key,
             response_header_iv,
             response_authentication_v,
@@ -1046,30 +1042,6 @@ impl VmessTcpClientHandler {
         let xudp = self.packet_encoding.is_xudp();
         let target = remote_location.clone();
 
-        // AEAD allows 120 second delta from the current time.
-        let time_secs = random_auth_id_timestamp()?;
-
-        let mut aead_bytes = [0u8; 16];
-        let time_bytes = time_secs.to_be_bytes();
-        aead_bytes[0..8].copy_from_slice(&time_bytes);
-
-        rand::rng().fill_bytes(&mut aead_bytes[8..12]);
-
-        let checksum_value = super::crc32::crc32c(&aead_bytes[0..12]);
-        let checksum = checksum_value.to_be_bytes();
-        aead_bytes[12..16].copy_from_slice(&checksum);
-
-        self.aead_encrypting_key
-            .less_safe_encrypt(&mut aead_bytes, EncryptionContext::None)
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "AEAD auth ID encryption failed",
-                )
-            })?;
-
-        let cert_hash = aead_bytes;
-
         // max length of encrypted header (same as TCP):
         // 41 (instructions up to addr type) + 256 (max domain name length) +
         // 15 (max margin length) + 4 (fnv1a hash) = 316 + TAG_LEN
@@ -1087,13 +1059,8 @@ impl VmessTcpClientHandler {
         let data_encryption_key: &[u8] = &header_bytes[17..33];
         let response_authentication_v = header_bytes[33];
 
-        // AEAD mode only - use SHA256 for response header keys
-        let mut truncated_iv = [0u8; 16];
-        let mut truncated_key = [0u8; 16];
-        truncated_iv.copy_from_slice(&super::sha2::compute_sha256(data_encryption_iv)[0..16]);
-        truncated_key.copy_from_slice(&super::sha2::compute_sha256(data_encryption_key)[0..16]);
-        let response_header_iv = truncated_iv;
-        let response_header_key = truncated_key;
+        let response_header_iv = self.response_key(data_encryption_iv);
+        let response_header_key = self.response_key(data_encryption_key);
 
         let (read_length_shake_reader, write_length_shake_reader) = {
             let mut request_hasher = Shake128::default();
@@ -1200,70 +1167,14 @@ impl VmessTcpClientHandler {
         header_bytes[cursor..cursor + 4].copy_from_slice(&check_bytes);
         cursor += 4;
 
-        // AEAD encryption of header
-        let mut encrypted_payload_length = [0u8; 18];
-        let mut nonce = [0u8; 8];
-        rand::rng().fill_bytes(&mut nonce);
-
-        let header_length_aead_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key_Length", &cert_hash, &nonce],
-        );
-
-        let header_length_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce_Length", &cert_hash, &nonce],
-        );
-
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &header_length_aead_key[0..16]).unwrap();
-
-        let mut sealing_key = SealingKey::new(
-            unbound_key,
-            SingleUseNonce::new(&header_length_nonce[0..12]),
-        );
-
-        encrypted_payload_length[0] = (cursor >> 8) as u8;
-        encrypted_payload_length[1] = (cursor & 0xff) as u8;
-
-        let tag = sealing_key
-            .seal_in_place_separate_tag(Aad::from(&cert_hash), &mut encrypted_payload_length[0..2])
-            .unwrap();
-
-        encrypted_payload_length[2..].copy_from_slice(tag.as_ref());
-
-        let header_aead_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key", &cert_hash, &nonce],
-        );
-
-        let header_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce", &cert_hash, &nonce],
-        );
-
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &header_aead_key[0..16]).unwrap();
-        let mut sealing_key =
-            SealingKey::new(unbound_key, SingleUseNonce::new(&header_nonce[0..12]));
-        let tag = sealing_key
-            .seal_in_place_separate_tag(Aad::from(&cert_hash), &mut header_bytes[0..cursor])
-            .unwrap();
-
-        header_bytes[cursor..cursor + TAG_LEN].copy_from_slice(tag.as_ref());
-        cursor += TAG_LEN;
-
-        // Build complete AEAD request in a single buffer
-        let total_len = 16 + 18 + 8 + cursor;
-        let mut complete_request = Vec::with_capacity(total_len);
-        complete_request.extend_from_slice(&cert_hash);
-        complete_request.extend_from_slice(&encrypted_payload_length);
-        complete_request.extend_from_slice(&nonce);
-        complete_request.extend_from_slice(&header_bytes[0..cursor]);
+        let complete_request = self.encode_request(&mut header_bytes[..cursor])?;
 
         write_all(&mut client_stream, &complete_request).await?;
         client_stream.flush().await?;
 
         // Info for reading the server response
         let read_header_info = ReadHeaderInfo {
+            legacy: self.legacy,
             response_header_key,
             response_header_iv,
             response_authentication_v,

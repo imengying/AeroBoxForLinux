@@ -4,7 +4,96 @@ use crate::prepend_stream::PrependStream;
 use aerobox_primitives::aead::{Algorithm, CHACHA20_POLY1305, UnboundKey};
 use shake::Shake128;
 use shake::digest::{ExtendableOutput, Update};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn client_header_stream(stream: Box<dyn AsyncStream>, legacy: bool, udp: bool) -> VmessStream {
+    VmessStream::new(stream, udp, None, None, None, false, None, Some(ReadHeaderInfo {
+        legacy,
+        response_header_key: [42; 16],
+        response_header_iv: [23; 16],
+        response_authentication_v: 0x65,
+    }))
+}
+
+fn legacy_response(auth: u8, command_len: u8) -> Vec<u8> {
+    use aes::cipher::{AsyncStreamCipher, KeyIvInit};
+    let mut response = vec![auth, 0, u8::from(command_len != 0), command_len];
+    response.extend(vec![0x17; command_len as usize]);
+    cfb_mode::Encryptor::<aes::Aes128>::new(&[42; 16].into(), &[23; 16].into())
+        .encrypt(&mut response);
+    response
+}
+
+#[tokio::test]
+async fn legacy_response_fragmentation_preserves_coalesced_payload_and_command_boundaries() {
+    for udp in [false, true] {
+        for command_len in [0, 255] {
+            let header = legacy_response(0x65, command_len);
+            let mut wire = header.clone();
+            wire.extend_from_slice(&[0, 5]);
+            wire.extend_from_slice(b"hello");
+            for split in 0..=header.len() + 1 {
+                let (transport, _) = tokio::io::duplex(1);
+                let mut stream = client_header_stream(Box::new(transport), true, udp);
+                for segment in [&wire[..split], &wire[split..]] {
+                    let end = stream.unprocessed_end_offset;
+                    stream.unprocessed_buf[end..end + segment.len()].copy_from_slice(segment);
+                    stream.unprocessed_end_offset += segment.len();
+                    if stream.read_header_state != ReadHeaderState::Done {
+                        stream.process_read_header().unwrap();
+                    }
+                }
+                assert_eq!(stream.read_header_state, ReadHeaderState::Done);
+                assert!(matches!(stream.try_decrypt().unwrap(), DecryptState::Success));
+                assert_eq!(&stream.processed_buf[..stream.processed_end_offset], b"hello");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_invalid_auth_and_truncated_headers_are_errors_for_tcp_and_udp() {
+    for udp in [false, true] {
+        let (transport, _) = tokio::io::duplex(1);
+        let mut stream = client_header_stream(Box::new(transport), true, udp);
+        assert_eq!(stream.feed_initial_read_data(&legacy_response(0x64, 0)).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        for legacy in [false, true] {
+            for bytes in [vec![], legacy_response(0x65, 0)[..3].to_vec()] {
+                let (transport, mut peer) = tokio::io::duplex(32);
+                peer.write_all(&bytes).await.unwrap();
+                drop(peer);
+                let mut stream = client_header_stream(Box::new(transport), legacy, udp);
+                let error = if udp {
+                    let mut bytes = [0; 32];
+                    let mut output = ReadBuf::new(&mut bytes);
+                    std::future::poll_fn(|cx| Pin::new(&mut stream).poll_read_message(cx, &mut output)).await.unwrap_err()
+                } else {
+                    stream.read(&mut [0; 32]).await.unwrap_err()
+                };
+                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+            }
+        }
+    }
+}
+
+fn aead_response_length(length: u16) -> Vec<u8> {
+    let key = super::super::sha2::kdf(&[42;16], &[b"AEAD Resp Header Len Key"]);
+    let nonce = super::super::sha2::kdf(&[23;16], &[b"AEAD Resp Header Len IV"]);
+    let mut cipher = SealingKey::new(UnboundKey::new(&AES_128_GCM, &key[..16]).unwrap(), SingleUseNonce::new(&nonce[..12]));
+    let mut bytes = length.to_be_bytes().to_vec();
+    let tag = cipher.seal_in_place_separate_tag(Aad::empty(), &mut bytes).unwrap();
+    bytes.extend_from_slice(tag.as_ref());
+    bytes
+}
+
+#[tokio::test]
+async fn aead_response_length_is_bounded_before_buffering_or_indexing() {
+    for length in [0, 1, 2, 3, 260, u16::MAX] {
+        let (transport, _) = tokio::io::duplex(1);
+        let mut stream = client_header_stream(Box::new(transport), false, false);
+        assert_eq!(stream.feed_initial_read_data(&aead_response_length(length)).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+}
 
 #[tokio::test]
 async fn message_padding_and_rejection_preserve_masks_and_nonces() {

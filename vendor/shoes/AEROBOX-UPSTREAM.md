@@ -18,7 +18,8 @@ SMUX/YAMUX/H2MUX client pooling, Naive HTTP/3, negotiated HY2 bandwidth,
 and conditional DNS routing. Linux integration also includes app-owned network
 state, native Trojan UDP, VMess/VLESS packet encoding, per-node UDP restrictions,
 node admission validation, connection deadlines, configurable TCP/H2 keepalive,
-domain-aware DNS rule matching and embedded network recovery. These changes are
+domain-aware DNS rule matching, legacy VMess client authentication with bounded
+response parsing, and embedded network recovery. These changes are
 tracked by the parent repository.
 
 Protocol support is being validated incrementally. The repository README

@@ -77,6 +77,193 @@ impl Drop for Peer {
 
 #[test]
 #[ignore = "requires an explicitly supplied independent server in AEROBOX_TEST_PEER"]
+fn legacy_vmess_authentication_carries_tcp_and_udp_over_plain_tls_and_stream_transports() {
+    let _serial = support::runtime_lock();
+    let executable = PathBuf::from(
+        std::env::var_os("AEROBOX_TEST_PEER")
+            .expect("set AEROBOX_TEST_PEER to a sing-box executable"),
+    )
+    .canonicalize()
+    .expect("AEROBOX_TEST_PEER is not an existing executable");
+    let dir = tempfile::tempdir().unwrap();
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate = certified.cert.pem();
+    let certificate_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    fs::write(&certificate_path, &certificate).unwrap();
+    fs::write(&key_path, certified.signing_key.serialize_pem()).unwrap();
+    // UUID version/variant bits are part of the VMess identity, not a v4
+    // eligibility check. Independent authentication verifies their exact bytes.
+    for (name, aid, identity, cipher, tls, transport, xudp) in [
+        (
+            "tcp-aes-gcm",
+            64,
+            "6ba7b810-9dad-31d1-80b4-00c04fd430c8",
+            "aes-128-gcm",
+            false,
+            None,
+            false,
+        ),
+        (
+            "tcp-chacha",
+            1,
+            "6ba7b810-9dad-31d1-c0b4-00c04fd430c8",
+            "chacha20-poly1305",
+            false,
+            None,
+            false,
+        ),
+        (
+            "tcp-none",
+            64,
+            "00000000-0000-0000-0000-000000000000",
+            "none",
+            false,
+            None,
+            false,
+        ),
+        (
+            "tls-auto",
+            64,
+            "6ba7b810-9dad-51d1-80b4-00c04fd430c8",
+            "auto",
+            true,
+            None,
+            false,
+        ),
+        (
+            "ws-tls",
+            64,
+            UUID,
+            "aes-128-gcm",
+            true,
+            Some(json!({"type":"ws","path":"/legacy"})),
+            false,
+        ),
+        (
+            "grpc-tls-xudp",
+            64,
+            "6BA7B8109DAD11D180B400C04FD430C8",
+            "chacha20-poly1305",
+            true,
+            Some(json!({"type":"grpc","service_name":"legacy"})),
+            true,
+        ),
+    ] {
+        let case = dir.path().join(name);
+        fs::create_dir(&case).unwrap();
+        let port = support::free_port();
+        let ready = loop {
+            let candidate = support::free_port();
+            if candidate != port {
+                break candidate;
+            }
+        };
+        let mut inbound = json!({"type":"vmess", "tag":"legacy-vmess", "listen":"127.0.0.1", "listen_port":port, "users":[{"name":"fixture", "uuid":identity, "alterId":aid}]});
+        let mut node = json!({"type":"vmess", "tag":name, "server":"127.0.0.1", "server_port":port, "uuid":identity, "alter_id":aid, "security":cipher});
+        if tls {
+            inbound["tls"] = json!({"enabled":true,"server_name":"localhost","certificate_path":certificate_path,"key_path":key_path});
+            node["tls"] =
+                json!({"enabled":true,"server_name":"localhost","certificate":certificate});
+        }
+        if let Some(transport) = transport {
+            inbound["transport"] = transport.clone();
+            node["transport"] = transport;
+        }
+        if xudp {
+            node["packet_encoding"] = "xudp".into();
+        }
+        let config = json!({
+            "log":{"level":"error"},
+            "inbounds":[inbound,{"type":"mixed","tag":"readiness","listen":"127.0.0.1","listen_port":ready}],
+            "outbounds":[{"type":"direct","tag":"direct"}],
+            "route":{"final":"direct"}
+        });
+        let body = format!("legacy-{name}:{}", "AeroBox-数据-".repeat(8192));
+        let (origin, hits) = support::http(body.as_bytes().to_vec());
+        let peer = Peer::start(&executable, &case, &config, ready);
+        let app = App::new();
+        app.import(name, vec![node]);
+        app.service
+            .start()
+            .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        for entry in ["http", "socks5h"] {
+            let result = support::request_via(
+                &app.service,
+                &format!("http://{}/legacy", origin.address),
+                entry,
+            );
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!(
+                    "legacy {name}/{entry}: {error:#}\nclient:\n{}\npeer:\n{}",
+                    app.service.logs(),
+                    peer.logs()
+                )),
+                body
+            );
+        }
+        assert_eq!(hits.load(Ordering::Relaxed), 2);
+        // Exercise request encryption/framing past the first packet too.
+        let echo = support::Server::spawn(|mut stream| {
+            let header = support::headers(&mut stream).unwrap();
+            let length: usize = header
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            assert!(length <= 1024 * 1024);
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).unwrap();
+            support::respond(&mut stream, &bytes).unwrap();
+        });
+        let payload: Vec<_> = (0..128 * 1024).map(|index| (index % 251) as u8).collect();
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .proxy(
+                reqwest::Proxy::all(format!(
+                    "socks5h://127.0.0.1:{}",
+                    app.service.snapshot().settings.mixed_port
+                ))
+                .unwrap(),
+            )
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .post(format!("http://{}/echo", echo.address))
+            .body(payload.clone())
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::bytes)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "legacy {name} upload: {error:#}\nclient:\n{}\npeer:\n{}",
+                    app.service.logs(),
+                    peer.logs()
+                )
+            });
+        assert_eq!(response.as_ref(), payload);
+        support::udp_roundtrip(app.service.snapshot().settings.mixed_port).unwrap_or_else(
+            |error| {
+                panic!(
+                    "legacy {name} UDP: {error}\nclient:\n{}\npeer:\n{}",
+                    app.service.logs(),
+                    peer.logs()
+                )
+            },
+        );
+        app.service.stop().unwrap();
+        let _released =
+            std::net::TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port))
+                .unwrap();
+        eprintln!("independent legacy VMess peer: {name}, alterId={aid}, TCP/UDP payload passed");
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied independent server in AEROBOX_TEST_PEER"]
 fn android_protocols_exchange_payload_with_an_independent_server() {
     let _serial = support::runtime_lock();
     let executable = PathBuf::from(

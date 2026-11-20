@@ -34,6 +34,8 @@ cd AeroBoxForLinux-linux-amd64
 
 协议名称相同不代表所有参数组合都已完成互通验证。节点导入、运行配置校验和本地协议测试覆盖各自的边界；具体服务端仍须用实际连接验证。
 
+VMess 同时支持 AEAD（`alter_id: 0`）与仍在使用的旧认证协议（`alter_id: 1–65535`），载荷加密支持 `auto`、`aes-128-gcm`、`chacha20-poly1305` 和 `none`，支持 TCP、UDP、TLS 及已有传输组合。Clash 的 `alterId` 和分享链接的 `aid` 会保留并校验；协议支持不涉及旧版应用数据迁移。
+
 VLESS 的 `xtls-rprx-vision` 使用 TLS 或 REALITY，不与 WebSocket、gRPC 等额外传输或多路复用叠加。节点声明 `network: "tcp"` 时禁止该节点转发 UDP，开启 UoT 或多路复用也不会覆盖此限制。
 
 VMess / VLESS 支持普通 UDP 与 XUDP 编码；VLESS 默认 XUDP，VMess 默认普通 UDP，`packet_encoding` 可设为 `"xudp"` 或空字符串。暂不支持 `packetaddr`。导入时检查 UUID、密钥、TLS 参数和内联证书，订阅更新保留有效节点并报告无效项；证书文件在启动时读取检查。
