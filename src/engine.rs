@@ -533,6 +533,17 @@ impl Service {
                 crate::model::atomic_write(&path, bytes, 0o600)
                     .with_context(|| format!("无法写入规则集「{}」", rule.name))?;
                 installed.push(path);
+            } else if rule.is_remote()
+                && !rule.binary
+                && !before.rulesets.iter().any(|current| current.id == rule.id)
+            {
+                // The backup contains a validated snapshot, including empty
+                // JSON rules. Install it explicitly so updated=0 cannot turn
+                // a restored empty snapshot into a first-download placeholder.
+                let path = runtime::remote_rule_path(rule, &store.dir);
+                ensure!(!path.exists(), "规则集缓存已存在：{}", rule.name);
+                crate::model::atomic_write(&path, &serde_json::to_vec(&rule.content)?, 0o600)?;
+                installed.push(path);
             }
         }
         drop(store);
@@ -1057,18 +1068,44 @@ impl Service {
     }
 
     pub fn save_ruleset(&self, mut rule: RuleSet) -> Result<()> {
+        let original = self
+            .snapshot()
+            .rulesets
+            .into_iter()
+            .find(|r| r.id == rule.id);
+        // Editing a delivery address or format must validate that source now.
+        // Seeding its new cache with the previous source's bytes would report
+        // success while continuing to apply old rules until the next update.
+        let downloaded = if !rule.source.is_empty()
+            && original.as_ref().map_or(!rule.is_remote(), |r| {
+                r.source != rule.source || r.binary != rule.binary
+            }) {
+            Some(self.download_rule(&mut rule)?)
+        } else {
+            None
+        };
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
+        if downloaded.is_some() {
+            ensure!(
+                before.rulesets.iter().find(|r| r.id == rule.id) == original.as_ref(),
+                "规则集下载期间被编辑，请重试"
+            );
+        }
         let mut candidate = before.clone();
         if let Some(existing) = candidate.rulesets.iter_mut().find(|r| r.id == rule.id) {
-            if existing.content != rule.content {
+            if downloaded.is_some() || existing.content != rule.content {
                 rule.updated = now().max(existing.updated.saturating_add(1));
             }
-            *existing = rule;
+            *existing = rule.clone();
         } else {
-            candidate.rulesets.push(rule);
+            candidate.rulesets.push(rule.clone());
         }
-        self.commit_state(&before, candidate)
+        if let Some(bytes) = downloaded {
+            self.commit_rule_download(&before, candidate, &rule, &bytes)
+        } else {
+            self.commit_state(&before, candidate)
+        }
     }
 
     pub fn delete_resource(&self, kind: &str, id: &str) -> Result<()> {
@@ -1276,18 +1313,8 @@ impl Service {
             .into_iter()
             .find(|r| r.id == id)
             .context("规则集不存在")?;
-        ensure!(!r.source.is_empty(), "请填写规则集来源");
-        let bytes = if r.is_remote() {
-            self.download(&r.source)?.0
-        } else {
-            fs::read(&r.source)?
-        };
         let original_content = r.content.clone();
-        shoes::rule_set::validate_bytes(&bytes, r.binary)?;
-        if !r.binary {
-            r.content = serde_json::from_slice(&bytes)?;
-            ensure!(r.content["rules"].is_array(), "规则集缺少 rules 数组")
-        };
+        let bytes = self.download_rule(&mut r)?;
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
         let current = before
@@ -1308,23 +1335,73 @@ impl Service {
             .iter_mut()
             .find(|rule| rule.id == id)
             .context("规则集已被删除")?;
-        target.content = r.content;
+        target.content.clone_from(&r.content);
         // Each manual download owns a distinct immutable runtime cache, even
         // when two updates finish within the same clock second.
         target.updated = now().max(current.updated.saturating_add(1));
+        let target = target.clone();
+        self.commit_rule_download(&before, candidate, &target, &bytes)?;
+        self.log(format!("规则集「{}」更新完成", r.name));
+        Ok(())
+    }
+
+    fn download_rule(&self, rule: &mut RuleSet) -> Result<Vec<u8>> {
+        ensure!(!rule.source.is_empty(), "请填写规则集来源");
+        let bytes = if rule.is_remote() {
+            self.download(&rule.source)?.0
+        } else {
+            fs::read(&rule.source).context("无法读取规则文件")?
+        };
+        shoes::rule_set::validate_bytes(&bytes, rule.binary)?;
+        if !rule.binary {
+            rule.content = serde_json::from_slice(&bytes)?;
+            ensure!(rule.content["rules"].is_array(), "规则集缺少 rules 数组");
+        }
+        Ok(bytes)
+    }
+
+    fn commit_rule_download(
+        &self,
+        before: &State,
+        candidate: State,
+        rule: &RuleSet,
+        bytes: &[u8],
+    ) -> Result<()> {
         candidate.validate()?;
-        let path = self.store.lock().unwrap().rule_path(current);
-        let original_file = fs::read(&path).ok();
-        atomic_write(&path, &bytes, 0o600)?;
-        if let Err(error) = self.commit_state(&before, candidate) {
-            if let Some(bytes) = original_file {
-                atomic_write(&path, &bytes, 0o600).context("恢复规则文件失败")?;
-            } else {
-                let _ = fs::remove_file(&path);
+        let mut paths = vec![self.rule_path(rule)];
+        if rule.is_remote() {
+            paths.push(runtime::remote_rule_path(rule, &self.dir()));
+        }
+        let mut replaced = Vec::new();
+        let result = (|| -> Result<()> {
+            for path in paths {
+                let previous = match fs::read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                atomic_write(&path, bytes, 0o600)?;
+                replaced.push((path, previous));
+            }
+            self.commit_state(before, candidate)
+        })();
+        if let Err(error) = result {
+            let mut errors = Vec::new();
+            for (path, previous) in replaced.into_iter().rev() {
+                let restore = if let Some(bytes) = previous {
+                    atomic_write(&path, &bytes, 0o600)
+                } else {
+                    fs::remove_file(&path).map_err(Into::into)
+                };
+                if let Err(restore) = restore {
+                    errors.push(format!("{restore:#}"));
+                }
+            }
+            if !errors.is_empty() {
+                return Err(error.context(format!("恢复规则文件失败：{}", errors.join("; "))));
             }
             return Err(error);
         }
-        self.log(format!("规则集「{}」更新完成", r.name));
         Ok(())
     }
     fn rule_path(&self, r: &RuleSet) -> PathBuf {

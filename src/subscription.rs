@@ -42,6 +42,33 @@ fn transport_keepalive(source: &Value, transport: &mut Value, context: &str) -> 
     Ok(())
 }
 
+// Share links often omit these fields or serialize their defaults as empty
+// strings. Leave them absent so the transport uses `/` and the server authority.
+fn link_transport(kind: &str, path: &str, host: &str) -> Value {
+    let mut transport = json!({"type":kind});
+    if !path.is_empty() {
+        transport["path"] = path.into();
+    }
+    if !host.is_empty() {
+        if kind == "ws" {
+            transport["headers"] = json!({"Host":host});
+        } else {
+            transport["host"] = host.into();
+        }
+    }
+    transport
+}
+
+fn single_transport_text<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    value
+        .as_str()
+        .or_else(|| {
+            let values = value.as_array()?;
+            (values.len() == 1).then(|| values[0].as_str()).flatten()
+        })
+        .with_context(|| format!("{field} 须为文本或仅含一个文本的列表"))
+}
+
 fn decode(text: &str) -> Result<String> {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     for e in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
@@ -390,7 +417,11 @@ pub fn uri(input: &str) -> Result<Value> {
                 }
             }
             "ws" => {
-                node["transport"] = json!({"type":"ws","path":v["path"].as_str().unwrap_or("/"),"headers":{"Host":v["host"].as_str().unwrap_or("")}})
+                node["transport"] = link_transport(
+                    "ws",
+                    v["path"].as_str().unwrap_or(""),
+                    v["host"].as_str().unwrap_or(""),
+                )
             }
             "grpc" => {
                 ensure!(
@@ -401,7 +432,11 @@ pub fn uri(input: &str) -> Result<Value> {
                     json!({"type":"grpc","service_name":v["path"].as_str().unwrap_or("")})
             }
             "http" | "h2" => {
-                node["transport"] = json!({"type":"http","path":v["path"].as_str().unwrap_or("/"),"host":v["host"].as_str().unwrap_or("")})
+                node["transport"] = link_transport(
+                    "http",
+                    v["path"].as_str().unwrap_or(""),
+                    v["host"].as_str().unwrap_or(""),
+                )
             }
             other => bail!("不支持 VMess 传输: {other}"),
         };
@@ -581,16 +616,10 @@ pub fn uri(input: &str) -> Result<Value> {
     }
     match q("type").as_str() {
         "" | "tcp" => {}
-        "ws" => {
-            node["transport"] = json!({"type":"ws","path":q("path"),"headers":{"Host":q("host")}})
-        }
+        "ws" => node["transport"] = link_transport("ws", &q("path"), &q("host")),
         "grpc" => node["transport"] = json!({"type":"grpc","service_name":q("serviceName")}),
-        "httpupgrade" => {
-            node["transport"] = json!({"type":"httpupgrade","host":q("host"),"path":q("path")})
-        }
-        "http" | "h2" => {
-            node["transport"] = json!({"type":"http","host":q("host"),"path":q("path")})
-        }
+        "httpupgrade" => node["transport"] = link_transport("httpupgrade", &q("path"), &q("host")),
+        "http" | "h2" => node["transport"] = link_transport("http", &q("path"), &q("host")),
         other => bail!("不支持的传输方式: {other}"),
     }
     for key in DIAL_FIELDS {
@@ -844,19 +873,43 @@ fn clash(v: &Value) -> Result<Value> {
     }
     if typ == "shadowsocks" {
         n["method"] = v["cipher"].clone();
-        if let Some(uot) = v.get("udp-over-tcp").or_else(|| v.get("udp_over_tcp")) {
-            n["udp_over_tcp"] = if uot.is_boolean() {
-                json!({"enabled":uot,"version":v["udp-over-tcp-version"].as_u64().unwrap_or(2)})
-            } else {
-                uot.clone()
+        ensure!(
+            v.get("udp-over-tcp").is_none() || v.get("udp_over_tcp").is_none(),
+            "Clash 节点重复设置 udp-over-tcp"
+        );
+        let uot = v.get("udp-over-tcp").or_else(|| v.get("udp_over_tcp"));
+        if uot.is_some() || v.get("udp-over-tcp-version").is_some() {
+            let mut options = match uot {
+                None => json!({"enabled":false}),
+                Some(Value::Bool(enabled)) => json!({"enabled":enabled}),
+                Some(options) => {
+                    ensure!(options.is_object(), "Clash udp-over-tcp 须为开关或对象");
+                    options.clone()
+                }
             };
+            if let Some(version) = v.get("udp-over-tcp-version") {
+                ensure!(
+                    options.get("version").is_none(),
+                    "Clash 节点重复设置 udp-over-tcp version"
+                );
+                options["version"] = version.clone();
+            }
+            n["udp_over_tcp"] = options;
         }
     };
     if v["udp"] == false {
         n["network"] = json!("tcp");
     }
     if typ == "vmess" {
-        n["security"] = json!(v["cipher"].as_str().unwrap_or("auto"))
+        if let Some(cipher) = v.get("cipher") {
+            ensure!(cipher.is_string(), "Clash cipher 须为文本");
+        }
+        n["security"] = json!(
+            v["cipher"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .unwrap_or("auto")
+        )
     }
     if tls_enabled {
         let mut tls = json!({"enabled":true});
@@ -904,8 +957,13 @@ fn clash(v: &Value) -> Result<Value> {
                     "Clash ws-opts",
                 )?;
             }
-            n["transport"] =
-                json!({"type":"ws","path":v["ws-opts"]["path"].as_str().unwrap_or("/")});
+            n["transport"] = json!({"type":"ws"});
+            if let Some(path) = v["ws-opts"].get("path") {
+                let path = path.as_str().context("Clash ws-opts.path 须为文本")?;
+                if !path.is_empty() {
+                    n["transport"]["path"] = path.into();
+                }
+            }
             if let Some(h) = v["ws-opts"].get("headers") {
                 n["transport"]["headers"] = h.clone()
             }
@@ -955,40 +1013,51 @@ fn clash(v: &Value) -> Result<Value> {
                     "Clash HTTP 传输",
                 )?;
             }
-            ensure!(
-                options["path"]
-                    .as_array()
-                    .is_none_or(|paths| paths.len() == 1),
-                "HTTP 传输只支持一个 path，不能丢弃备用路径"
-            );
-            if let Some(path) = options["path"]
-                .as_str()
-                .or_else(|| options["path"].as_array()?.first()?.as_str())
-            {
-                transport["path"] = json!(path)
+            if let Some(path) = options.get("path") {
+                let path = single_transport_text(path, "Clash HTTP path")?;
+                if !path.is_empty() {
+                    transport["path"] = json!(path);
+                }
             }
-            if network == "http" {
-                transport["method"] = json!(options["method"].as_str().unwrap_or("GET"));
-            } else if let Some(method) = options.get("method") {
-                transport["method"] = method.clone();
+            if let Some(method) = options.get("method") {
+                let method = method.as_str().context("Clash HTTP method 须为文本")?;
+                if !method.is_empty() {
+                    transport["method"] = method.into();
+                }
             }
-            if let Some(headers) = options["headers"].as_object() {
+            if network == "http" && transport.get("method").is_none() {
+                transport["method"] = "GET".into();
+            }
+            if let Some(headers) = options.get("headers") {
+                let headers = headers.as_object().context("Clash HTTP headers 须为对象")?;
                 let mut extra = headers.clone();
                 // The transport exposes Host separately from other headers.
-                extra.retain(|name, value| {
+                for (name, value) in headers {
                     if name.eq_ignore_ascii_case("host") {
-                        transport["host"] = value.clone();
-                        false
-                    } else {
-                        true
+                        let host = single_transport_text(value, "Clash HTTP headers.Host")?;
+                        ensure!(
+                            transport.get("host").is_none_or(|v| v == host),
+                            "Clash HTTP headers 重复设置不同的 Host"
+                        );
+                        if !host.is_empty() {
+                            transport["host"] = host.into();
+                        }
+                        extra.remove(name);
                     }
-                });
+                }
                 if !extra.is_empty() {
                     transport["headers"] = json!(extra);
                 }
             }
             if let Some(host) = options.get("host") {
-                transport["host"] = host.clone();
+                let host = single_transport_text(host, "Clash HTTP host")?;
+                if !host.is_empty() {
+                    ensure!(
+                        transport.get("host").is_none_or(|v| v == host),
+                        "Clash HTTP host 与 headers.Host 不能设置不同的服务器名"
+                    );
+                    transport["host"] = host.into();
+                }
             }
             transport_keepalive(options, &mut transport, "Clash HTTP 传输")?;
             n["transport"] = transport
@@ -1001,11 +1070,17 @@ fn clash(v: &Value) -> Result<Value> {
                 }
             }
             let mut transport = json!({"type":"httpupgrade"});
-            if let Some(path) = v["http-opts"]["path"].as_str() {
-                transport["path"] = json!(path)
+            if let Some(path) = v["http-opts"].get("path") {
+                let path = single_transport_text(path, "Clash HTTPUpgrade path")?;
+                if !path.is_empty() {
+                    transport["path"] = path.into();
+                }
             }
-            if let Some(host) = v["http-opts"]["headers"]["Host"].as_str() {
-                transport["host"] = json!(host)
+            if let Some(host) = v["http-opts"]["headers"].get("Host") {
+                let host = single_transport_text(host, "Clash HTTPUpgrade Host")?;
+                if !host.is_empty() {
+                    transport["host"] = host.into();
+                }
             }
             n["transport"] = transport
         }
@@ -1059,11 +1134,11 @@ proxies:
         .unwrap();
         assert_eq!(
             nodes[0]["transport"],
-            json!({"type":"http","host":["front.example.com"],"path":"/secret"})
+            json!({"type":"http","host":"front.example.com","path":"/secret"})
         );
         assert_eq!(
             nodes[1]["transport"],
-            json!({"type":"http","host":["front.example.com"],"path":"/video","method":"POST","headers":{"X-Token":["fixture"],"User-Agent":"AeroBox-test"}})
+            json!({"type":"http","host":"front.example.com","path":"/video","method":"POST","headers":{"X-Token":["fixture"],"User-Agent":"AeroBox-test"}})
         );
     }
 

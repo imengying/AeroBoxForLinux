@@ -813,9 +813,13 @@ fn read_data<C>(
         ));
     }
     let remote = source.url.is_some() || compiler.remote_files.contains_key(&path);
+    // These formats require a valid versioned document even for an empty
+    // list. An explicit empty list is a legitimate update that removes rules;
+    // retain the empty-result guard for permissive list/text decoders.
+    let allow_empty = matches!(format, Format::SingboxJson | Format::Srs);
     let key = SourceKey::new(path, format, source);
     if let Some(predicate) = compiler.sources.get(&key) {
-        if remote && matches!(predicate.kind, crate::rules::Kind::Constant(false)) {
+        if remote && !allow_empty && matches!(predicate.kind, crate::rules::Kind::Constant(false)) {
             return Err(invalid("refusing an empty remote rule set"));
         }
         return Ok((format, predicate.clone()));
@@ -875,7 +879,7 @@ fn read_data<C>(
                 error
             }
         })?;
-    if remote && matches!(predicate.kind, crate::rules::Kind::Constant(false)) {
+    if remote && !allow_empty && matches!(predicate.kind, crate::rules::Kind::Constant(false)) {
         return Err(invalid("refusing an empty remote rule set"));
     }
     log::info!(

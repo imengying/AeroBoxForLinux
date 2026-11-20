@@ -1406,7 +1406,7 @@ async fn rejects_http_and_parser_failures_without_touching_last_good() {
             "validation",
         ),
         (
-            response(200, "", br#"{"version":1,"rules":[]}"#),
+            response(200, "", br#"{"version":1}"#),
             "validation",
         ),
         (
@@ -1465,19 +1465,26 @@ async fn rejects_http_and_parser_failures_without_touching_last_good() {
 }
 
 #[tokio::test]
-async fn empty_download_keeps_the_validation_error_and_last_good_file() {
+async fn explicit_empty_rule_list_replaces_old_rules_but_empty_body_is_rejected() {
     let dir = directory();
     let path = dir.path().join("rules.json");
     write_rule(&path, OLD);
+    let empty = br#"{"version":1,"rules":[]}"#;
+    let (url, fixture) = serve(response(200, "", empty)).await;
+    update(&source(&url, &path), Limits::default()).await.unwrap();
+    fixture.await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), empty);
     let original = std::fs::metadata(&path).unwrap();
-    let (url, fixture) = serve(response(200, "", br#"{"version":1,"rules":[]}"#)).await;
+    let (url, fixture) = serve(response(200, "", b"")).await;
     let error = update(&source(&url, &path), Limits::default())
         .await
         .unwrap_err();
     fixture.await.unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    assert_eq!(error.to_string(), "download failed Shoes rule validation");
-    assert_preserved(&path, &original);
+    assert_eq!(error.to_string(), "download size outside permitted range");
+    assert_eq!(std::fs::read(&path).unwrap(), empty);
+    assert_eq!(stamp(&std::fs::metadata(&path).unwrap()), stamp(&original));
+    assert!(!stage_path(&path).exists());
 }
 
 #[tokio::test]
@@ -3164,21 +3171,34 @@ fn remote_sources_work_in_source_groups_policies_and_flat_overrides() {
 }
 
 #[test]
-fn local_source_reuse_does_not_accept_an_empty_remote_cache() {
+fn local_source_reuse_accepts_valid_empty_json_and_srs_but_not_empty_text() {
     let dir = directory();
-    let path = dir.path().join("rules.json");
-    write_rule(&path, br#"{"version":1,"rules":[]}"#);
-    let remote = source("https://example.com/rules.json", &path);
-    let local = RuleSource::from_path(path);
-    let mut compiler = crate::rules::Compiler::default();
-    crate::rule_set::load_source(&local, &mut compiler).unwrap();
-    assert!(
-        crate::rule_set::load_source(&remote, &mut compiler)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("empty remote")
-    );
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&[0]).unwrap();
+    let srs = [b"SRS\x03".as_slice(), &encoder.finish().unwrap()].concat();
+    for (extension, bytes) in [
+        ("json", br#"{"version":1,"rules":[]}"#.to_vec()),
+        ("srs", srs),
+    ] {
+        let path = dir.path().join(format!("rules.{extension}"));
+        write_rule(&path, &bytes);
+        let mut remote = source(&format!("https://example.com/rules.{extension}"), &path);
+        remote.format = None;
+        for shared in [false, true] {
+            let mut compiler = crate::rules::Compiler::default();
+            if shared {
+                crate::rule_set::load_source(&RuleSource::from_path(path.clone()), &mut compiler).unwrap();
+            }
+            let predicate = crate::rule_set::load_source(&remote, &mut compiler).unwrap();
+            assert!(matches!(predicate.kind, crate::rules::Kind::Constant(false)));
+        }
+    }
+    let path = dir.path().join("rules.txt");
+    write_rule(&path, b"# no valid entries\n");
+    let mut remote = source("https://example.com/rules.txt", &path);
+    remote.format = Some(crate::rule_set::Format::MihomoText);
+    remote.behavior = Some(crate::rule_set::Behavior::Domain);
+    assert!(crate::rule_set::load_source(&remote, &mut crate::rules::Compiler::default()).is_err());
 }
 
 #[tokio::test]
@@ -3297,16 +3317,16 @@ async fn namespace_preflight_rejects_unresolved_parent_traversal_before_creating
 #[cfg(target_os = "linux")]
 fn managed_tun_state_cannot_be_used_as_a_rule_cache() {
     let dir = directory();
-    let root = Path::new("/run/shoes");
+    let root = crate::embedding::state_directory();
     let alias = dir.path().join("managed-state");
-    symlink(root, &alias).unwrap();
+    symlink(&root, &alias).unwrap();
     let namespace = std::fs::metadata("/proc/self/ns/net").unwrap();
     for extension in ["lock", "json", "pending"] {
         let name = format!("netns-{}-{}.{extension}", namespace.dev(), namespace.ino());
         let path = root.join(&name);
         let before = std::fs::symlink_metadata(&path).ok().map(|m| stamp(&m));
         let contents = std::fs::read(&path).ok();
-        for directory in [root, alias.as_path()] {
+        for directory in [root.as_path(), alias.as_path()] {
             let remote = source("https://example.invalid/rules.json", &directory.join(&name));
             let error =
                 crate::rule_set::validate_remote_paths(&mut configs(&remote), &[]).unwrap_err();
@@ -3318,7 +3338,7 @@ fn managed_tun_state_cannot_be_used_as_a_rule_cache() {
         );
         assert_eq!(std::fs::read(&path).ok(), contents);
     }
-    let mut empty = vec![cache_config(root.into())];
+    let mut empty = vec![cache_config(root.clone())];
     assert!(crate::rule_set::validate_remote_paths(&mut empty, &[]).is_err());
     let mut separate = vec![cache_config(root.join("rule-cache"))];
     crate::rule_set::validate_remote_paths(&mut separate, &[]).unwrap();

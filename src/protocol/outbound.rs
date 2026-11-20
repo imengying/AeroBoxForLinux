@@ -199,7 +199,30 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             let mut p = json!({"type":kind});
             f.copy("username", &mut p, "username");
             f.copy("password", &mut p, "password");
+            if ["username", "password"].iter().all(|field| {
+                p.get(field)
+                    .is_none_or(|value| value.is_null() || value == "")
+            }) {
+                // Empty credentials exported by subscription clients mean no
+                // authentication, not an explicit empty username/password pair.
+                let values = p.as_object_mut().unwrap();
+                values.remove("username");
+                values.remove("password");
+            }
             if kind == "socks" {
+                if p.get("username").is_some() || p.get("password").is_some() {
+                    for field in ["username", "password"] {
+                        if !p[field]
+                            .as_str()
+                            .is_some_and(|value| (1..=255).contains(&value.len()))
+                        {
+                            return Err(error(
+                                format!("{path}.{field}"),
+                                "SOCKS5 authentication requires 1–255 UTF-8 bytes for each credential",
+                            ));
+                        }
+                    }
+                }
                 p["udp_enabled"] = udp.into();
                 f.default_only("version", &[json!("5")])?;
             } else {
@@ -492,13 +515,34 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
         json!({"type":"stream_transport", "kind":match kind.as_str() {"grpc"=>"grpc", "httpupgrade"=>"http_upgrade", "http" if tls=>"http2", "http"=>"http1", _=>return Err(error(format!("{}.type",f.path),"unsupported transport"))}, "protocol":protocol})
     };
     if kind == "ws" {
-        f.copy("path", &mut out, "matching_path");
-        f.copy("headers", &mut out, "matching_headers");
+        if let Some(path) = f.string("path")?.filter(|v| !v.is_empty()) {
+            out["matching_path"] = path.into();
+        }
+        if let Some(headers) = f.take("headers") {
+            let mut headers = headers
+                .as_object()
+                .cloned()
+                .ok_or_else(|| error(format!("{}.headers", f.path), "expected headers object"))?;
+            headers.retain(|key, value| !(key.eq_ignore_ascii_case("host") && value == ""));
+            out["matching_headers"] = headers.into();
+        }
         f.copy("max_early_data", &mut out, "max_early_data");
         f.copy("early_data_header_name", &mut out, "early_data_header_name");
     } else {
-        for key in ["path", "method", "service_name"] {
-            f.copy(key, &mut out, key);
+        if kind == "grpc" {
+            f.default_only("path", &[json!(""), json!("/")])?;
+            f.default_only("method", &[json!(""), json!("POST")])?;
+            f.copy("service_name", &mut out, "service_name");
+        } else {
+            f.default_only("service_name", &[json!("")])?;
+            if let Some(path) = f.string("path")?.filter(|v| !v.is_empty()) {
+                out["path"] = path.into();
+            }
+            if kind == "httpupgrade" {
+                f.default_only("method", &[json!(""), json!("GET")])?;
+            } else if let Some(method) = f.string("method")?.filter(|v| !v.is_empty()) {
+                out["method"] = method.into();
+            }
         }
         if let Some(headers) = f.take("headers") {
             let mut headers = headers
@@ -525,11 +569,14 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
             out["headers"] = headers.into();
         }
         if let Some(host) = f.take("host") {
-            out["host"] = match host {
+            let host = match host {
                 Value::Array(v) if v.len() == 1 => v[0].clone(),
                 Value::String(_) => host,
                 _ => return Err(error(format!("{}.host", f.path), "requires one host")),
             };
+            if host != "" {
+                out["host"] = host;
+            }
         }
         if out["kind"] == "http2" || out["kind"] == "grpc" {
             for (key, target) in [

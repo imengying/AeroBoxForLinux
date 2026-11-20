@@ -276,6 +276,84 @@ fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() 
 }
 
 #[test]
+fn restoring_an_empty_remote_json_snapshot_works_offline() {
+    let _serial = support::runtime_lock();
+    let source = support::App::new();
+    let node = support::socks_forward();
+    source.import(
+        "empty rules",
+        vec![support::socks_node("forwarder", node.address)],
+    );
+    source.service.set_routing_mode("rule").unwrap();
+    let (server, fetched) = support::http(br#"{"version":3,"rules":[]}"#.to_vec());
+    source
+        .service
+        .save_ruleset(RuleSet {
+            name: "empty remote snapshot".into(),
+            source: format!("http://{}/empty.json", server.address),
+            ..Default::default()
+        })
+        .unwrap();
+    source.service.start().unwrap();
+    source.service.stop().unwrap();
+    assert_eq!(fetched.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let path = source.dir.path().join("empty-backup.json");
+    source.service.export_backup(&path).unwrap();
+    drop(server);
+    let restored = support::App::new();
+    restored.service.restore_backup(&path).unwrap();
+    assert_eq!(restored.service.snapshot().rulesets[0].updated, 0);
+    restored.service.start().unwrap();
+    let (origin, _) = support::http(b"restored offline".to_vec());
+    assert_eq!(
+        support::request(&restored.service, &format!("http://{}/", origin.address)).unwrap(),
+        "restored offline"
+    );
+    restored.service.stop().unwrap();
+}
+
+#[test]
+fn new_local_rule_files_are_imported_and_backed_up_before_starting() {
+    let (_directory, service) = service();
+    for binary in [false, true] {
+        let path = service
+            .dir()
+            .join(if binary { "input.srs" } else { "input.json" });
+        let bytes = if binary {
+            SRS.to_vec()
+        } else {
+            br#"{"version":3,"rules":[{"domain":["local.example.test"]}]}"#.to_vec()
+        };
+        fs::write(&path, &bytes).unwrap();
+        let rule = RuleSet {
+            name: if binary {
+                "imported SRS"
+            } else {
+                "imported JSON"
+            }
+            .into(),
+            source: path.to_str().unwrap().into(),
+            binary,
+            ..Default::default()
+        };
+        let id = rule.id.clone();
+        service.save_ruleset(rule).unwrap();
+        fs::remove_file(path).unwrap();
+        let content: Value = serde_json::from_str(&service.rule_source(&id).unwrap()).unwrap();
+        assert!(!content["rules"].as_array().unwrap().is_empty());
+        let backup = service.dir().join("local-files.json");
+        service.export_backup(&backup).unwrap();
+        let (state, files) = backup::read(&backup).unwrap();
+        if binary {
+            assert_eq!(files[&id], bytes);
+        } else {
+            assert_eq!(state.rulesets[0].content, content);
+        }
+    }
+    assert!(!service.status().running);
+}
+
+#[test]
 fn restore_commit_failure_removes_new_rule_files_and_preserves_existing_files() {
     let (_dir, target) = service();
     let existing = RuleSet {

@@ -304,7 +304,16 @@ fn rule_file(rule: &model::RuleSet, dir: &Path) -> Result<std::path::PathBuf> {
 }
 
 pub(crate) fn remote_rule_path(rule: &model::RuleSet, dir: &Path) -> std::path::PathBuf {
-    let digest = Sha256::digest(format!("{}:{}", rule.source, rule.updated).as_bytes())
+    let mut identity = Sha256::new();
+    identity.update(format!("{}:{}", rule.source, rule.updated).as_bytes());
+    // Failed saves may be retried within one second with different editor
+    // content. Each candidate must own its seed rather than reusing a rejected
+    // candidate's cache under the same timestamp.
+    if !rule.binary {
+        identity.update(rule.content.to_string().as_bytes());
+    }
+    let digest = identity
+        .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();

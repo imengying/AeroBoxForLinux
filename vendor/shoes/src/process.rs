@@ -1614,14 +1614,6 @@ impl EmbeddedProcess {
         result
     }
 
-    fn snapshot(&self) -> io::Result<crate::control::flows::ConnectionsSnapshot> {
-        let control = self
-            .control
-            .as_ref()
-            .ok_or_else(|| io::Error::other("embedded flow registry missing"))?;
-        Ok(control.runtime.flows.snapshot(0))
-    }
-
     async fn shutdown(&mut self) -> io::Result<()> {
         self.lifetime.cancel();
         if let Some(control) = &self.control {
@@ -1644,6 +1636,87 @@ impl EmbeddedProcess {
         stopped.and(network)
     }
 
+    /// Queries must not cancel an in-flight remote rule refresh. Commands that
+    /// replace its configuration or physical network are returned to the actor.
+    fn query(
+        command: crate::embedding::Command,
+        control: Option<&crate::control::runtime::ControlService>,
+        lifetime: &crate::network_tasks::NetworkLifetime,
+    ) -> Option<crate::embedding::Command> {
+        use crate::embedding::Command;
+        let snapshot = || {
+            let control =
+                control.ok_or_else(|| io::Error::other("embedded flow registry missing"))?;
+            Ok::<_, io::Error>(control.runtime.flows.snapshot(0))
+        };
+        match command {
+            Command::Stats(reply) => {
+                let _ = reply.send(snapshot().map(|snapshot| crate::embedding::Stats {
+                    upload_total: snapshot.upload_total,
+                    download_total: snapshot.download_total,
+                    active_connections: snapshot.connections.len(),
+                }));
+            }
+            Command::Connections(reply) => {
+                let result = snapshot().and_then(|mut snapshot| {
+                    snapshot.connections.truncate(500);
+                    serde_json::to_value(snapshot).map_err(io::Error::other)
+                });
+                let _ = reply.send(result);
+            }
+            Command::CloseAll(reply) => {
+                if let Some(control) = control {
+                    control.runtime.flows.cancel_all();
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::Close(id, reply) => {
+                if let Some(control) = control {
+                    control.runtime.flows.cancel(&id);
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::UrlTest {
+                name,
+                url,
+                timeout_ms,
+                reply,
+            } => {
+                let inputs = (|| {
+                    let control =
+                        control.ok_or_else(|| io::Error::other("controller unavailable"))?;
+                    let generation = control.runtime.generation()?;
+                    let query = crate::control::probes::ProbeQuery::parse(
+                        &std::collections::HashMap::from([
+                            ("url".into(), url),
+                            ("timeout".into(), timeout_ms.to_string()),
+                        ]),
+                        false,
+                    )?;
+                    Ok::<_, io::Error>((control.runtime.clone(), generation, query))
+                })();
+                match inputs {
+                    Ok((runtime, generation, query)) => {
+                        // The probe belongs to the active physical network;
+                        // stopping or changing that network cancels it and
+                        // releases its reply without blocking this actor.
+                        lifetime.spawn(async move {
+                            let result =
+                                crate::control::probes::probe(&runtime, &generation, &name, &query)
+                                    .await;
+                            let _ = reply.send(result);
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            command => return Some(command),
+        }
+        None
+    }
+
     pub(crate) async fn run(
         mut self,
         mut commands: mpsc::Receiver<crate::embedding::Command>,
@@ -1663,13 +1736,35 @@ impl EmbeddedProcess {
         // time it wins select. Only completed recovery attempts move this date.
         let mut retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            let event = tokio::select! {
-                biased;
-                command = commands.recv() => Event::Command(command),
-                error = self.running.tun_failure(), if !self.reconnecting => Event::Failed(error),
-                _ = self.network.changed() => Event::Network,
-                _ = self.lifetime.scope(remote_rule_change(&mut self.prepared)), if !self.reconnecting => Event::Rules,
-                _ = tokio::time::sleep_until(retry_at), if self.reconnecting && self.network.available() => Event::Retry,
+            let event = {
+                // Keep the same download future across dashboard queries and
+                // irrelevant network notifications. Recreating it on every
+                // poll starves any download slower than the polling interval.
+                let refresh = self.lifetime.scope(remote_rule_change(&mut self.prepared));
+                tokio::pin!(refresh);
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        _ = &mut refresh, if !self.reconnecting => Event::Rules,
+                        command = commands.recv() => Event::Command(command),
+                        error = self.running.tun_failure(), if !self.reconnecting => Event::Failed(error),
+                        _ = self.network.changed() => Event::Network,
+                        _ = tokio::time::sleep_until(retry_at), if self.reconnecting && self.network.available() => Event::Retry,
+                    };
+                    match event {
+                        Event::Command(Some(command)) => {
+                            if let Some(command) = Self::query(command, self.control.as_ref(), &self.lifetime) {
+                                break Event::Command(Some(command));
+                            }
+                        }
+                        Event::Network => match self.network.reconcile().await {
+                            Ok(false) => {},
+                            Ok(true) => break Event::Network,
+                            Err(error) => break Event::Failed(error),
+                        },
+                        event => break event,
+                    }
+                }
             };
             match event {
                 Event::Command(None) => break,
@@ -1682,16 +1777,10 @@ impl EmbeddedProcess {
                     break;
                 }
                 Event::Network => {
-                    match self.network.reconcile().await {
-                        Ok(true) => {
-                            if let Err(error) = self.network_changed(&platform).await {
-                                log::warn!("Network recovery deferred: {error}");
-                            }
-                            retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
-                        },
-                        Ok(false) => {},
-                        Err(error) => { terminal = Some(error); break; }
+                    if let Err(error) = self.network_changed(&platform).await {
+                        log::warn!("Network recovery deferred: {error}");
                     }
+                    retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
                 }
                 Event::Rules => {
                     if let Err(error) = self.reload(self.configs.clone(), false).await {
@@ -1720,20 +1809,6 @@ impl EmbeddedProcess {
                     retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
                     let _ = reply.send(result);
                 }
-                Event::Command(Some(Command::Stats(reply))) => {
-                    let _ = reply.send(self.snapshot().map(|snapshot| crate::embedding::Stats {
-                        upload_total: snapshot.upload_total,
-                        download_total: snapshot.download_total,
-                        active_connections: snapshot.connections.len(),
-                    }));
-                }
-                Event::Command(Some(Command::Connections(reply))) => {
-                    let result = self.snapshot().and_then(|mut snapshot| {
-                        snapshot.connections.truncate(500);
-                        serde_json::to_value(snapshot).map_err(io::Error::other)
-                    });
-                    let _ = reply.send(result);
-                }
                 Event::Command(Some(Command::Select(group, member, reply))) => {
                     let result = async {
                         let control = self.control.as_ref().ok_or_else(|| io::Error::other("controller unavailable"))?;
@@ -1742,58 +1817,7 @@ impl EmbeddedProcess {
                     }.await;
                     let _ = reply.send(result);
                 }
-                Event::Command(Some(Command::CloseAll(reply))) => {
-                    if let Some(control) = &self.control { control.runtime.flows.cancel_all(); }
-                    let _ = reply.send(Ok(()));
-                }
-                Event::Command(Some(Command::Close(id, reply))) => {
-                    if let Some(control) = &self.control {
-                        control.runtime.flows.cancel(&id);
-                    }
-                    let _ = reply.send(Ok(()));
-                }
-                Event::Command(Some(Command::UrlTest {
-                    name,
-                    url,
-                    timeout_ms,
-                    reply,
-                })) => {
-                    let inputs = (|| {
-                        let control = self
-                            .control
-                            .as_ref()
-                            .ok_or_else(|| io::Error::other("controller unavailable"))?;
-                        let generation = control.runtime.generation()?;
-                        let query = crate::control::probes::ProbeQuery::parse(
-                            &std::collections::HashMap::from([
-                                ("url".into(), url),
-                                ("timeout".into(), timeout_ms.to_string()),
-                            ]),
-                            false,
-                        )?;
-                        Ok::<_, io::Error>((control.runtime.clone(), generation, query))
-                    })();
-                    match inputs {
-                        Ok((runtime, generation, query)) => {
-                            // The probe belongs to the active physical network;
-                            // stopping or changing that network cancels it and
-                            // releases its reply without blocking this actor.
-                            self.lifetime.spawn(async move {
-                                let result = crate::control::probes::probe(
-                                    &runtime,
-                                    &generation,
-                                    &name,
-                                    &query,
-                                )
-                                .await;
-                                let _ = reply.send(result);
-                            });
-                        }
-                        Err(error) => {
-                            let _ = reply.send(Err(error));
-                        }
-                    }
-                }
+                Event::Command(Some(_)) => unreachable!("query commands handled while polling"),
             }
             if self.failed {
                 terminal = Some(io::Error::other("embedded configuration rollback failed"));

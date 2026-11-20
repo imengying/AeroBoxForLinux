@@ -81,13 +81,10 @@ pub(crate) fn validate_early_data(
     server: bool,
 ) -> io::Result<()> {
     let early = EarlyData::new(max, header);
-    if max == 0 {
-        if early.header.is_some() {
-            return Err(invalid(
-                "early_data_header_name requires max_early_data > 0",
-            ));
-        }
-        return Ok(());
+    if max == 0 && early.header.is_some() {
+        return Err(invalid(
+            "early_data_header_name requires max_early_data > 0",
+        ));
     }
     if server && path.is_none() && early.path_mode() {
         return Err(invalid("WebSocket path early data requires matching_path"));
@@ -120,9 +117,11 @@ pub(crate) fn validate_early_data(
         .map_or(request_line_len, |name| name.len() + 2);
     if encoded >= MAX_LINE || carrier_line_len >= MAX_LINE - encoded || request_line_len >= MAX_LINE
     {
-        return Err(invalid(
-            "WebSocket early data limit exceeds HTTP line budget",
-        ));
+        return Err(invalid(if max == 0 {
+            "WebSocket handshake exceeds HTTP line budget"
+        } else {
+            "WebSocket early data limit exceeds HTTP line budget"
+        }));
     }
     let mut names = HashSet::new();
     let mut total = request_line_len
@@ -162,7 +161,7 @@ pub(crate) fn validate_early_data(
     if total > MAX_HTTP || names.len() + HANDSHAKE_LINE_ALLOWANCE >= MAX_HTTP_LINES {
         return Err(invalid("WebSocket matching headers exceed HTTP budget"));
     }
-    if !server && !host {
+    if max > 0 && !server && !host {
         return Err(invalid(
             "WebSocket early data requires matching_headers.Host",
         ));
