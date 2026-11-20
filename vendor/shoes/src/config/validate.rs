@@ -1673,6 +1673,14 @@ pub(crate) fn validate_resolved_client_vision_protocol(
 fn validate_client_proxy_structure(config: &ClientProxyConfig) -> std::io::Result<()> {
     let inner = match config {
         ClientProxyConfig::SudokuMask(config) => Some(config.protocol.as_ref()),
+        ClientProxyConfig::Vmess { h2mux, .. }
+        | ClientProxyConfig::Vless { h2mux, .. }
+        | ClientProxyConfig::Trojan { h2mux, .. } => {
+            if let Some(config) = h2mux {
+                config.validate()?;
+            }
+            None
+        }
         ClientProxyConfig::Tls(tls_config) => {
             tls_config
                 .key_exchange_groups
@@ -1730,6 +1738,165 @@ fn validate_client_proxy_structure(config: &ClientProxyConfig) -> std::io::Resul
     Ok(())
 }
 
+/// Validate one client's parameters without building a runtime, resolving
+/// names or reading files. Inline certificates are checked now; file-backed
+/// credentials are validated by the normal preparation path before startup.
+pub fn validate_client_config(mut client: ClientConfig) -> std::io::Result<()> {
+    validate_client_parameters(&mut client, ClientPems::DeferredFiles)
+}
+
+#[derive(Clone, Copy)]
+enum ClientPems<'a> {
+    Prepared(&'a HashMap<String, String>),
+    DeferredFiles,
+}
+
+impl ClientPems<'_> {
+    fn prepare_credentials(self, cert: &mut Option<String>, key: &mut Option<String>) {
+        if let Self::Prepared(named) = self {
+            embed_optional_pem_from_map(cert, named);
+            embed_optional_pem_from_map(key, named);
+        }
+    }
+
+    fn tls_options(
+        self,
+        options: &mut super::tls::TlsClientOptions,
+    ) -> super::tls::TlsClientOptions {
+        match self {
+            Self::Prepared(named) => {
+                for root in &mut options.root_certificates {
+                    embed_pem_from_map(root, named);
+                }
+                options.clone()
+            }
+            Self::DeferredFiles => {
+                let mut inline = options.clone();
+                inline
+                    .root_certificates
+                    .retain(|root| !super::pem::is_pem_file_path(root));
+                inline
+            }
+        }
+    }
+
+    fn validate_credentials(self, cert: Option<&str>, key: Option<&str>) -> std::io::Result<()> {
+        if matches!(self, Self::DeferredFiles)
+            && cert
+                .into_iter()
+                .chain(key)
+                .any(super::pem::is_pem_file_path)
+        {
+            // The other half can still be inline. Validate it independently;
+            // checking that the certificate and key match needs both files.
+            if let Some(cert) = cert.filter(|value| !super::pem::is_pem_file_path(value)) {
+                let options = super::tls::TlsClientOptions {
+                    root_certificates: vec![cert.to_owned()],
+                    ..Default::default()
+                };
+                crate::rustls_config_util::try_create_client_config_with_options(
+                    false,
+                    vec![],
+                    vec![],
+                    true,
+                    None,
+                    false,
+                    &Default::default(),
+                    &options,
+                )?;
+            }
+            if let Some(key) = key.filter(|value| !super::pem::is_pem_file_path(value)) {
+                use rustls::pki_types::pem::PemObject;
+                let private_key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key.as_bytes())
+                    .map_err(std::io::Error::other)?;
+                aerobox_crypto::provider()
+                    .key_provider
+                    .load_private_key(private_key)
+                    .map_err(std::io::Error::other)?;
+            }
+            return Ok(());
+        }
+        validate_client_certificates(cert, key)
+    }
+}
+
+fn validate_client_parameters(
+    client_config: &mut ClientConfig,
+    pems: ClientPems<'_>,
+) -> std::io::Result<()> {
+    crate::sudoku_mask::validate_client(&client_config.protocol, &client_config.transport)?;
+    client_config.validate_quic_key_exchange(true)?;
+    crate::quic_client::validate(client_config, true)?;
+    if client_config.transport != Transport::Tcp && client_config.tcp_settings.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP transport is not selected but TCP settings specified",
+        ));
+    }
+
+    if let Some(ref mut quic_config) = client_config.quic_settings {
+        if client_config.transport != Transport::Quic {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "QUIC transport is not selected but QUIC settings specified",
+            ));
+        }
+        let sni = match &quic_config.sni_hostname {
+            NoneOrOne::Unspecified => client_config.address.address().hostname(),
+            NoneOrOne::None => None,
+            NoneOrOne::One(sni) => Some(sni.as_str()),
+        };
+        if let Some(sni) = sni {
+            validate_sni(sni)?;
+        }
+
+        pems.prepare_credentials(&mut quic_config.cert, &mut quic_config.key);
+        let options = pems.tls_options(&mut quic_config.options);
+        crate::rustls_config_util::try_create_client_config_with_options(
+            false,
+            vec![],
+            vec![],
+            true,
+            None,
+            true,
+            &quic_config.key_exchange_groups,
+            &options,
+        )?;
+
+        let super::types::ClientQuicConfig {
+            cert,
+            key,
+            server_fingerprints,
+            ..
+        } = quic_config;
+        if cert.is_none() != key.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Both client cert and key have to be specified, or both have to be omitted",
+            ));
+        }
+        normalize_fingerprints(server_fingerprints, "Server")?;
+        pems.validate_credentials(cert.as_deref(), key.as_deref())?;
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+    if client_config.bind_interface.is_one() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bind_interface is only available on Android, Fuchsia, or Linux.",
+        ));
+    }
+
+    validate_client_proxy_structure(&client_config.protocol)?;
+    validate_client_proxy_config(
+        &mut client_config.protocol,
+        pems,
+        client_config.address.address().hostname(),
+    )?;
+
+    Ok(())
+}
+
 pub(super) fn resolve_client_config(
     mut client_config: ClientConfig,
     carrier: Option<ChainPlan<DraftClient>>,
@@ -1738,9 +1905,6 @@ pub(super) fn resolve_client_config(
 ) -> std::io::Result<ResolvedClientConfig> {
     #[cfg(test)]
     tests::CLIENT_VALIDATIONS.with(|count| count.set(count.get() + 1));
-    crate::sudoku_mask::validate_client(&client_config.protocol, &client_config.transport)?;
-    client_config.validate_quic_key_exchange(true)?;
-    crate::quic_client::validate(&client_config, true)?;
     let mut resolved_carrier = None;
     if let ClientProxyConfig::Wireguard(config) = &mut client_config.protocol {
         if client_config.transport != Transport::Udp
@@ -1769,67 +1933,7 @@ pub(super) fn resolve_client_config(
             resolved_carrier = Some(chain);
         }
     }
-    if client_config.transport != Transport::Tcp && client_config.tcp_settings.is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "TCP transport is not selected but TCP settings specified",
-        ));
-    }
-
-    if let Some(ref mut quic_config) = client_config.quic_settings {
-        if client_config.transport != Transport::Quic {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "QUIC transport is not selected but QUIC settings specified",
-            ));
-        }
-
-        embed_optional_pem_from_map(&mut quic_config.cert, named_pems);
-        embed_optional_pem_from_map(&mut quic_config.key, named_pems);
-        for root in &mut quic_config.options.root_certificates {
-            embed_pem_from_map(root, named_pems);
-        }
-        crate::rustls_config_util::try_create_client_config_with_options(
-            false,
-            vec![],
-            vec![],
-            true,
-            None,
-            true,
-            &quic_config.key_exchange_groups,
-            &quic_config.options,
-        )?;
-
-        let super::types::ClientQuicConfig {
-            cert,
-            key,
-            server_fingerprints,
-            ..
-        } = quic_config;
-        if cert.is_none() != key.is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Both client cert and key have to be specified, or both have to be omitted",
-            ));
-        }
-        normalize_fingerprints(server_fingerprints, "Server")?;
-        validate_client_certificates(cert.as_deref(), key.as_deref())?;
-    }
-
-    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
-    if client_config.bind_interface.is_one() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "bind_interface is only available on Android, Fuchsia, or Linux.",
-        ));
-    }
-
-    validate_client_proxy_structure(&client_config.protocol)?;
-    validate_client_proxy_config(
-        &mut client_config.protocol,
-        named_pems,
-        client_config.address.address().hostname(),
-    )?;
+    validate_client_parameters(&mut client_config, ClientPems::Prepared(named_pems))?;
 
     let client_config = super::lower::client(client_config, resolved_carrier);
     if crate::xhttp::connector::contains(&client_config.protocol) {
@@ -1845,13 +1949,13 @@ pub(super) fn resolve_client_config(
 
 fn validate_client_proxy_config(
     client_proxy_config: &mut ClientProxyConfig,
-    named_pems: &HashMap<String, String>,
+    pems: ClientPems<'_>,
     default_sni: Option<&str>,
 ) -> std::io::Result<()> {
     match client_proxy_config {
         ClientProxyConfig::SudokuMask(config) => {
             config.prepare()?;
-            validate_client_proxy_config(&mut config.protocol, named_pems, default_sni)?;
+            validate_client_proxy_config(&mut config.protocol, pems, default_sni)?;
         }
         ClientProxyConfig::Shadowsocks { config, .. } => config.validate_keys()?,
         ClientProxyConfig::Vmess {
@@ -1922,7 +2026,7 @@ fn validate_client_proxy_config(
                 );
             }
 
-            validate_client_proxy_config(protocol, named_pems, None)?;
+            validate_client_proxy_config(protocol, pems, None)?;
         }
 
         ClientProxyConfig::Tls(tls_config) => {
@@ -1934,11 +2038,8 @@ fn validate_client_proxy_config(
             if let Some(sni) = sni {
                 validate_sni(sni)?;
             }
-            embed_optional_pem_from_map(&mut tls_config.cert, named_pems);
-            embed_optional_pem_from_map(&mut tls_config.key, named_pems);
-            for root in &mut tls_config.options.root_certificates {
-                embed_pem_from_map(root, named_pems);
-            }
+            pems.prepare_credentials(&mut tls_config.cert, &mut tls_config.key);
+            let options = pems.tls_options(&mut tls_config.options);
             crate::rustls_config_util::try_create_client_config_with_options(
                 false,
                 vec![],
@@ -1947,7 +2048,7 @@ fn validate_client_proxy_config(
                 None,
                 tls_config.vision,
                 &tls_config.key_exchange_groups,
-                &tls_config.options,
+                &options,
             )?;
 
             if tls_config.cert.is_none() != tls_config.key.is_none() {
@@ -1957,9 +2058,9 @@ fn validate_client_proxy_config(
                 ));
             }
             normalize_fingerprints(&mut tls_config.server_fingerprints, "Server")?;
-            validate_client_certificates(tls_config.cert.as_deref(), tls_config.key.as_deref())?;
+            pems.validate_credentials(tls_config.cert.as_deref(), tls_config.key.as_deref())?;
 
-            validate_client_proxy_config(&mut tls_config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut tls_config.protocol, pems, None)?;
         }
 
         ClientProxyConfig::ShadowTls {
@@ -1970,12 +2071,12 @@ fn validate_client_proxy_config(
             if let Some(sni) = sni_hostname.as_deref().or(default_sni) {
                 validate_sni(sni)?;
             }
-            validate_client_proxy_config(protocol, named_pems, None)?;
+            validate_client_proxy_config(protocol, pems, None)?;
         }
 
         ClientProxyConfig::Multiplex(config) => {
             config.validate()?;
-            validate_client_proxy_config(&mut config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut config.protocol, pems, None)?;
         }
         ClientProxyConfig::Naiveproxy { settings, .. } => {
             settings.validate()?;
@@ -1989,11 +2090,11 @@ fn validate_client_proxy_config(
         }
         ClientProxyConfig::Uot(config) => {
             config.validate()?;
-            validate_client_proxy_config(&mut config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut config.protocol, pems, None)?;
         }
         ClientProxyConfig::StreamTransport(config) => {
             config.validate()?;
-            validate_client_proxy_config(&mut config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut config.protocol, pems, None)?;
         }
         ClientProxyConfig::Websocket(ws_config) => {
             crate::websocket::validate_early_data(
@@ -2003,12 +2104,12 @@ fn validate_client_proxy_config(
                 ws_config.early_data_header_name.as_deref(),
                 false,
             )?;
-            validate_client_proxy_config(&mut ws_config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut ws_config.protocol, pems, None)?;
         }
 
         ClientProxyConfig::Xhttp(config) => {
             config.validate()?;
-            validate_client_proxy_config(&mut config.protocol, named_pems, None)?;
+            validate_client_proxy_config(&mut config.protocol, pems, None)?;
         }
 
         ClientProxyConfig::Anytls {

@@ -4,6 +4,7 @@ use tokio::io::AsyncWriteExt;
 use crate::address::{Address, NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncMessageStream;
 use crate::async_stream::AsyncStream;
+use crate::config::client::PacketEncoding;
 use crate::tcp::tcp_handler::{TcpClientHandler, TcpClientSetupResult};
 use crate::util::{allocate_vec, write_all};
 use crate::uuid_util::parse_uuid;
@@ -20,6 +21,7 @@ pub struct VlessTcpClientHandler {
     udp_enabled: bool,
     encryption: Option<ClientEncryption>,
     vision: bool,
+    packet_encoding: PacketEncoding,
 }
 
 impl std::fmt::Debug for VlessTcpClientHandler {
@@ -49,7 +51,13 @@ impl VlessTcpClientHandler {
             udp_enabled,
             encryption,
             vision,
+            packet_encoding: PacketEncoding::Raw,
         })
+    }
+
+    pub(crate) fn with_packet_encoding(mut self, encoding: PacketEncoding) -> Self {
+        self.packet_encoding = encoding;
+        self
     }
 }
 
@@ -90,7 +98,7 @@ impl TcpClientHandler for VlessTcpClientHandler {
     }
 
     fn supports_udp_over_tcp(&self) -> bool {
-        self.udp_enabled // VLESS supports XUDP for UDP-over-TCP when enabled
+        self.udp_enabled
     }
 
     async fn setup_client_udp_bidirectional(
@@ -110,6 +118,20 @@ impl TcpClientHandler for VlessTcpClientHandler {
                 .await;
             }
             client_stream = Box::new(stream);
+        }
+        if self.packet_encoding.is_xudp() {
+            // MUX carries its destination in each XUDP frame, not in the
+            // VLESS request. The response still has the VLESS version/addons.
+            let mut header = Vec::with_capacity(19);
+            header.push(0);
+            header.extend_from_slice(&self.user_id);
+            header.extend_from_slice(&[0, COMMAND_MUX]);
+            write_all(&mut client_stream, &header).await?;
+            client_stream.flush().await?;
+            return Ok(Box::new(crate::xudp::client_stream::XudpClientStream::new(
+                Box::new(VlessResponseStream::new(client_stream)),
+                target.into_location(),
+            )));
         }
         write_vless_udp_header(&mut client_stream, &self.user_id, target.location()).await?;
         client_stream.flush().await?;

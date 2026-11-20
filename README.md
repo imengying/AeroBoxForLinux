@@ -36,6 +36,8 @@ cd AeroBoxForLinux-linux-amd64
 
 VLESS 的 `xtls-rprx-vision` 使用 TLS 或 REALITY，不与 WebSocket、gRPC 等额外传输或多路复用叠加。节点声明 `network: "tcp"` 时禁止该节点转发 UDP，开启 UoT 或多路复用也不会覆盖此限制。
 
+VMess / VLESS 支持普通 UDP 与 XUDP 编码；VLESS 默认 XUDP，VMess 默认普通 UDP，`packet_encoding` 可设为 `"xudp"` 或空字符串。暂不支持 `packetaddr`。导入时检查 UUID、密钥、TLS 参数和内联证书，订阅更新保留有效节点并报告无效项；证书文件在启动时读取检查。
+
 ### 系统代理与虚拟网卡
 
 系统代理支持 GNOME 和 KDE Plasma；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。其他应用可填写本地 HTTP / SOCKS 入口，默认 `127.0.0.1:2080`。

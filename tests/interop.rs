@@ -99,7 +99,9 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
         "shadowsocks",
         "ss2022",
         "vmess",
+        "vmess-xudp",
         "vless",
+        "vless-raw",
         "trojan",
         "anytls",
         "hysteria2",
@@ -125,10 +127,11 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
                 break ready;
             }
         };
-        let protocol = if kind == "ss2022" {
-            "shadowsocks"
-        } else {
-            kind
+        let protocol = match kind {
+            "ss2022" => "shadowsocks",
+            "vmess-xudp" => "vmess",
+            "vless-raw" => "vless",
+            _ => kind,
         };
         let mut inbound = json!({"type":protocol,"tag":"tested-protocol","listen":"127.0.0.1","listen_port":port});
         let mut node = json!({"type":protocol,"tag":format!("independent {kind}"),"server":"127.0.0.1","server_port":port});
@@ -149,11 +152,16 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
                 node["method"] = method.into();
                 node["password"] = password.into();
             }
-            "vmess" | "vless" => {
+            "vmess" | "vless" | "vmess-xudp" | "vless-raw" => {
                 inbound["users"] = json!([{"name":"fixture","uuid":UUID}]);
                 node["uuid"] = UUID.into();
-                if kind == "vmess" {
+                if protocol == "vmess" {
                     node["security"] = "auto".into();
+                }
+                if kind == "vmess-xudp" {
+                    node["packet_encoding"] = "xudp".into();
+                } else if kind == "vless-raw" {
+                    node["packet_encoding"] = "".into();
                 }
             }
             "trojan" | "anytls" | "hysteria2" => {

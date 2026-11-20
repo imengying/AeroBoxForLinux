@@ -98,6 +98,7 @@ fn client_protocol(
             _invalid_decryption,
             vision,
             udp_enabled,
+            packet_encoding,
             h2mux,
         } => ResolvedClientProxyConfig::Vless {
             user_id,
@@ -105,6 +106,7 @@ fn client_protocol(
             _invalid_decryption,
             vision,
             udp_enabled,
+            packet_encoding,
             h2mux,
         },
         ClientProxyConfig::Trojan {
@@ -161,11 +163,13 @@ fn client_protocol(
             cipher,
             user_id,
             udp_enabled,
+            packet_encoding,
             h2mux,
         } => ResolvedClientProxyConfig::Vmess {
             cipher,
             user_id,
             udp_enabled,
+            packet_encoding,
             h2mux,
         },
         ClientProxyConfig::Multiplex(config) => {

@@ -15,6 +15,25 @@ use super::server::WebsocketPingType;
 use super::shadowsocks::ShadowsocksConfig;
 use super::transport::{ClientQuicConfig, TcpConfig, Transport};
 
+/// Payload framing inside VMess/VLESS UDP streams. This is independent of
+/// the carrier and of the administrative `udp_enabled` switch.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PacketEncoding {
+    #[default]
+    #[serde(rename = "")]
+    Raw,
+    #[serde(rename = "xudp")]
+    Xudp,
+}
+impl PacketEncoding {
+    pub fn is_raw(&self) -> bool {
+        *self == Self::Raw
+    }
+    pub(crate) fn is_xudp(self) -> bool {
+        self == Self::Xudp
+    }
+}
+
 /// Configuration for h2mux (HTTP/2 multiplexing) on protocols that support it.
 ///
 /// H2MUX multiplexes multiple proxy streams over a single HTTP/2 connection,
@@ -175,7 +194,7 @@ where
 /// Custom deserializer for ClientProxyConfig::Vmess that validates legacy aead field
 fn deserialize_vmess_client<'de, D>(
     deserializer: D,
-) -> Result<(String, String, bool, Option<H2MuxConfig>), D::Error>
+) -> Result<(String, String, bool, PacketEncoding, Option<H2MuxConfig>), D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -190,6 +209,8 @@ where
         aead: Option<bool>,
         #[serde(default = "default_true")]
         udp_enabled: bool,
+        #[serde(default)]
+        packet_encoding: PacketEncoding,
         #[serde(default)]
         h2mux: Option<H2MuxConfig>,
     }
@@ -211,7 +232,13 @@ where
         );
     }
 
-    Ok((temp.cipher, temp.user_id, temp.udp_enabled, temp.h2mux))
+    Ok((
+        temp.cipher,
+        temp.user_id,
+        temp.udp_enabled,
+        temp.packet_encoding,
+        temp.h2mux,
+    ))
 }
 
 /// Custom deserializer for TlsClientConfig that handles deprecated shadowtls_password field
@@ -533,6 +560,8 @@ pub enum ClientProxyConfig {
         vision: bool,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         udp_enabled: bool,
+        #[serde(default, skip_serializing_if = "PacketEncoding::is_raw")]
+        packet_encoding: PacketEncoding,
         /// H2MUX multiplexing configuration
         #[serde(default, skip_serializing_if = "Option::is_none")]
         h2mux: Option<H2MuxConfig>,
@@ -596,6 +625,8 @@ pub enum ClientProxyConfig {
         user_id: String,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         udp_enabled: bool,
+        #[serde(default, skip_serializing_if = "PacketEncoding::is_raw")]
+        packet_encoding: PacketEncoding,
         /// H2MUX multiplexing configuration
         #[serde(default, skip_serializing_if = "Option::is_none")]
         h2mux: Option<H2MuxConfig>,
@@ -809,6 +840,8 @@ pub enum ResolvedClientProxyConfig {
         vision: bool,
         #[serde(skip_serializing_if = "is_true")]
         udp_enabled: bool,
+        #[serde(skip_serializing_if = "PacketEncoding::is_raw")]
+        packet_encoding: PacketEncoding,
         #[serde(skip_serializing_if = "Option::is_none")]
         h2mux: Option<H2MuxConfig>,
     },
@@ -851,6 +884,8 @@ pub enum ResolvedClientProxyConfig {
         user_id: String,
         #[serde(skip_serializing_if = "is_true")]
         udp_enabled: bool,
+        #[serde(skip_serializing_if = "PacketEncoding::is_raw")]
+        packet_encoding: PacketEncoding,
         #[serde(skip_serializing_if = "Option::is_none")]
         h2mux: Option<H2MuxConfig>,
     },

@@ -162,6 +162,7 @@ pub(crate) fn create_with_hop_context(
         ResolvedClientProxyConfig::Vless {
             user_id,
             udp_enabled,
+            packet_encoding,
             h2mux,
             encryption,
             vision,
@@ -180,12 +181,10 @@ pub(crate) fn create_with_hop_context(
                     encryption.as_str(),
                 )?)
             };
-            let handler: Box<dyn TcpClientHandler> = Box::new(VlessTcpClientHandler::new(
-                &user_id,
-                udp_enabled,
-                encryption,
-                vision,
-            )?);
+            let handler: Box<dyn TcpClientHandler> = Box::new(
+                VlessTcpClientHandler::new(&user_id, udp_enabled, encryption, vision)?
+                    .with_packet_encoding(packet_encoding),
+            );
             if let Some(h2mux_config) = h2mux {
                 h2mux_config.validate()?;
                 Box::new(H2MuxClientHandler::new(
@@ -405,10 +404,13 @@ pub(crate) fn create_with_hop_context(
             cipher,
             user_id,
             udp_enabled,
+            packet_encoding,
             h2mux,
         } => {
-            let handler: Box<dyn TcpClientHandler> =
-                Box::new(VmessTcpClientHandler::new(&cipher, &user_id, udp_enabled)?);
+            let handler: Box<dyn TcpClientHandler> = Box::new(
+                VmessTcpClientHandler::new(&cipher, &user_id, udp_enabled)?
+                    .with_packet_encoding(packet_encoding),
+            );
             if let Some(h2mux_config) = h2mux {
                 h2mux_config.validate()?;
                 Box::new(H2MuxClientHandler::new(

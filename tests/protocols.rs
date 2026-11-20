@@ -39,7 +39,9 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
         "shadowsocks",
         "ss2022",
         "vmess",
+        "vmess-xudp",
         "vless",
+        "vless-raw",
         "trojan",
         "anytls",
         "hysteria2",
@@ -82,12 +84,23 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
                 node["password"] = password.into();
                 json!({"type":"shadowsocks","cipher":cipher,"password":password})
             }
-            "vmess" | "vless" => {
+            "vmess" | "vless" | "vmess-xudp" | "vless-raw" => {
                 node["uuid"] = UUID.into();
-                let mut protocol = json!({"type":kind,"user_id":UUID});
-                if kind == "vmess" {
+                let protocol_name = if kind.starts_with("vmess") {
+                    "vmess"
+                } else {
+                    "vless"
+                };
+                node["type"] = protocol_name.into();
+                let mut protocol = json!({"type":protocol_name,"user_id":UUID});
+                if protocol_name == "vmess" {
                     node["security"] = "auto".into();
                     protocol["cipher"] = "any".into();
+                }
+                if kind == "vmess-xudp" {
+                    node["packet_encoding"] = "xudp".into();
+                } else if kind == "vless-raw" {
+                    node["packet_encoding"] = "".into();
                 }
                 protocol
             }

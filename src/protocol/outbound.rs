@@ -78,23 +78,29 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             f.default_only("alter_id", &[json!(0)])?;
             f.default_only("global_padding", &[json!(false)])?;
             f.default_only("authenticated_length", &[json!(false)])?;
-            packet_encoding(&mut f, false)?;
+            let packet_encoding = packet_encoding(&mut f, false)?;
             let cipher = f.string("security")?.unwrap_or("auto".into());
             let cipher = if cipher == "auto" {
                 "any".into()
             } else {
                 cipher
             };
-            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "udp_enabled":udp})
+            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "udp_enabled":udp, "packet_encoding":packet_encoding})
         }
         "vless" => {
-            packet_encoding(&mut f, true)?;
+            let packet_encoding = packet_encoding(&mut f, true)?;
             let flow = f.string("flow")?.unwrap_or_default();
             if !["", "xtls-rprx-vision"].contains(&flow.as_str()) {
                 return Err(error(format!("{path}.flow"), "unsupported VLESS flow"));
             }
             vision = flow == "xtls-rprx-vision";
-            json!({"type":"vless", "user_id":f.text("uuid")?, "udp_enabled":udp})
+            if vision && udp && packet_encoding.is_empty() {
+                return Err(error(
+                    format!("{path}.packet_encoding"),
+                    "VLESS Vision requires XUDP for UDP payloads",
+                ));
+            }
+            json!({"type":"vless", "user_id":f.text("uuid")?, "udp_enabled":udp, "packet_encoding":packet_encoding})
         }
         "trojan" => json!({"type":"trojan", "password":f.text("password")?, "udp_enabled":udp}),
         "anytls" => {
@@ -321,8 +327,21 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     f.finish()?;
     Ok(json!({"client_group":tag, "client_chains":[{"chain":[client]}]}))
 }
-fn packet_encoding(f: &mut Fields, xudp: bool) -> Result<()> {
-    f.default_only("packet_encoding", &[json!(if xudp { "xudp" } else { "" })])
+fn packet_encoding(f: &mut Fields, default_xudp: bool) -> Result<String> {
+    let encoding = f.string("packet_encoding")?.unwrap_or_else(|| {
+        if default_xudp {
+            "xudp".into()
+        } else {
+            String::new()
+        }
+    });
+    if !matches!(encoding.as_str(), "" | "xudp") {
+        return Err(error(
+            format!("{}.packet_encoding", f.path),
+            "supported UDP encodings are an empty string or xudp",
+        ));
+    }
+    Ok(encoding)
 }
 fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Value, bool)> {
     let mut f = Fields::new(value, &format!("{path}.transport"))?;
@@ -399,7 +418,9 @@ fn tls_config(
     }
     let mut out =
         json!({"type":"tls", "protocol":protocol, "verify":!f.boolean("insecure", false)?});
-    f.copy("server_name", &mut out, "sni_hostname");
+    if let Some(server_name) = f.string("server_name")?.filter(|name| !name.is_empty()) {
+        out["sni_hostname"] = server_name.into();
+    }
     let mut options = json!({});
     for key in [
         "disable_sni",

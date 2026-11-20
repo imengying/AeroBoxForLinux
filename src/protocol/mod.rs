@@ -2,8 +2,14 @@
 //! Unrecognized options return a field path, never a silent security downgrade.
 #![forbid(unsafe_code)]
 mod outbound;
+use anyhow::Context;
 pub use outbound::convert_outbound;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::{Mutex, OnceLock},
+};
 #[derive(Debug, thiserror::Error)]
 #[error("{path}: {message}")]
 pub struct Error {
@@ -150,8 +156,57 @@ pub fn validate(node: &Value) -> anyhow::Result<()> {
         .contains(&kind),
         "不支持的节点协议：{kind}"
     );
+    // State validation runs on ordinary settings saves too. Cache only pure
+    // static successes, keyed by every source field; never retain credential
+    // copies or let cached results replace startup's file/connection checks.
+    let key: [u8; 32] = Sha256::digest(serde_json::to_vec(node)?).into();
+    static CACHE: OnceLock<Mutex<ValidationCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(ValidationCache::default()));
+    if cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .known
+        .contains(&key)
+    {
+        return Ok(());
+    }
     let name = node["tag"].as_str().unwrap_or("未命名节点");
     let value = convert_outbound(node.clone(), &format!("节点「{name}」"))?;
-    let _: shoes::config::Config = serde_json::from_value(value)?;
+    let config: shoes::config::Config =
+        serde_json::from_value(value).with_context(|| format!("节点「{name}」参数无效"))?;
+    let shoes::config::Config::ClientConfigGroup(group) = config else {
+        anyhow::bail!("节点「{name}」未转换成客户端配置");
+    };
+    let mut members = group.client_chains.into_vec().into_iter();
+    let Some(shoes::config::ClientGroupMember::Client(shoes::config::ConfigSelection::Config(
+        client,
+    ))) = members.next()
+    else {
+        anyhow::bail!("节点「{name}」必须转换成一个独立客户端");
+    };
+    anyhow::ensure!(members.next().is_none(), "节点「{name}」包含多个客户端");
+    shoes::config::validate_client_config(client)
+        .with_context(|| format!("节点「{name}」参数无效"))?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key);
     Ok(())
+}
+
+#[derive(Default)]
+struct ValidationCache {
+    known: HashSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl ValidationCache {
+    fn insert(&mut self, key: [u8; 32]) {
+        if self.known.insert(key) {
+            self.order.push_back(key);
+            if self.order.len() > 2048 {
+                self.known.remove(&self.order.pop_front().unwrap());
+            }
+        }
+    }
 }

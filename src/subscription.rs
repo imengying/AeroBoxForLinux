@@ -219,8 +219,24 @@ pub fn uri(input: &str) -> Result<Value> {
         known_fields(
             &v,
             &[
-                "v", "ps", "add", "port", "id", "aid", "scy", "net", "type", "host", "path", "tls",
-                "sni", "alpn", "fp",
+                "v",
+                "ps",
+                "add",
+                "port",
+                "id",
+                "aid",
+                "scy",
+                "net",
+                "type",
+                "host",
+                "path",
+                "tls",
+                "sni",
+                "alpn",
+                "fp",
+                "packetEncoding",
+                "packet_encoding",
+                "packet-encoding",
             ],
             "VMess 链接",
         )?;
@@ -239,6 +255,15 @@ pub fn uri(input: &str) -> Result<Value> {
             "不支持的 VMess TLS 设置"
         );
         let mut node = json!({"type":"vmess","tag":v["ps"].as_str().unwrap_or("VMess"),"server":v["add"],"server_port":number(&v["port"]),"uuid":v["id"],"security":v["scy"].as_str().filter(|value| !value.is_empty()).unwrap_or("auto"),"alter_id":number(&v["aid"])});
+        for field in ["packetEncoding", "packet_encoding", "packet-encoding"] {
+            if let Some(encoding) = v.get(field) {
+                ensure!(
+                    node.get("packet_encoding").is_none(),
+                    "VMess 链接重复设置 UDP 编码"
+                );
+                node["packet_encoding"] = encoding.clone();
+            }
+        }
         if v["tls"] == "tls" {
             node["tls"] = json!({"enabled":true,"server_name":v["sni"].as_str().unwrap_or("")});
             if let Some(alpn) = v["alpn"].as_str().filter(|v| !v.is_empty()) {
@@ -358,6 +383,15 @@ pub fn uri(input: &str) -> Result<Value> {
         }
         "vless" => {
             node["uuid"] = json!(user);
+            for field in ["packetEncoding", "packet_encoding", "packet-encoding"] {
+                if query_keys.contains(field) {
+                    ensure!(
+                        node.get("packet_encoding").is_none(),
+                        "节点链接重复设置 UDP 编码"
+                    );
+                    node["packet_encoding"] = q(field).into();
+                }
+            }
             ensure!(
                 matches!(q("encryption").as_str(), "" | "none"),
                 "不支持的 VLESS encryption 参数"
@@ -614,6 +648,10 @@ fn clash(v: &Value) -> Result<Value> {
         ("authenticated-length", "authenticated_length"),
     ] {
         if let Some(value) = v.get(from) {
+            ensure!(
+                to != "packet_encoding" || n.get(to).is_none(),
+                "Clash 节点重复设置 UDP 编码"
+            );
             n[to] = value.clone()
         }
     }
@@ -905,15 +943,20 @@ mod protocol_tests {
 
     #[test]
     fn reality_does_not_invent_a_browser_fingerprint() {
-        let node = uri("vless://uuid@example.com:443?security=reality&pbk=k&sid=ab#R").unwrap();
-        assert_eq!(node["tls"]["reality"]["public_key"], "k");
+        let node = uri("vless://00000000-0000-4000-8000-000000000001@example.com:443?security=reality&pbk=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk&sid=ab#R").unwrap();
+        assert_eq!(
+            node["tls"]["reality"]["public_key"],
+            "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk"
+        );
+        crate::protocol::validate(&node).unwrap();
         // Import must not add a browser fingerprint that was not requested.
         assert!(node["tls"].get("utls").is_none());
     }
 
     #[test]
     fn vmess_and_vless_support_the_documented_transports() {
-        let h2 = uri("vless://uuid@example.com:443?type=h2&host=example.com&path=%2Fh2#V").unwrap();
+        let h2 = uri("vless://00000000-0000-4000-8000-000000000001@example.com:443?type=h2&host=example.com&path=%2Fh2#V").unwrap();
+        crate::protocol::validate(&h2).unwrap();
         assert_eq!(h2["transport"]["type"], "http");
         assert_eq!(h2["transport"]["path"], "/h2");
 

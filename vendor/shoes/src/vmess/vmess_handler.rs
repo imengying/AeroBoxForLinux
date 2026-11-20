@@ -718,6 +718,7 @@ pub struct VmessTcpClientHandler {
     instruction_key: [u8; 16],
     aead_encrypting_key: CipherEncryptingKey,
     udp_enabled: bool,
+    packet_encoding: crate::config::client::PacketEncoding,
 }
 
 impl std::fmt::Debug for VmessTcpClientHandler {
@@ -744,7 +745,16 @@ impl VmessTcpClientHandler {
             aead_encrypting_key,
             instruction_key,
             udp_enabled,
+            packet_encoding: Default::default(),
         })
+    }
+
+    pub(crate) fn with_packet_encoding(
+        mut self,
+        encoding: crate::config::client::PacketEncoding,
+    ) -> Self {
+        self.packet_encoding = encoding;
+        self
     }
 }
 
@@ -1019,23 +1029,22 @@ impl TcpClientHandler for VmessTcpClientHandler {
         client_stream: Box<dyn AsyncStream>,
         target: ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
-        // VMess single-target UDP mode: Send VMess header with COMMAND_UDP (2)
-        // and destination address. Uses VmessStream with is_udp=true.
+        // XUDP frames use a stream carrier; ordinary UDP uses VMess's
+        // datagram framing. Both retain the same authenticated handshake.
         self.setup_udp_stream_impl(client_stream, target.into_location())
             .await
     }
 }
 
 impl VmessTcpClientHandler {
-    /// Setup UDP stream for VMess single-target bidirectional UDP mode.
-    /// Sends VMess header with COMMAND_UDP (2) and the destination address.
+    /// Setup a single-target UDP association using native or XUDP framing.
     async fn setup_udp_stream_impl(
         &self,
         mut client_stream: Box<dyn AsyncStream>,
         remote_location: NetLocation,
     ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
-        // VMess single-target UDP mode: Send VMess header with COMMAND_UDP (2).
-        // Same as TCP setup but with command=2 and is_udp=true for VmessStream.
+        let xudp = self.packet_encoding.is_xudp();
+        let target = remote_location.clone();
 
         // AEAD allows 120 second delta from the current time.
         let time_secs = random_auth_id_timestamp()?;
@@ -1142,36 +1151,41 @@ impl VmessTcpClientHandler {
         // Reserved byte
         header_bytes[36] = 0;
 
-        // Command = UDP (2) instead of TCP (1)
-        header_bytes[37] = COMMAND_UDP;
+        // XUDP's target is encoded in its own frames, so COMMAND_MUX omits
+        // the destination from the encrypted request header entirely.
+        header_bytes[37] = if xudp { COMMAND_MUX } else { COMMAND_UDP };
 
         let (remote_address, remote_port) = remote_location.unwrap_components();
 
         header_bytes[38] = (remote_port >> 8) as u8;
         header_bytes[39] = (remote_port & 0xff) as u8;
 
-        let mut cursor = match remote_address {
-            Address::Ipv4(v4addr) => {
-                header_bytes[40] = 1;
-                header_bytes[41..45].copy_from_slice(&v4addr.octets());
-                45
-            }
-            Address::Ipv6(v6addr) => {
-                header_bytes[40] = 3;
-                header_bytes[41..57].copy_from_slice(&v6addr.octets());
-                57
-            }
-            Address::Hostname(hostname) => {
-                if hostname.len() > 255 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Hostname is too long: {hostname}"),
-                    ));
+        let mut cursor = if xudp {
+            38
+        } else {
+            match remote_address {
+                Address::Ipv4(v4addr) => {
+                    header_bytes[40] = 1;
+                    header_bytes[41..45].copy_from_slice(&v4addr.octets());
+                    45
                 }
-                header_bytes[40] = 2;
-                header_bytes[41] = hostname.len() as u8;
-                header_bytes[42..42 + hostname.len()].copy_from_slice(hostname.as_bytes());
-                42 + hostname.len()
+                Address::Ipv6(v6addr) => {
+                    header_bytes[40] = 3;
+                    header_bytes[41..57].copy_from_slice(&v6addr.octets());
+                    57
+                }
+                Address::Hostname(hostname) => {
+                    if hostname.len() > 255 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Hostname is too long: {hostname}"),
+                        ));
+                    }
+                    header_bytes[40] = 2;
+                    header_bytes[41] = hostname.len() as u8;
+                    header_bytes[42..42 + hostname.len()].copy_from_slice(hostname.as_bytes());
+                    42 + hostname.len()
+                }
             }
         };
 
@@ -1255,10 +1269,10 @@ impl VmessTcpClientHandler {
             response_authentication_v,
         };
 
-        // Create VmessStream with is_udp=true for bidirectional UDP
+        // XUDP has its own datagram boundaries on a normal VMess byte stream.
         let vmess_stream = VmessStream::new(
             client_stream,
-            true, // is_udp = true for bidirectional UDP mode
+            !xudp,
             data_keys,
             read_length_shake_reader,
             write_length_shake_reader,
@@ -1267,7 +1281,14 @@ impl VmessTcpClientHandler {
             Some(read_header_info),
         );
 
-        Ok(Box::new(vmess_stream))
+        if xudp {
+            Ok(Box::new(crate::xudp::client_stream::XudpClientStream::new(
+                Box::new(vmess_stream),
+                target,
+            )))
+        } else {
+            Ok(Box::new(vmess_stream))
+        }
     }
 }
 

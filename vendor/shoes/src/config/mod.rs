@@ -43,7 +43,7 @@ pub use resolved::*;
 pub use types::*;
 #[cfg(unix)]
 pub(crate) use validate::validate_rule_bootstrap;
-pub use validate::{ValidatedConfigs, create_server_configs};
+pub use validate::{ValidatedConfigs, create_server_configs, validate_client_config};
 pub(crate) use validate::{
     validate_resolved_client_vision_protocol, validate_resolved_server_vision,
 };
