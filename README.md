@@ -34,6 +34,8 @@ cd AeroBoxForLinux-linux-amd64
 
 协议名称相同不代表所有参数组合都已完成互通验证。节点导入、运行配置校验和本地协议测试覆盖各自的边界；具体服务端仍须用实际连接验证。
 
+VLESS 的 `xtls-rprx-vision` 使用 TLS 或 REALITY，不与 WebSocket、gRPC 等额外传输或多路复用叠加。节点声明 `network: "tcp"` 时禁止该节点转发 UDP，开启 UoT 或多路复用也不会覆盖此限制。
+
 ### 系统代理与虚拟网卡
 
 系统代理支持 GNOME 和 KDE Plasma；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。其他应用可填写本地 HTTP / SOCKS 入口，默认 `127.0.0.1:2080`。
@@ -88,7 +90,7 @@ make clean
 ```sh
 # 隔离的 user/network namespace 内验证 IPv4/IPv6 TUN 与停止后的网络清理
 cargo test --test tun managed_tun_routes_traffic_and_restores_network_in_namespace -- --ignored
-# 与独立 sing-box 测试服务端验证 TCP 和 UDP 协议互通
+# 与独立 sing-box 测试服务端验证协议及 WS/gRPC/HTTP/Vision/REALITY 传输互通
 AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
 # Naive HTTP/2、HTTP/3 的独立 Go 回显服务端
 (cd vendor/shoes/tests/fixtures/naive-peer && go build -o /tmp/aerobox-naive-peer .)

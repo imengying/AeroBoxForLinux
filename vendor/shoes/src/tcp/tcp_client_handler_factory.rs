@@ -69,7 +69,8 @@ pub(crate) fn create_with_hop_context(
     default_sni_hostname: Option<String>,
     resolver: Arc<dyn Resolver>,
 ) -> std::io::Result<Box<dyn TcpClientHandler>> {
-    Ok(match client_proxy_config {
+    let udp_enabled = client_proxy_config.udp_enabled();
+    let handler: Box<dyn TcpClientHandler> = match client_proxy_config {
         ResolvedClientProxyConfig::Hysteria2(_) | ResolvedClientProxyConfig::Tuic(_) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -125,7 +126,7 @@ pub(crate) fn create_with_hop_context(
                 settings,
             )?)
         }
-        ResolvedClientProxyConfig::Socks { username, password } => Box::new(
+        ResolvedClientProxyConfig::Socks { username, password, .. } => Box::new(
             SocksTcpClientHandler::new(create_auth_credentials(username, password)),
         ),
         ResolvedClientProxyConfig::Shadowsocks {
@@ -199,6 +200,7 @@ pub(crate) fn create_with_hop_context(
             password,
             shadowsocks,
             h2mux,
+            ..
         } => {
             let handler: Box<dyn TcpClientHandler> =
                 Box::new(TrojanTcpHandler::new_client(&password, &shadowsocks));
@@ -497,9 +499,15 @@ pub(crate) fn create_with_hop_context(
             username,
             password,
             padding,
+            ..
         } => Box::new(NaiveProxyTcpClientHandler::with_options(
             &username, &password, padding, settings,
         )?),
+    };
+    Ok(if udp_enabled {
+        handler
+    } else {
+        Box::new(super::tcp_only::TcpOnlyHandler(handler))
     })
 }
 

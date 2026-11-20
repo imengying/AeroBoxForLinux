@@ -47,7 +47,7 @@ impl Client {
             return Ok(None);
         }
         Ok(match &config.protocol {
-            ResolvedClientProxyConfig::Socks { username, password } => {
+            ResolvedClientProxyConfig::Socks { username, password, udp_enabled: true } => {
                 let auth = match (username, password) {
                     (None, None) => None,
                     (username, password) => Some((

@@ -495,6 +495,8 @@ pub enum ClientProxyConfig {
         username: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        udp_enabled: bool,
     },
     #[serde(
         alias = "ss",
@@ -537,6 +539,8 @@ pub enum ClientProxyConfig {
     },
     Trojan {
         password: String,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        udp_enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shadowsocks: Option<ShadowsocksConfig>,
         /// H2MUX multiplexing configuration
@@ -634,6 +638,8 @@ pub enum ClientProxyConfig {
     Naiveproxy {
         #[serde(default)]
         settings: crate::naiveproxy::options::Options,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        udp_enabled: bool,
         /// Username for Basic Auth
         username: String,
         /// Password for Basic Auth
@@ -780,6 +786,8 @@ pub enum ResolvedClientProxyConfig {
         username: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         password: Option<String>,
+        #[serde(skip_serializing_if = "is_true")]
+        udp_enabled: bool,
     },
     #[serde(serialize_with = "serialize_shadowsocks_client")]
     Shadowsocks {
@@ -806,6 +814,8 @@ pub enum ResolvedClientProxyConfig {
     },
     Trojan {
         password: String,
+        #[serde(skip_serializing_if = "is_true")]
+        udp_enabled: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         shadowsocks: Option<ShadowsocksConfig>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -867,6 +877,8 @@ pub enum ResolvedClientProxyConfig {
     Naiveproxy {
         #[serde(default)]
         settings: crate::naiveproxy::options::Options,
+        #[serde(skip_serializing_if = "is_true")]
+        udp_enabled: bool,
         username: String,
         password: String,
         #[serde(skip_serializing_if = "is_true")]
@@ -875,6 +887,38 @@ pub enum ResolvedClientProxyConfig {
 }
 
 impl ResolvedClientProxyConfig {
+    /// Administrative UDP policy is separate from protocol capability. An
+    /// encapsulation such as UoT or multiplexing must not enable a disabled
+    /// payload network just because its carrier uses TCP.
+    pub(crate) fn udp_enabled(&self) -> bool {
+        match self {
+            Self::Socks { udp_enabled, .. }
+            | Self::Shadowsocks { udp_enabled, .. }
+            | Self::Snell { udp_enabled, .. }
+            | Self::Vless { udp_enabled, .. }
+            | Self::Trojan { udp_enabled, .. }
+            | Self::Vmess { udp_enabled, .. }
+            | Self::Anytls { udp_enabled, .. }
+            | Self::Naiveproxy { udp_enabled, .. } => *udp_enabled,
+            Self::Tls(config) => config.protocol.udp_enabled(),
+            Self::Websocket(config) => config.protocol.udp_enabled(),
+            Self::StreamTransport(config) => config.protocol.udp_enabled(),
+            Self::Uot(config) => config.protocol.udp_enabled(),
+            Self::Multiplex(config) => config.protocol.udp_enabled(),
+            Self::Xhttp(config) => config.protocol.udp_enabled(),
+            Self::SudokuMask(config) => config.protocol.udp_enabled(),
+            Self::Reality { protocol, .. } | Self::ShadowTls { protocol, .. } => {
+                protocol.udp_enabled()
+            }
+            Self::Direct
+            | Self::Wireguard(_)
+            | Self::Hysteria2(_)
+            | Self::Tuic(_)
+            | Self::Http { .. }
+            | Self::PortForward => true,
+        }
+    }
+
     pub fn is_native_quic(&self) -> bool {
         matches!(self, Self::Hysteria2(_) | Self::Tuic(_))
             || matches!(self,Self::Naiveproxy{settings,..} if settings.quic)
@@ -933,6 +977,7 @@ mod tests {
             protocol: ClientProxyConfig::Socks {
                 username: Some("client_user".to_string()),
                 password: Some("client_pass".to_string()),
+                udp_enabled: true,
             },
             transport: Transport::Tcp,
             tcp_settings: None,

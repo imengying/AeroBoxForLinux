@@ -17,6 +17,7 @@ fn create_test_client_config() -> ClientConfig {
         protocol: ClientProxyConfig::Socks {
             username: Some("client_user".to_string()),
             password: Some("client_pass".to_string()),
+            udp_enabled: true,
         },
         transport: Transport::Tcp,
         tcp_settings: None,

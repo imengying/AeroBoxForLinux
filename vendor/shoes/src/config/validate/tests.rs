@@ -1517,6 +1517,7 @@ fn socks_proxy_config() -> ClientProxyConfig {
     ClientProxyConfig::Socks {
         username: None,
         password: None,
+        udp_enabled: true,
     }
 }
 
@@ -1952,6 +1953,7 @@ async fn test_dns_udp_with_proxy_chain_rejected() {
         protocol: ClientProxyConfig::Socks {
             username: None,
             password: None,
+            udp_enabled: true,
         },
         ..Default::default()
     };
@@ -2042,6 +2044,7 @@ async fn test_dns_h3_with_proxy_chain_rejected() {
         protocol: ClientProxyConfig::Socks {
             username: None,
             password: None,
+            udp_enabled: true,
         },
         ..Default::default()
     };

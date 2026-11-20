@@ -25,6 +25,7 @@ pub(crate) struct Client {
     location: NetLocation,
     authorization: String,
     padding: bool,
+    udp_enabled: bool,
     options: Options,
     next: AtomicUsize,
     slots: parking_lot::Mutex<Vec<Arc<Slot>>>,
@@ -35,9 +36,9 @@ impl std::fmt::Debug for Client {
 impl Client {
     pub fn new(config: ResolvedClientConfig) -> io::Result<Self> {
         crate::quic_client::validate_resolved(&config, true)?;
-        let ResolvedClientProxyConfig::Naiveproxy{settings:options, username, password, padding} = config.protocol else {return Err(io::Error::new(io::ErrorKind::InvalidInput,"expected Naive QUIC"));};
+        let ResolvedClientProxyConfig::Naiveproxy{settings:options, username, password, padding, udp_enabled} = config.protocol else {return Err(io::Error::new(io::ErrorKind::InvalidInput,"expected Naive QUIC"));};
         if !options.quic {return Err(io::Error::new(io::ErrorKind::InvalidInput,"expected Naive QUIC"));}
-        Ok(Self{location:config.address, authorization:format!("Basic {}",STANDARD.encode(format!("{username}:{password}"))), padding, options, next:AtomicUsize::new(0), slots:parking_lot::Mutex::new(Vec::new())})
+        Ok(Self{location:config.address, authorization:format!("Basic {}",STANDARD.encode(format!("{username}:{password}"))), padding, udp_enabled, options, next:AtomicUsize::new(0), slots:parking_lot::Mutex::new(Vec::new())})
     }
     async fn session(&self, route: Arc<dyn CarrierDialer>) -> io::Result<Arc<Session>> {
         let lane = self.next.fetch_add(1, Ordering::Relaxed) % self.options.insecure_concurrency;
@@ -78,10 +79,11 @@ impl Client {
 #[async_trait]
 impl ProxyConnector for Client {
     fn proxy_location(&self)->&NetLocation {&self.location}
-    fn supports_udp(&self)->bool {self.options.udp_over_tcp.is_some()}
+    fn supports_udp(&self)->bool {self.udp_enabled && self.options.udp_over_tcp.is_some()}
     fn needs_carrier_dialer(&self)->bool {true}
     async fn connect_tcp_with_dialer(&self, route:Arc<dyn CarrierDialer>, target:&ResolvedLocation)->io::Result<TcpClientSetupResult> {self.connect(route,target).await}
     async fn connect_udp_with_dialer(&self, route:Arc<dyn CarrierDialer>, target:ResolvedLocation)->io::Result<Box<dyn AsyncMessageStream>> {
+        if !self.udp_enabled {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"UDP is disabled for this node"));}
         let version=self.options.udp_over_tcp.ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"Naive UDP disabled"))?;
         let result=self.connect(route,&super::request::uot_target(version)).await?;
         crate::uot::client::frame(version,result,target).await

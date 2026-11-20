@@ -68,12 +68,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             ));
         }
     };
-    if !udp && matches!(kind.as_str(), "trojan" | "socks" | "naive") {
-        return Err(error(
-            format!("{path}.network"),
-            "per-node UDP disabling is not implemented for this protocol",
-        ));
-    }
+    let mut vision = false;
     let mut protocol = match kind.as_str() {
         "direct" => json!({"type":"direct"}),
         "shadowsocks" => {
@@ -98,9 +93,10 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             if !["", "xtls-rprx-vision"].contains(&flow.as_str()) {
                 return Err(error(format!("{path}.flow"), "unsupported VLESS flow"));
             }
-            json!({"type":"vless", "user_id":f.text("uuid")?, "vision":flow == "xtls-rprx-vision", "udp_enabled":udp})
+            vision = flow == "xtls-rprx-vision";
+            json!({"type":"vless", "user_id":f.text("uuid")?, "udp_enabled":udp})
         }
-        "trojan" => json!({"type":"trojan", "password":f.text("password")?}),
+        "trojan" => json!({"type":"trojan", "password":f.text("password")?, "udp_enabled":udp}),
         "anytls" => {
             let mut p = json!({"type":"anytls", "password":f.text("password")?, "udp_enabled":udp});
             for (src, dst) in [
@@ -182,13 +178,14 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                     settings[target] = byte_size(value, &format!("{path}.{key}"))?.into();
                 }
             }
-            json!({"type":"naiveproxy", "settings":settings, "username":f.string("username")?.unwrap_or_default(), "password":f.string("password")?.unwrap_or_default()})
+            json!({"type":"naiveproxy", "settings":settings, "username":f.string("username")?.unwrap_or_default(), "password":f.string("password")?.unwrap_or_default(), "udp_enabled":udp})
         }
         "socks" | "http" => {
             let mut p = json!({"type":kind});
             f.copy("username", &mut p, "username");
             f.copy("password", &mut p, "password");
             if kind == "socks" {
+                p["udp_enabled"] = udp.into();
                 f.default_only("version", &[json!("5")])?;
             } else {
                 let mut settings = json!({});
@@ -209,6 +206,9 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     if let Some(v) = f.take("multiplex") {
         let mut mux = Fields::new(v, &format!("{path}.multiplex"))?;
         if mux.boolean("enabled", false)? {
+            if vision {
+                return Err(error(&mux.path, "VLESS Vision does not support multiplex"));
+            }
             if !["shadowsocks", "vmess", "vless", "trojan"].contains(&kind.as_str()) {
                 return Err(error(
                     &mux.path,
@@ -237,6 +237,12 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         .and_then(|v| v.get("enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if vision && !has_tls {
+        return Err(error(
+            format!("{path}.flow"),
+            "VLESS Vision requires TLS or REALITY",
+        ));
+    }
     if ["anytls", "trojan", "naive", "tuic", "hysteria2"].contains(&kind.as_str()) && !has_tls {
         return Err(error(
             format!("{path}.tls.enabled"),
@@ -247,12 +253,18 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         || (kind == "naive" && protocol["settings"]["quic"] == true);
     let mut quic_transport = native_quic;
     if let Some(v) = f.take("transport") {
+        if vision {
+            return Err(error(
+                format!("{path}.transport"),
+                "VLESS Vision requires TCP without an additional stream transport",
+            ));
+        }
         let (wrapped, quic) = transport(v, protocol, has_tls, path)?;
         protocol = wrapped;
         quic_transport |= quic;
     }
     if let Some(tls) = tls {
-        let (wrapped, quic) = tls_config(tls, protocol, quic_transport, &kind, path)?;
+        let (wrapped, quic) = tls_config(tls, protocol, quic_transport, &kind, vision, path)?;
         protocol = wrapped;
         if let Some(quic) = quic {
             client["quic_settings"] = quic;
@@ -377,6 +389,7 @@ fn tls_config(
     protocol: Value,
     quic: bool,
     kind: &str,
+    vision: bool,
     path: &str,
 ) -> Result<(Value, Option<Value>)> {
     let mut f = Fields::new(value, &format!("{path}.tls"))?;
@@ -384,10 +397,6 @@ fn tls_config(
         f.finish()?;
         return Ok((protocol, None));
     }
-    let vision = protocol
-        .get("vision")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let mut out =
         json!({"type":"tls", "protocol":protocol, "verify":!f.boolean("insecure", false)?});
     f.copy("server_name", &mut out, "sni_hostname");

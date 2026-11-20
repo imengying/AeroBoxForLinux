@@ -69,9 +69,15 @@ fn client_protocol(
             resolve_hostname,
             http_version,
         },
-        ClientProxyConfig::Socks { username, password } => {
-            ResolvedClientProxyConfig::Socks { username, password }
-        }
+        ClientProxyConfig::Socks {
+            username,
+            password,
+            udp_enabled,
+        } => ResolvedClientProxyConfig::Socks {
+            username,
+            password,
+            udp_enabled,
+        },
         ClientProxyConfig::Shadowsocks {
             config,
             udp_enabled,
@@ -103,10 +109,12 @@ fn client_protocol(
         },
         ClientProxyConfig::Trojan {
             password,
+            udp_enabled,
             shadowsocks,
             h2mux,
         } => ResolvedClientProxyConfig::Trojan {
             password,
+            udp_enabled,
             shadowsocks,
             h2mux,
         },
@@ -217,11 +225,13 @@ fn client_protocol(
         },
         ClientProxyConfig::Naiveproxy {
             settings,
+            udp_enabled,
             username,
             password,
             padding,
         } => ResolvedClientProxyConfig::Naiveproxy {
             settings,
+            udp_enabled,
             username,
             password,
             padding,

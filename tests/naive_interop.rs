@@ -2,6 +2,8 @@
 //! Build vendor/shoes/tests/fixtures/naive-peer, then set AEROBOX_NAIVE_PEER and
 //! run `cargo test --test naive_interop -- --ignored --nocapture`.
 mod support;
+#[path = "support/udp_policy.rs"]
+mod udp_policy;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -155,46 +157,61 @@ fn service_naive_http2_and_http3_preserve_large_payloads_and_half_close() {
         let protocol = if quic { "HTTP/3" } else { "HTTP/2" };
         let port =
             u16::try_from(settings[if quic { "h3" } else { "h2" }].as_u64().unwrap()).unwrap();
-        let app = support::App::new();
-        app.service
-            .update(|state| {
-                // Every endpoint is local or handled by the peer. No public DNS
-                // or origin connection is needed for this interoperability case.
-                state.settings.direct_dns = "udp://127.0.0.1:9".into();
-                state.settings.remote_dns = "tcp://127.0.0.1:9".into();
-                Ok(())
-            })
-            .unwrap();
-        app.import(
-            protocol,
-            vec![json!({
+        for tcp_only in [false, true] {
+            let description = format!("{protocol}, tcp_only={tcp_only}");
+            let app = support::App::new();
+            app.service
+                .update(|state| {
+                    // Every endpoint is local or handled by the peer. No public DNS
+                    // or origin connection is needed for this interoperability case.
+                    state.settings.direct_dns = "udp://127.0.0.1:9".into();
+                    state.settings.remote_dns = "tcp://127.0.0.1:9".into();
+                    Ok(())
+                })
+                .unwrap();
+            let mut node = json!({
                 "type":"naive", "tag":protocol, "server":"127.0.0.1", "server_port":port,
                 "username":"user", "password":"pass", "quic":quic,
                 "tls":{"enabled":true,"server_name":"localhost","certificate":certificate}
-            })],
-        );
-        app.service
-            .start()
-            .unwrap_or_else(|error| panic!("{protocol} start: {error:#}"));
-        let inbound = app.service.snapshot().settings.mixed_port;
-        // A small stream and a larger stream exercise reuse and cross many
-        // HTTP flow-control windows; EOF must propagate after half-close.
-        for length in [4097, 512 * 1024] {
-            let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
-            let result =
-                socks_echo(inbound).and_then(|stream| exchange_and_half_close(stream, &payload));
-            assert_eq!(
-                result.unwrap_or_else(|error| panic!(
-                    "{protocol}, {length} bytes: {error}\nclient:\n{}\npeer:\n{}",
-                    app.service.logs(),
-                    peer.logs()
-                )),
-                payload,
-                "{protocol} truncated or changed the echoed payload"
-            );
+            });
+            if tcp_only {
+                node["network"] = "tcp".into();
+                // UoT availability must not override the selected payload network,
+                // including the HTTP/3 connector which bypasses the TCP factory.
+                node["udp_over_tcp"] = json!({"enabled":true,"version":2});
+            }
+            app.import(&description, vec![node]);
+            app.service
+                .start()
+                .unwrap_or_else(|error| panic!("{description} start: {error:#}"));
+            let inbound = app.service.snapshot().settings.mixed_port;
+            // A small stream and a larger stream exercise reuse and cross many
+            // HTTP flow-control windows; EOF must propagate after half-close.
+            for length in [4097, 512 * 1024] {
+                let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+                let result = socks_echo(inbound)
+                    .and_then(|stream| exchange_and_half_close(stream, &payload));
+                assert_eq!(
+                    result.unwrap_or_else(|error| panic!(
+                        "{description}, {length} bytes: {error}\nclient:\n{}\npeer:\n{}",
+                        app.service.logs(),
+                        peer.logs()
+                    )),
+                    payload,
+                    "{description} truncated or changed the echoed payload"
+                );
+                if tcp_only {
+                    udp_policy::assert_udp_blocked(inbound).unwrap_or_else(|error| {
+                        panic!(
+                            "{description} UDP rejection: {error}\n{}",
+                            app.service.logs()
+                        )
+                    });
+                }
+            }
+            app.service.stop().unwrap();
+            let _available = TcpListener::bind(("127.0.0.1", inbound)).unwrap();
+            eprintln!("independent Naive {description}: Service TCP payload and half-close passed");
         }
-        app.service.stop().unwrap();
-        let _available = TcpListener::bind(("127.0.0.1", inbound)).unwrap();
-        eprintln!("independent Naive {protocol}: Service TCP payload and half-close passed");
     }
 }

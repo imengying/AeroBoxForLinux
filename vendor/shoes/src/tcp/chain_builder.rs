@@ -266,6 +266,7 @@ mod tests {
             protocol: ResolvedClientProxyConfig::Socks {
                 username: None,
                 password: None,
+                udp_enabled: true,
             },
             ..Default::default()
         }

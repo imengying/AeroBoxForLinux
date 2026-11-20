@@ -7,5 +7,6 @@ pub mod socket_connector;
 pub mod socket_connector_impl;
 pub mod tcp_client_handler_factory;
 pub mod tcp_handler;
+mod tcp_only;
 pub mod tcp_server;
 pub mod tcp_server_handler_factory;

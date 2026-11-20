@@ -195,8 +195,6 @@ fn invalid_or_unsupported_nodes_cannot_replace_a_saved_subscription() {
     for invalid in [
         json!({"type":"socks","tag":"bad","server":"127.0.0.1","server_port":"invalid"}),
         json!({"type":"socks","tag":"bad","server":"127.0.0.1","server_port":1080,"unknown_security_option":true}),
-        json!({"type":"trojan","tag":"bad","server":"127.0.0.1","server_port":443,"password":"secret","network":"tcp","tls":{"enabled":true}}),
-        json!({"type":"socks","tag":"bad","server":"127.0.0.1","server_port":1080,"network":"tcp"}),
         json!({"type":"snell","tag":"bad","server":"127.0.0.1","server_port":443,"psk":"secret"}),
         json!({"type":"shadowtls","tag":"bad","server":"127.0.0.1","server_port":443,"password":"secret"}),
     ] {
@@ -206,6 +204,48 @@ fn invalid_or_unsupported_nodes_cannot_replace_a_saved_subscription() {
                 .is_err()
         );
         assert_eq!(app.service.snapshot().subscriptions[0], original);
+    }
+}
+
+#[test]
+fn vless_vision_validates_over_tls_and_reality_and_rejects_incompatible_transports() {
+    let _serial = support::runtime_lock();
+    let app = App::new();
+    let base = json!({
+        "type":"vless", "tag":"Vision", "server":"127.0.0.1", "server_port":443,
+        "uuid":"00000000-0000-4000-8000-000000000001", "flow":"xtls-rprx-vision",
+        "tls":{"enabled":true,"server_name":"localhost"}
+    });
+    let id = app.import("Vision", vec![base.clone()]);
+    app.service.check_current().unwrap();
+    let original = app.service.snapshot().subscriptions[0].clone();
+    let mut reality = base.clone();
+    reality["tls"]["reality"] = json!({
+        "enabled":true,
+        "public_key":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+        "short_id":"0123456789abcdef"
+    });
+    app.service
+        .save_subscription_nodes(&original, vec![reality])
+        .unwrap();
+    app.service.check_current().unwrap();
+    assert_eq!(app.service.snapshot().settings.active_subscription, id);
+
+    for patch in [
+        json!({"tls":{"enabled":false}}),
+        json!({"transport":{"type":"ws","path":"/ws"}}),
+        json!({"transport":{"type":"quic"}}),
+        json!({"multiplex":{"enabled":true}}),
+    ] {
+        let mut invalid = base.clone();
+        invalid
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        assert!(
+            subscription::parse(&json!({"outbounds":[invalid]}).to_string()).is_err(),
+            "Vision with {patch} must fail during import"
+        );
     }
 }
 
