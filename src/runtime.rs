@@ -159,10 +159,23 @@ pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
     let mut dns_rules = vec![];
     if !settings.ipv6 {
         rules.push(json!({"conditions":{"ip_cidr":["::/0"]},"no_resolve":true,"action":"block"}));
+        // IPv4-only applies to intercepted DNS too: return NODATA for AAAA,
+        // so applications do not first attempt an unreachable IPv6 address.
+        dns_rules.push(json!({"conditions":{"any_destination":true},"query_types":[28],"rcode":0}));
     }
     if settings.routing_mode == "rule" {
         let mut enabled: Vec<_> = state.rulesets.iter().filter(|r| r.enabled).collect();
-        enabled.sort_by_key(|r| r.action != "reject");
+        enabled.sort_by_key(|r| {
+            if r.action == "reject" {
+                0
+            } else if r.id == model::BUILTIN_CHINA_IP_ID {
+                3
+            } else if r.id == model::BUILTIN_DOMESTIC_ID {
+                2
+            } else {
+                1
+            }
+        });
         for rule in enabled {
             let path = rule_file(rule, dir)?;
             let mut source =
@@ -180,13 +193,8 @@ pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
                 route["client_chain"] = rule.action.clone().into();
             }
             rules.push(route);
-            if matches!(
-                rule.id.as_str(),
-                model::BUILTIN_DOMESTIC_ID | model::BUILTIN_ADS_ID
-            ) {
-                dns_rules.push(if rule.action == "reject" { json!({"conditions":conditions,"rcode":3}) }
-                    else { json!({"conditions":conditions,"server":if rule.action == "direct" {"dns-direct"} else {"dns-remote"}}) });
-            }
+            dns_rules.push(if rule.action == "reject" { json!({"conditions":conditions,"domain_only":true,"rcode":3}) }
+                else { json!({"conditions":conditions,"domain_only":true,"server":if rule.action == "direct" {"dns-direct"} else {"dns-remote"}}) });
         }
         if settings.bypass_lan {
             // Local destinations take precedence over downloaded country rules.

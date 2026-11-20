@@ -281,6 +281,9 @@ pub struct DnsRoutingConfig {
 pub struct DnsRoutingRule {
     #[serde(deserialize_with = "deserialize_dns_conditions")]
     pub conditions: crate::rules::Expression,
+    /// Reuse a routing rule set only where the query name alone proves a match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub domain_only: bool,
     #[serde(default)]
     pub query_types: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,9 +342,10 @@ impl DnsRoutingConfig {
                 .compiled
                 .as_ref()
                 .ok_or_else(|| crate::rules::invalid("uncompiled DNS rule"))?;
-            if predicate.dependencies.ip
-                || predicate.dependencies.network
-                || predicate.dependencies.protocol
+            if !rule.domain_only
+                && (predicate.dependencies.ip
+                    || predicate.dependencies.network
+                    || predicate.dependencies.protocol)
             {
                 return Err(crate::rules::invalid(
                     "DNS rules must match query names, not destination IPs or transport protocols",

@@ -371,13 +371,24 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
 /// Android duration strings use Go's unit notation. Preserve fractions and
 /// compound values exactly; socket deadlines have millisecond precision.
 fn duration_millis(value: Value, path: &str) -> Result<u32> {
+    parse_duration_millis(value, path, false)
+}
+
+fn parse_duration_millis(value: Value, path: &str, allow_zero: bool) -> Result<u32> {
     let invalid = || {
         error(
             path,
-            "expected a positive duration in whole milliseconds (for example 250ms, 1.5s, 1m30s)",
+            if allow_zero {
+                "expected a non-negative duration in whole milliseconds (for example 0s, 250ms, 1.5s)"
+            } else {
+                "expected a positive duration in whole milliseconds (for example 250ms, 1.5s, 1m30s)"
+            },
         )
     };
     let text = value.as_str().ok_or_else(invalid)?;
+    if allow_zero && matches!(text, "0" | "+0") {
+        return Ok(0);
+    }
     let mut remaining = text.strip_prefix('+').unwrap_or(text);
     let mut nanos = 0u128;
     while !remaining.is_empty() {
@@ -431,7 +442,9 @@ fn duration_millis(value: Value, path: &str) -> Result<u32> {
             .ok_or_else(invalid)?;
         remaining = &rest[unit.len()..];
     }
-    if nanos == 0 || !nanos.is_multiple_of(1_000_000) {
+    if (nanos == 0 && (!allow_zero || text.is_empty() || text == "+"))
+        || !nanos.is_multiple_of(1_000_000)
+    {
         return Err(invalid());
     }
     u32::try_from(nanos / 1_000_000)
@@ -509,7 +522,22 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
                 _ => return Err(error(format!("{}.host", f.path), "requires one host")),
             };
         }
-        f.default_only("permit_without_stream", &[json!(false)])?;
+        if out["kind"] == "http2" || out["kind"] == "grpc" {
+            for (key, target) in [
+                ("idle_timeout", "idle_timeout_ms"),
+                ("ping_timeout", "ping_timeout_ms"),
+            ] {
+                if let Some(value) = f.take(key) {
+                    out[target] =
+                        parse_duration_millis(value, &format!("{}.{key}", f.path), true)?.into();
+                }
+            }
+        }
+        if kind == "grpc" {
+            out["permit_without_stream"] = f.boolean("permit_without_stream", false)?.into();
+        } else {
+            f.default_only("permit_without_stream", &[json!(false)])?;
+        }
     }
     f.finish()?;
     Ok((out, false))

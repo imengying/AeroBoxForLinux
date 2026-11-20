@@ -40,11 +40,18 @@ impl RoutingResolver {
         kind: RecordType,
         intercepted: bool,
     ) -> Option<&crate::config::dns::DnsRoutingRule> {
+        // DNS queries may randomize letter case; rule sources match canonical
+        // names. Keep the original question intact when returning the reply.
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
         self.config.rules.iter().find(|rule| {
             (intercepted || !rule.fake_ip)
                 && (rule.query_types.is_empty() || rule.query_types.contains(&u16::from(kind)))
                 && rule.compiled.as_ref().is_some_and(|p| {
-                    p.evaluate(Some(name.trim_end_matches('.')), None, 53) == Outcome::Match
+                    (if rule.domain_only {
+                        p.evaluate_query_name(&name)
+                    } else {
+                        p.evaluate(Some(&name), None, 53)
+                    }) == Outcome::Match
                 })
         })
     }

@@ -8,6 +8,7 @@ use bytes::Bytes;
 use http::Request;
 use log::debug;
 use tokio::sync::{Notify, oneshot};
+use tokio::time::Instant;
 
 use crate::address::{Address, NetLocation};
 use crate::async_stream::AsyncStream;
@@ -15,10 +16,23 @@ use crate::async_stream::AsyncStream;
 use super::stream::H2MultiStream;
 use super::transport::TransportErrors;
 
+#[cfg(test)]
+#[path = "keepalive_tests.rs"]
+mod keepalive_tests;
+
 #[derive(Clone)]
 pub struct H2ClientSession {
     send_request: h2::client::SendRequest<Bytes>,
     driver_handle: Arc<DriverHandle>,
+}
+
+/// V2Ray HTTP/2 transport health checks. A zero/absent idle timeout disables
+/// checks; unlike pooled CONNECT carriers, these checks close active tunnels.
+#[derive(Clone, Copy)]
+pub(crate) struct KeepAlive {
+    pub idle_timeout: Option<Duration>,
+    pub ping_timeout: Duration,
+    pub permit_without_stream: bool,
 }
 
 struct DriverHandle {
@@ -33,6 +47,7 @@ struct DriverHandle {
 struct ActiveStreams {
     count: AtomicUsize,
     idle: Notify,
+    changed: Notify,
 }
 
 impl ActiveStreams {
@@ -51,6 +66,7 @@ impl Drop for StreamReservation {
         if active.count.fetch_sub(1, Ordering::SeqCst) == 1 {
             active.idle.notify_one();
         }
+        active.changed.notify_one();
     }
 }
 
@@ -79,9 +95,30 @@ impl From<OpenError> for io::Error {
 
 impl H2ClientSession {
     pub async fn new(stream: Box<dyn AsyncStream>) -> io::Result<Self> {
+        Self::create(stream, None).await
+    }
+
+    pub(crate) async fn with_keepalive(
+        stream: Box<dyn AsyncStream>,
+        keepalive: KeepAlive,
+    ) -> io::Result<Self> {
+        Self::create(stream, Some(keepalive)).await
+    }
+
+    async fn create(
+        stream: Box<dyn AsyncStream>,
+        keepalive: Option<KeepAlive>,
+    ) -> io::Result<Self> {
         const MAX_FRAME_SIZE: u32 = 16 * 1024;
 
         let errors = TransportErrors::default();
+        let received = Arc::new(parking_lot::Mutex::new(Instant::now()));
+        let stream = errors.wrap(stream);
+        let stream = if keepalive.is_some() {
+            stream.observe_receive(received.clone())
+        } else {
+            stream
+        };
         let (send_request, mut connection) = h2::client::Builder::new()
             .initial_window_size(super::STREAM_WINDOW)
             .initial_connection_window_size(super::CONNECTION_WINDOW)
@@ -89,7 +126,7 @@ impl H2ClientSession {
             .max_frame_size(MAX_FRAME_SIZE)
             .max_header_list_size(16 * 1024)
             .max_concurrent_streams(1024)
-            .handshake(errors.wrap(stream))
+            .handshake(stream)
             .await
             .map_err(|e| errors.map_with("H2 client handshake failed", e))?;
         errors.start_driver();
@@ -100,13 +137,27 @@ impl H2ClientSession {
         let driver_retired = retired.clone();
         let active = Arc::new(ActiveStreams::default());
         let driver_active = active.clone();
+        let driver_errors = errors.clone();
         let abort_handle = crate::network_tasks::spawn(async move {
+            let health_check = async {
+                if let Some(options) = keepalive {
+                    configured_keep_alive(ping, options, &received, &driver_active).await
+                } else {
+                    keep_alive(ping).await
+                }
+            };
             let completed = tokio::select! {
                 result = &mut connection => Some(result),
                 _ = &mut drain_rx => None,
-                result = keep_alive(ping) => {
+                result = health_check => {
                     debug!("HTTP/2 client session retired after keepalive failure: {result:?}");
                     driver_retired.store(true, Ordering::SeqCst);
+                    if keepalive.is_some() {
+                        if let Err(error) = result { driver_errors.fail(error); }
+                        // Drop the connection immediately: a configured PING
+                        // deadline applies to existing tunnels as well as reuse.
+                        return;
+                    }
                     // A delayed PONG stops reuse, not already-established tunnels.
                     tokio::select! {
                         result = &mut connection => Some(result),
@@ -173,6 +224,7 @@ impl H2ClientSession {
                 Err(current) => active = current,
             }
         }
+        self.driver_handle.active.changed.notify_one();
         Some(StreamReservation(self.clone()))
     }
 
@@ -181,6 +233,7 @@ impl H2ClientSession {
             .active
             .count
             .fetch_add(1, Ordering::SeqCst);
+        self.driver_handle.active.changed.notify_one();
         StreamReservation(self.clone())
     }
 
@@ -207,14 +260,62 @@ async fn keep_alive(mut ping: h2::PingPong) -> io::Result<()> {
     }
 }
 
-impl StreamReservation {
-    pub(crate) async fn open_late(mut self, request: Request<()>, grpc: bool) -> io::Result<crate::stream_transport::LateH2Stream> {
-        std::future::poll_fn(|cx| self.0.send_request.poll_ready(cx)).await.map_err(io::Error::other)?;
-        if self.0.driver_handle.retired.load(Ordering::SeqCst) { return Err(io::ErrorKind::NotConnected.into()); }
-        let (response, send) = self.0.send_request.send_request(request, false).map_err(io::Error::other)?;
-        Ok(crate::stream_transport::LateH2Stream::new(response, send, self, grpc))
+async fn configured_keep_alive(
+    mut ping: h2::PingPong,
+    options: KeepAlive,
+    received: &parking_lot::Mutex<Instant>,
+    active: &ActiveStreams,
+) -> io::Result<()> {
+    let Some(idle_timeout) = options.idle_timeout.filter(|timeout| !timeout.is_zero()) else {
+        return std::future::pending().await;
+    };
+    loop {
+        if !options.permit_without_stream && active.count.load(Ordering::SeqCst) == 0 {
+            active.changed.notified().await;
+            continue;
+        }
+        let idle_at = *received.lock() + idle_timeout;
+        tokio::select! {
+            _ = tokio::time::sleep_until(idle_at) => {},
+            _ = active.changed.notified() => continue,
+        }
+        // Incoming DATA, SETTINGS and PONGs all postpone the health check.
+        if *received.lock() + idle_timeout > Instant::now()
+            || (!options.permit_without_stream && active.count.load(Ordering::SeqCst) == 0)
+        {
+            continue;
+        }
+        tokio::time::timeout(options.ping_timeout, ping.ping(h2::Ping::opaque()))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "HTTP/2 keepalive PING timed out")
+            })?
+            .map_err(io::Error::other)?;
     }
-    pub(super) fn errors(&self) -> &TransportErrors {
+}
+
+impl StreamReservation {
+    pub(crate) async fn open_late(
+        mut self,
+        request: Request<()>,
+        grpc: bool,
+    ) -> io::Result<crate::stream_transport::LateH2Stream> {
+        std::future::poll_fn(|cx| self.0.send_request.poll_ready(cx))
+            .await
+            .map_err(io::Error::other)?;
+        if self.0.driver_handle.retired.load(Ordering::SeqCst) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        let (response, send) = self
+            .0
+            .send_request
+            .send_request(request, false)
+            .map_err(io::Error::other)?;
+        Ok(crate::stream_transport::LateH2Stream::new(
+            response, send, self, grpc,
+        ))
+    }
+    pub(crate) fn errors(&self) -> &TransportErrors {
         &self.0.driver_handle.errors
     }
 

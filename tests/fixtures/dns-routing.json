@@ -1,0 +1,111 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain": [
+        "direct.example.test"
+      ]
+    },
+    {
+      "domain_suffix": [
+        "port.example.test"
+      ],
+      "port": [
+        443
+      ]
+    },
+    {
+      "type": "logical",
+      "mode": "or",
+      "rules": [
+        {
+          "domain_suffix": [
+            "either.example.test"
+          ]
+        },
+        {
+          "ip_cidr": [
+            "192.0.2.0/24"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "logical",
+      "mode": "and",
+      "rules": [
+        {
+          "domain_suffix": [
+            "both.example.test"
+          ]
+        },
+        {
+          "ip_cidr": [
+            "192.0.2.0/24"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "logical",
+      "mode": "and",
+      "rules": [
+        {
+          "domain_suffix": [
+            "negative.example.test"
+          ]
+        },
+        {
+          "ip_cidr": [
+            "192.0.2.0/24"
+          ],
+          "invert": true
+        }
+      ]
+    },
+    {
+      "type": "logical",
+      "mode": "and",
+      "rules": [
+        {
+          "domain_suffix": [
+            "except.example.test"
+          ]
+        },
+        {
+          "domain": [
+            "blocked.except.example.test"
+          ],
+          "invert": true
+        }
+      ]
+    },
+    {
+      "type": "logical",
+      "mode": "and",
+      "rules": [
+        {
+          "domain": [
+            "not-port.example.test"
+          ]
+        },
+        {
+          "port": [
+            443
+          ],
+          "invert": true
+        }
+      ]
+    },
+    {
+      "domain_keyword": [
+        "special-keyword"
+      ]
+    },
+    {
+      "domain_regex": [
+        "^regex[0-9]+\\.example\\.test$"
+      ]
+    }
+  ]
+}

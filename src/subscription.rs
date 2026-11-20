@@ -16,6 +16,32 @@ const DIAL_FIELDS: [&str; 5] = [
     "tcp_keep_alive_interval",
 ];
 
+const TRANSPORT_KEEPALIVE_FIELDS: [(&str, &str); 8] = [
+    ("idle_timeout", "idle_timeout"),
+    ("idle-timeout", "idle_timeout"),
+    ("ping_timeout", "ping_timeout"),
+    ("ping-timeout", "ping_timeout"),
+    ("permit_without_stream", "permit_without_stream"),
+    ("permit-without-stream", "permit_without_stream"),
+    ("grpc_permit_without_stream", "permit_without_stream"),
+    ("grpc-permit-without-stream", "permit_without_stream"),
+];
+
+fn transport_keepalive(source: &Value, transport: &mut Value, context: &str) -> Result<()> {
+    for (alias, field) in TRANSPORT_KEEPALIVE_FIELDS {
+        if let Some(value) = source.get(alias) {
+            ensure!(
+                transport["type"] == "grpc"
+                    || (transport["type"] == "http" && field != "permit_without_stream"),
+                "{context} 的 {alias} 需要 HTTP/2 或 gRPC 传输（permit_without_stream 仅限 gRPC）"
+            );
+            ensure!(transport.get(field).is_none(), "{context} 重复设置 {field}");
+            transport[field] = value.clone();
+        }
+    }
+    Ok(())
+}
+
 fn decode(text: &str) -> Result<String> {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     for e in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
@@ -245,6 +271,7 @@ pub fn uri(input: &str) -> Result<Value> {
             "packet-encoding",
         ];
         fields.extend(DIAL_FIELDS);
+        fields.extend(TRANSPORT_KEEPALIVE_FIELDS.iter().map(|(alias, _)| *alias));
         known_fields(&v, &fields, "VMess 链接")?;
         ensure!(
             v.get("v").is_none_or(|v| v == "2" || v == 2),
@@ -317,6 +344,12 @@ pub fn uri(input: &str) -> Result<Value> {
             }
             other => bail!("不支持 VMess 传输: {other}"),
         };
+        if TRANSPORT_KEEPALIVE_FIELDS
+            .iter()
+            .any(|(alias, _)| v.get(alias).is_some())
+        {
+            transport_keepalive(&v, &mut node["transport"], "VMess 链接")?;
+        }
         validate_server(&node)?;
         return Ok(node);
     }
@@ -508,6 +541,19 @@ pub fn uri(input: &str) -> Result<Value> {
             };
         }
     }
+    let mut keepalive = json!({});
+    for (alias, field) in TRANSPORT_KEEPALIVE_FIELDS {
+        if query_keys.contains(alias) {
+            keepalive[alias] = if field == "permit_without_stream" {
+                query_bool(&q(alias), alias)?.into()
+            } else {
+                q(alias).into()
+            };
+        }
+    }
+    if !keepalive.as_object().unwrap().is_empty() {
+        transport_keepalive(&keepalive, &mut node["transport"], "节点链接")?;
+    }
     for key in query_keys {
         ensure!(
             consumed.borrow().contains(&key),
@@ -638,7 +684,11 @@ fn clash(v: &Value) -> Result<Value> {
     }
     match v["network"].as_str().unwrap_or("") {
         "ws" => fields.push("ws-opts"),
-        "grpc" => fields.push("grpc-opts"),
+        "grpc" => fields.extend([
+            "grpc-opts",
+            "grpc_permit_without_stream",
+            "grpc-permit-without-stream",
+        ]),
         "http" | "httpupgrade" => fields.push("http-opts"),
         "h2" => fields.push("h2-opts"),
         _ => {}
@@ -761,9 +811,18 @@ fn clash(v: &Value) -> Result<Value> {
             }
         }
         "grpc" => {
-            known_fields(&v["grpc-opts"], &["grpc-service-name"], "Clash grpc-opts")?;
-            n["transport"] =
-                json!({"type":"grpc","service_name":v["grpc-opts"]["grpc-service-name"]})
+            let mut fields = vec!["grpc-service-name"];
+            fields.extend(TRANSPORT_KEEPALIVE_FIELDS.iter().map(|(alias, _)| *alias));
+            if let Some(options) = v.get("grpc-opts") {
+                known_fields(options, &fields, "Clash grpc-opts")?;
+            }
+            let mut transport = json!({"type":"grpc"});
+            if let Some(service_name) = v["grpc-opts"].get("grpc-service-name") {
+                transport["service_name"] = service_name.clone();
+            }
+            transport_keepalive(&v["grpc-opts"], &mut transport, "Clash grpc-opts")?;
+            transport_keepalive(v, &mut transport, "Clash 节点")?;
+            n["transport"] = transport;
         }
         network @ ("http" | "h2") => {
             let mut transport = json!({"type":"http"});
@@ -775,7 +834,16 @@ fn clash(v: &Value) -> Result<Value> {
             if !options.is_null() {
                 known_fields(
                     options,
-                    &["path", "method", "headers", "host"],
+                    &[
+                        "path",
+                        "method",
+                        "headers",
+                        "host",
+                        "idle_timeout",
+                        "idle-timeout",
+                        "ping_timeout",
+                        "ping-timeout",
+                    ],
                     "Clash HTTP 传输",
                 )?;
             }
@@ -814,6 +882,7 @@ fn clash(v: &Value) -> Result<Value> {
             if let Some(host) = options.get("host") {
                 transport["host"] = host.clone();
             }
+            transport_keepalive(options, &mut transport, "Clash HTTP 传输")?;
             n["transport"] = transport
         }
         "httpupgrade" => {

@@ -40,6 +40,8 @@ VMess / VLESS 支持普通 UDP 与 XUDP 编码；VLESS 默认 XUDP，VMess 默�
 
 节点支持 `connect_timeout`，例如 `250ms`、`1.5s`、`1m30s`，统一限制节点 DNS 解析和连接尝试的耗时。TCP 节点还支持 `disable_tcp_keep_alive`、`tcp_keep_alive` 和 `tcp_keep_alive_interval`，保活时间使用 1–32767 秒的整数时长；这些 TCP 设置不适用于 QUIC。
 
+gRPC / HTTP2 传输支持 `idle_timeout` 和 `ping_timeout`；gRPC 还支持 `permit_without_stream`。空闲达到设定时间后发送 PING，有接收活动时推迟检查，未在期限内收到确认则关闭失效连接。`idle_timeout` 缺省或为零时关闭检查，`ping_timeout` 缺省或为零时使用 15 秒。
+
 ### 系统代理与虚拟网卡
 
 系统代理支持 GNOME 和 KDE Plasma；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。其他应用可填写本地 HTTP / SOCKS 入口，默认 `127.0.0.1:2080`。
@@ -53,6 +55,8 @@ TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络�
 直连 DNS 和远程 DNS 支持 `udp://`、`tcp://`、`tls://`、`https://` 和 `quic://`。例如 `udp://223.5.5.5`、`tls://dns.alidns.com`、`https://cloudflare-dns.com/dns-query`。HTTPS DNS 地址不能包含账号、查询参数或片段。
 
 节点域名使用直连 DNS 解析；规则及全局模式的远程 DNS 经所选节点查询，直连模式使用直连 DNS。直连 DNS 自身使用域名时通过系统解析器引导。IPv6、DNS 缓存、嗅探、局域网访问和私网绕行可在设置中调整。
+
+自定义域名规则同时控制 DNS 分流和拦截，并优先于内置的大陆分流规则；拦截规则仍优先。带 IP、端口等条件的规则仅在域名本身足以确定匹配时影响 DNS，其余条件在连接时判断。关闭 IPv6 后，接管的 AAAA 查询返回空结果，不查询上游。
 
 内置与 AeroBoxForAndroid 同来源的中国大陆 IP、中国大陆域名、广告拦截规则，安装包附带初始 SRS 数据，运行时在线更新并缓存，默认每 1440 分钟更新。中国大陆规则默认直连，广告拦截默认关闭。规则支持直连、代理和拦截，以及域名、域名后缀、域名关键字、IP 网段和端口条件；全局与直连模式忽略普通分流和广告规则，IPv6 等网络限制仍生效。
 

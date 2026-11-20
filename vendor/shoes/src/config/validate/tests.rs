@@ -285,7 +285,7 @@ fn sudoku_mask_preserves_sni_and_existing_immediate_child_constraints() {
     let mut reality: ClientProxyConfig = serde_json::from_value(mask(json!({"type":"reality",
         "public_key":"CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","protocol":{"type":"socks"}})))
     .unwrap();
-    validate_client_proxy_config(&mut reality, &HashMap::new(), Some("origin.example")).unwrap();
+    validate_client_proxy_config(&mut reality, ClientPems::Prepared(&HashMap::new()), Some("origin.example")).unwrap();
     let resolver = std::sync::Arc::new(crate::resolver::NativeResolver::new());
     crate::tcp::tcp_client_handler_factory::create_tcp_client_handler(
         crate::config::test_support::Inline::inline(reality),
@@ -555,7 +555,7 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         "decryption": format!("mlkem768x25519plus.native.600s.{KEY}"), "vision": true,
     });
     let mut client_config = serde_json::from_value(client.clone()).unwrap();
-    validate_client_proxy_config(&mut client_config, &HashMap::new(), None).unwrap();
+    validate_client_proxy_config(&mut client_config, ClientPems::Prepared(&HashMap::new()), None).unwrap();
     for outer in ["TLS", "REALITY"] {
         let error = validate_client_vision_protocol(true, &client_config, outer).unwrap_err();
         assert!(
@@ -594,7 +594,7 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         let mut value_config = client.clone();
         value_config[key] = value;
         let mut config = serde_json::from_value(value_config).unwrap();
-        let error = validate_client_proxy_config(&mut config, &HashMap::new(), None).unwrap_err();
+        let error = validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None).unwrap_err();
         assert!(!error.to_string().contains("do-not-log"));
         assert!(!format!("{config:?}").contains("do-not-log"));
     }
@@ -614,7 +614,7 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         config["encryption"] = json!(disabled);
         config["vision"] = json!(false);
         let mut config = serde_json::from_value(config).unwrap();
-        validate_client_proxy_config(&mut config, &HashMap::new(), None).unwrap();
+        validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None).unwrap();
         validate_client_vision_protocol(true, &config, "TLS").unwrap();
         let mut config = server.clone();
         config["decryption"] = json!(disabled);
@@ -707,7 +707,7 @@ fn shadowsocks_identity_keys_validate_programmatic_clients_and_reject_servers() 
                 udp_enabled: true,
             };
             assert_eq!(
-                validate_client_proxy_config(&mut client, &HashMap::new(), None).is_ok(),
+                validate_client_proxy_config(&mut client, ClientPems::Prepared(&HashMap::new()), None).is_ok(),
                 user_len == required
                     && identity_len == required
                     && matches!(cipher.name(), "aes-128-gcm" | "aes-256-gcm")
@@ -868,7 +868,7 @@ fn tls_sni_distinguishes_inheritance_disable_and_override() {
         };
         tls.sni_hostname = sni;
         assert_eq!(
-            validate_client_proxy_config(&mut protocol, &HashMap::new(), Some("invalid name"))
+            validate_client_proxy_config(&mut protocol, ClientPems::Prepared(&HashMap::new()), Some("invalid name"))
                 .is_ok(),
             valid,
         );

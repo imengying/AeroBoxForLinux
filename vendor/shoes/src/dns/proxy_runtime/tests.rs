@@ -352,6 +352,8 @@ async fn quic_binder_reserves_shared_memory_until_last_socket_drop() {
         return;
     }
     let binder = ProxyQuicBinder {
+        bootstrap_resolver: Arc::new(NativeResolver::new()),
+        connect_timeout: Duration::from_secs(5),
         retirement: tokio_util::sync::CancellationToken::new(),
         chain_group: Arc::new(build_direct_chain_group(Arc::new(NativeResolver::new()))),
         memory_bytes: crate::resources::limits().quic_dns_memory_bytes,

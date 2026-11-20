@@ -283,6 +283,38 @@ impl Predicate {
         self.evaluate_with_traffic(name, ip, port, None)
     }
 
+    /// Match a route rule against a DNS question without inventing the eventual
+    /// destination address, port or transport. In particular NOT(port=443) is
+    /// unknown, not a match just because the DNS request itself used port 53.
+    /// Three-valued AND/OR/NOT keeps mixed JSON/SRS rule sets safe to reuse.
+    pub fn evaluate_query_name(&self, name: &str) -> Outcome {
+        let unknown = Outcome::Unknown {
+            may_resolve: false,
+        };
+        match &self.kind {
+            Kind::Ips(..) | Kind::Networks(_) | Kind::Protocols(_) => unknown,
+            Kind::Ports(ports) if ports.is_empty() => Outcome::Miss,
+            Kind::Ports(ports) if ports.as_ref() == [(0, u16::MAX)] => Outcome::Match,
+            Kind::Ports(_) => unknown,
+            Kind::ByPort(cases) => Outcome::any(cases.iter().map(|(port, predicate)| {
+                let matched = predicate.evaluate_query_name(name);
+                if *port == 0 {
+                    matched
+                } else {
+                    Outcome::all([matched, unknown].into_iter())
+                }
+            })),
+            Kind::Any(children) => {
+                Outcome::any(children.iter().map(|p| p.evaluate_query_name(name)))
+            }
+            Kind::All(children) => {
+                Outcome::all(children.iter().map(|p| p.evaluate_query_name(name)))
+            }
+            Kind::Not(predicate) => predicate.evaluate_query_name(name).negate(),
+            _ => self.evaluate(Some(name), None, 0),
+        }
+    }
+
     pub fn evaluate_with_traffic(
         &self,
         name: Option<&str>,
