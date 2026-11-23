@@ -2,6 +2,8 @@
 
 支持 Shadowsocks（含 SS2022）、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP。受支持的传输和安全参数按实际实现转换；未知字段和未实现参数会明确报告位置，避免导入后静默丢失设置。不提供 ShadowTLS、Snell。
 
+Clash 订阅为未使用 TLS 的节点附带 `client-fingerprint` 时，该字段不参与连接，也不会导致节点被跳过；启用 TLS 后会校验并应用指定指纹。
+
 Shadowsocks 支持应用内实现的 `obfs-local`（HTTP / TLS 混淆）和 `v2ray-plugin`（WebSocket、TLS、Xray mux 帧、QUIC）。Clash 的 `plugin-opts` 和 SIP003 分享链接参数会转换到同一实现；插件证书文件在启动时读取。原生 SS UDP 直接使用服务器的 UDP 端口，TCP 插件不会改变 UDP 的线协议。WebSocket mux 当前每个连接使用一个逻辑流，不跨连接共享会话；QUIC 则复用会话中的双向流。
 
 `client-fingerprint: chrome` / `firefox`、分享链接 `fp` 和 JSON `tls.utls` 使用应用内的 Rust TLS 实现，覆盖普通 TLS 与 REALITY。Chrome 按 [sing-box 1.14.4](https://github.com/SagerNet/sing-box/tree/v1.14.4/common/tls)固定使用的 [uTLS 1.8.7 Chrome133 模板](https://github.com/metacubex/utls/blob/v1.8.7/u_parrots.go)构造握手：15 种真实密码套件（包括 TLS 1.2 CBC / RSA）、GREASE、扩展顺序随机化、Brotli 证书解压及 h2 ALPS 17613。X25519MLKEM768 与 X25519 分别生成独立密钥。ALPS 17513/17613 的参数交换、重试、恢复和早期数据由 TLS 层实现，但应用 Chrome 配置按固定模板关闭会话恢复及 0-RTT。

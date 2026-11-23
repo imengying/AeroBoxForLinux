@@ -175,7 +175,7 @@ fn common_inactive_clash_fields_do_not_hide_live_settings() {
     node["sni"] = "".into();
     node["servername"] = "".into();
     node["alpn"] = json!([]);
-    node["client-fingerprint"] = "".into();
+    node["client-fingerprint"] = "chrome".into();
     node["tfo"] = false.into();
     node["mptcp"] = false.into();
     let source = |node: Value| json!({"proxies":[node]}).to_string();
@@ -189,7 +189,7 @@ fn common_inactive_clash_fields_do_not_hide_live_settings() {
         ("servername", json!("front.example")),
         ("alpn", json!(["h2"])),
         ("alpn", json!("")),
-        ("client-fingerprint", json!("chrome")),
+        ("client-fingerprint", json!(true)),
         ("tfo", json!("true")),
         ("mptcp", json!("true")),
     ] {
@@ -202,6 +202,7 @@ fn common_inactive_clash_fields_do_not_hide_live_settings() {
     }
     node["tls"] = true.into();
     node["sni"] = "front.example".into();
+    node["client-fingerprint"] = "".into();
     let imported = subscription::parse(&source(node.clone())).unwrap();
     assert_eq!(imported[0]["tls"]["server_name"], "front.example");
     assert!(imported[0]["tls"].get("utls").is_none());

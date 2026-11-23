@@ -31,6 +31,7 @@ enum Reply {
     BadH2,
     Refused,
     GoAwaySlow,
+    RequireRecursive,
 }
 
 struct DohFixture {
@@ -40,6 +41,7 @@ struct DohFixture {
     connections: Arc<AtomicUsize>,
     live: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
+    recursion_rejections: Arc<AtomicUsize>,
     builds: Arc<AtomicUsize>,
     reply: Arc<AtomicU8>,
     _server: AbortOnDropHandle<()>,
@@ -66,12 +68,13 @@ impl DohFixture {
         let connections = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(AtomicUsize::new(0));
+        let recursion_rejections = Arc::new(AtomicUsize::new(0));
         let reply = Arc::new(AtomicU8::new(Reply::Answer as u8));
         let state = (stall.clone(), connections.clone(), live.clone());
-        let responses = (requests.clone(), reply.clone());
+        let responses = (requests.clone(), reply.clone(), recursion_rejections.clone());
         let server = AbortOnDropHandle::new(tokio::spawn(async move {
             let (stall, connections, live) = state;
-            let (requests, reply) = responses;
+            let (requests, reply, recursion_rejections) = responses;
             let mut tasks = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
@@ -82,6 +85,7 @@ impl DohFixture {
                         let stall = stall.clone();
                         let acceptor = acceptor.clone();
                         let requests = requests.clone();
+                        let recursion_rejections = recursion_rejections.clone();
                         let reply = reply.clone();
                         tasks.spawn(async move {
                             struct Active(Arc<AtomicUsize>);
@@ -120,6 +124,7 @@ impl DohFixture {
                                 }
                                 poisoned |= stall.load(Ordering::SeqCst);
                                 let stalled = poisoned;
+                                let recursion_rejections = recursion_rejections.clone();
                                 replies.spawn(async move {
                                     let mut body = request.into_body();
                                     let mut bytes = Vec::new();
@@ -128,9 +133,17 @@ impl DohFixture {
                                         body.flow_control().release_capacity(data.len()).unwrap();
                                     }
                                     let mut reply = Message::from_vec(&bytes).unwrap().into_response();
+                                    let missing_recursion = mode == Reply::RequireRecursive as u8
+                                        && !reply.metadata.recursion_desired;
+                                    if mode == Reply::RequireRecursive as u8 {
+                                        reply.metadata.recursion_available = true;
+                                        if missing_recursion {
+                                            recursion_rejections.fetch_add(1, Ordering::SeqCst);
+                                        }
+                                    }
                                     if mode == Reply::NxDomain as u8 {
                                         reply.metadata.response_code = ResponseCode::NXDomain;
-                                    } else if mode == Reply::ServFail as u8 {
+                                    } else if mode == Reply::ServFail as u8 || missing_recursion {
                                         reply.metadata.response_code = ResponseCode::ServFail;
                                     } else if mode != Reply::NoData as u8 {
                                         reply.add_answer(Record::from_rdata(
@@ -166,6 +179,7 @@ impl DohFixture {
             connections,
             live,
             requests,
+            recursion_rejections,
             builds: Arc::new(AtomicUsize::new(0)),
             reply,
             _server: server,

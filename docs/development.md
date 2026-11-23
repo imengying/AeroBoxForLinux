@@ -43,7 +43,9 @@ AEROBOX_TEST_KTLS_REKEY=1 scripts/test-protocols.sh
 scripts/test-protocols.sh --ktls
 ```
 
-独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片、kTLS 的组合，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
+独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；Vision / REALITY 还验证经 HTTP 和 SOCKS 入口传输的 HTTPS 大载荷，REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片、kTLS 的组合，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
+
+设置 `AEROBOX_TEST_PEER` 运行协议脚本时，还验证应用的 DNS 查询经独立 sing-box REALITY 服务端到达本地 DoH 服务，覆盖 Chrome / Firefox 和有无 Vision；递归查询必须成功，原始非递归查询仍保留原标志。这些测试不访问公共 DNS 或真实订阅。
 
 TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使用独立 SOCKS 测试服务端，覆盖 IPv4/IPv6 数据报、UDP/TCP DNS 接管、切换网关、断网恢复与停止，以及强制结束进程后的恢复；所有路由更改均限制在测试命名空间内。
 

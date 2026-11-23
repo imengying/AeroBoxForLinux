@@ -12,7 +12,7 @@ use std::{
     net::{TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::Ordering,
+    sync::{Arc, atomic::Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -73,6 +73,52 @@ impl Drop for Peer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn https_echo(certified: &rcgen::CertifiedKey<rcgen::KeyPair>) -> support::Server {
+    let tls = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certified.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der())
+                .into(),
+        )
+        .unwrap();
+    let tls = Arc::new(tls);
+    support::Server::spawn(move |socket| {
+        let session = rustls::ServerConnection::new(tls.clone()).unwrap();
+        let mut stream = rustls::StreamOwned::new(session, socket);
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            assert!(header.len() < 16 * 1024);
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let header = String::from_utf8(header).unwrap();
+        assert!(header.starts_with("POST /tls-echo "));
+        let length: usize = header
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        assert!(length <= 1024 * 1024);
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    })
 }
 
 #[test]
@@ -706,6 +752,49 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             upload,
             "{name} upload/echo changed the payload"
         );
+        if kind == "vless" && (transport_name == "vision" || transport_name.starts_with("reality"))
+        {
+            // Browsers and DoH put another TLS session inside VLESS. Plain
+            // HTTP payloads do not exercise Vision's inner-TLS detection.
+            let https = https_echo(&certified);
+            for entry in ["http", "socks5h"] {
+                let response = reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .proxy(
+                        reqwest::Proxy::all(format!(
+                            "{entry}://127.0.0.1:{}",
+                            app.service.snapshot().settings.mixed_port
+                        ))
+                        .unwrap(),
+                    )
+                    .tls_certs_only([
+                        reqwest::Certificate::from_pem(certificate.as_bytes()).unwrap()
+                    ])
+                    .timeout(Duration::from_secs(8))
+                    .build()
+                    .unwrap()
+                    .post(format!(
+                        "https://localhost:{}/tls-echo",
+                        https.address.port()
+                    ))
+                    .body(upload.clone())
+                    .send()
+                    .and_then(reqwest::blocking::Response::error_for_status)
+                    .and_then(reqwest::blocking::Response::bytes)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{name} HTTPS through {entry}: {error:?}\nclient:\n{}\npeer:\n{}",
+                            app.service.logs(),
+                            peer.logs()
+                        )
+                    });
+                assert_eq!(
+                    response.as_ref(),
+                    upload,
+                    "{name} HTTPS changed the payload"
+                );
+            }
+        }
         let udp_result = if kind == "http" || transport_name.ends_with("-tcp-only") {
             udp_policy::assert_udp_blocked(app.service.snapshot().settings.mixed_port)
         } else {

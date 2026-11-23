@@ -92,8 +92,10 @@ impl Proxy {
             (server, client)
         } else {
             let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-            let digest =
-                aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, certificate.cert.der());
+            let digest = aerobox_primitives::digest::digest(
+                &aerobox_primitives::digest::SHA256,
+                certificate.cert.der(),
+            );
             let fingerprint: String = digest
                 .as_ref()
                 .iter()
@@ -424,4 +426,237 @@ async fn rejected_proxy_pin_is_not_retried_or_bypassed() {
     })
     .await
     .unwrap();
+}
+
+struct RealityDohPeer {
+    child: std::process::Child,
+    log: std::path::PathBuf,
+    _directory: tempfile::TempDir,
+    address: SocketAddr,
+    public_key: String,
+}
+
+impl RealityDohPeer {
+    async fn start(executable: &std::path::Path, vision: bool) -> Self {
+        use aerobox_primitives::{
+            agreement,
+            rand::{SecureRandom, SystemRandom},
+        };
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use std::process::{Command, Stdio};
+
+        let mut private = [0; 32];
+        SystemRandom::new().fill(&mut private).unwrap();
+        let public = agreement::PrivateKey::from_private_key(&agreement::X25519, &private)
+            .unwrap()
+            .compute_public_key()
+            .unwrap();
+        let public_key = URL_SAFE_NO_PAD.encode(public.as_ref());
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        let template = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let template_address = template.local_addr().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("reality-doh.json");
+        let log = directory.path().join("peer.log");
+        let certificate = directory.path().join("template.pem");
+        let key = directory.path().join("template-key.pem");
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        std::fs::write(&certificate, certified.cert.pem()).unwrap();
+        std::fs::write(&key, certified.signing_key.serialize_pem()).unwrap();
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "log":{"level":"error"},
+                "inbounds":[{
+                    "type":"vless", "listen":"127.0.0.1", "listen_port":address.port(),
+                    "users":[{
+                        "uuid":"550e8400-e29b-41d4-a716-446655440000",
+                        "flow":if vision { "xtls-rprx-vision" } else { "" }
+                    }],
+                    "tls":{
+                        "enabled":true, "server_name":"localhost",
+                        "reality":{
+                            "enabled":true,
+                            "handshake":{"server":"127.0.0.1", "server_port":template_address.port()},
+                            "private_key":URL_SAFE_NO_PAD.encode(private),
+                            "short_id":["0123456789abcdef"]
+                        }
+                    }
+                },{
+                    // Use the independent server's supported TLS flight as the
+                    // REALITY template. The actual DoH endpoint remains Rustls.
+                    "type":"http", "listen":"127.0.0.1", "listen_port":template_address.port(),
+                    "tls":{
+                        "enabled":true, "server_name":"localhost", "min_version":"1.3",
+                        "certificate_path":certificate, "key_path":key
+                    }
+                }],
+                "outbounds":[{"type":"direct", "tag":"local"}],
+                "route":{"final":"local"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = std::fs::File::create(&log).unwrap();
+        drop(reservation);
+        drop(template);
+        let child = Command::new(executable)
+            .args(["run", "--disable-color", "-c"])
+            .arg(config)
+            .current_dir(directory.path())
+            .env("GOMAXPROCS", "1")
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().unwrap())
+            .stderr(output)
+            .spawn()
+            .expect("cannot start the independent sing-box peer");
+        let mut peer = Self {
+            child,
+            log,
+            _directory: directory,
+            address,
+            public_key,
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                peer.child.try_wait().unwrap().is_none(),
+                "sing-box exited before listening: {}",
+                peer.logs()
+            );
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                return peer;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "sing-box did not become ready: {}",
+                peer.logs()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn logs(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+impl Drop for RealityDohPeer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an independent sing-box in AEROBOX_TEST_PEER; all traffic stays on loopback"]
+async fn recursive_doh_over_reality_with_and_without_vision_uses_inner_tls() {
+    let executable = std::path::PathBuf::from(
+        std::env::var_os("AEROBOX_TEST_PEER")
+            .expect("set AEROBOX_TEST_PEER to the independent sing-box executable"),
+    )
+    .canonicalize()
+    .expect("AEROBOX_TEST_PEER must name an existing executable");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        for vision in [false, true] {
+            for fingerprint in ["chrome", "firefox"] {
+                let fixture = DohFixture::start().await;
+                fixture
+                    .reply
+                    .store(Reply::RequireRecursive as u8, Ordering::SeqCst);
+                let peer = RealityDohPeer::start(&executable, vision).await;
+                let chain = crate::config::test_support::from_json(json!([{
+                    "address":peer.address.to_string(),
+                    "protocol":{
+                        "type":"reality", "public_key":peer.public_key,
+                        "short_id":"0123456789abcdef", "sni_hostname":"localhost",
+                        "client_fingerprint":fingerprint, "vision":vision,
+                        "protocol":{
+                            "type":"vless", "user_id":"550e8400-e29b-41d4-a716-446655440000"
+                        }
+                    }
+                }]))
+                .unwrap();
+                let bootstrap: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
+                let group = Arc::new(
+                    crate::tcp::chain_builder::try_build_client_chain_group(
+                        crate::option_util::NoneOrSome::One(chain),
+                        bootstrap.clone(),
+                    )
+                    .unwrap(),
+                );
+                // Keep ordinary deadlines here: this case performs two TLS
+                // handshakes and does not exercise the 150 ms recovery timer.
+                let upstream: Arc<dyn Resolver> = Arc::new(
+                    crate::rustls_config_util::with_test_roots(fixture.roots.clone(), || {
+                        HickoryResolver::https(
+                            fixture.address,
+                            "localhost".into(),
+                            "/dns-query".into(),
+                            group,
+                            bootstrap,
+                            HickoryResolverOptions {
+                                ip_strategy: super::super::IpStrategy::Ipv4Only,
+                                attempts: 1,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap()
+                    }),
+                );
+                // A raw, intercepted RD=0 request must be preserved and rejected
+                // by the fixture; locally generated lookups below must set RD=1.
+                let nonrecursive = Message::from_vec(&query(0)).unwrap();
+                assert!(!nonrecursive.metadata.recursion_desired);
+                let response = upstream
+                    .exchange(nonrecursive.to_vec().unwrap())
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "REALITY DoH exchange failed (vision={vision}, {fingerprint}): {error:?}\n{}",
+                            peer.logs()
+                        )
+                    });
+                assert_eq!(
+                    Message::from_vec(&response).unwrap().metadata.response_code,
+                    ResponseCode::ServFail
+                );
+                assert_eq!(fixture.recursion_rejections.load(Ordering::SeqCst), 1);
+
+                let routed = crate::dns::routing::RoutingResolver::new(
+                    crate::config::dns::DnsRoutingConfig {
+                        final_server: "local-reality-doh".into(),
+                        ip_strategy: super::super::IpStrategy::Ipv4Only,
+                        rules: Vec::new(),
+                    },
+                    |name| (name == "local-reality-doh").then(|| upstream.clone()),
+                )
+                .unwrap();
+                for sequence in 1..=2 {
+                    let location = NetLocation::from_str(
+                        &format!("recursive-{sequence}.example:443"),
+                        None,
+                    )
+                    .unwrap();
+                    let addresses = routed.resolve_location(&location).await.unwrap_or_else(|error| {
+                        panic!(
+                            "recursive REALITY DoH lookup failed (vision={vision}, {fingerprint}): {error:?}\n{}",
+                            peer.logs()
+                        )
+                    });
+                    assert_eq!(addresses, vec![SocketAddr::from(([192, 0, 2, 42], 443))]);
+                }
+                assert_eq!(fixture.requests.load(Ordering::SeqCst), 3);
+                assert_eq!(fixture.recursion_rejections.load(Ordering::SeqCst), 1);
+                routed.retire();
+                drop(routed);
+                drop(upstream);
+                drop(peer);
+                fixture.wait_closed().await;
+            }
+        }
+    })
+    .await
+    .expect("local REALITY DoH matrix timed out");
 }

@@ -1073,6 +1073,178 @@ fn client_response_preserves_coalesced_direct_bytes() {
     }
 }
 
+#[test]
+fn first_vision_uuid_survives_split_tls_records_and_pending_reads() {
+    for backend in BACKENDS {
+        for is_server in [false, true] {
+            for command in [COMMAND_CONTINUE, COMMAND_END, COMMAND_DIRECT] {
+                for split in [1, 8, 15] {
+                    let (client, server) = connection_pair(backend);
+                    let (session, mut sender) = if is_server {
+                        (server, client)
+                    } else {
+                        (client, server)
+                    };
+                    let uuid = [7; 16];
+                    let mut first = if is_server { Vec::new() } else { vec![0, 0] };
+                    first.extend_from_slice(&uuid[..split]);
+                    let first_record = encrypt(&mut sender, &first);
+                    let mut second = uuid[split..].to_vec();
+                    second.extend_from_slice(&[command, 0, 3, 0, 2]);
+                    second.extend_from_slice(b"one\0\0");
+                    let mut remaining = encrypt(&mut sender, &second);
+                    match command {
+                        COMMAND_DIRECT => remaining.extend_from_slice(b"-tail"),
+                        COMMAND_END => remaining.extend(encrypt(&mut sender, b"-tail")),
+                        COMMAND_CONTINUE => {
+                            remaining.extend(encrypt(&mut sender, b"\x01\x00\x05\x00\x00-tail"));
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    let (io, mut peer) = tokio::io::duplex(4096);
+                    let mut cx = Context::from_waker(noop_waker_ref());
+                    assert!(matches!(
+                        Pin::new(&mut peer).poll_write(&mut cx, &first_record),
+                        Poll::Ready(Ok(n)) if n == first_record.len()
+                    ));
+                    let tls = CryptoTlsStream::new(io, session, Some(TlsDeframer::new()));
+                    let mut vision = if is_server {
+                        VisionStream::new_server(tls, uuid, &[]).unwrap()
+                    } else {
+                        VisionStream::new_client(tls, uuid).unwrap()
+                    };
+                    let mut bytes = [0; 32];
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(
+                        Pin::new(&mut vision)
+                            .poll_read(&mut cx, &mut buf)
+                            .is_pending(),
+                        "{backend:?}, server={is_server}, command={command}, split={split}"
+                    );
+                    assert!(buf.filled().is_empty());
+                    assert!(matches!(
+                        Pin::new(&mut peer).poll_write(&mut cx, &remaining),
+                        Poll::Ready(Ok(n)) if n == remaining.len()
+                    ));
+                    assert_buffered_reads(&mut vision, b"one-tail");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn short_unpadded_vision_payload_is_available_without_another_tls_record() {
+    for backend in BACKENDS {
+        for is_server in [false, true] {
+            let (client, server) = connection_pair(backend);
+            let (session, mut sender) = if is_server {
+                (server, client)
+            } else {
+                (client, server)
+            };
+            let mut plaintext = if is_server { Vec::new() } else { vec![0, 0] };
+            plaintext.extend_from_slice(b"hello");
+            let io = ScriptedIo {
+                reads: VecDeque::from([encrypt(&mut sender, &plaintext).into()]),
+            };
+            let tls = CryptoTlsStream::new(io, session, Some(TlsDeframer::new()));
+            let mut vision = if is_server {
+                VisionStream::new_server(tls, [7; 16], &[]).unwrap()
+            } else {
+                VisionStream::new_client(tls, [7; 16]).unwrap()
+            };
+            assert_buffered_reads(&mut vision, b"hello");
+        }
+    }
+}
+
+fn partial_uuid_stream(
+    backend: Backend,
+    is_server: bool,
+    prefix_length: usize,
+    clean_eof: bool,
+) -> VisionStream<CryptoTlsStream<ScriptedIo>> {
+    let (client, server) = connection_pair(backend);
+    let (session, mut sender) = if is_server {
+        (server, client)
+    } else {
+        (client, server)
+    };
+    let uuid = *b"hello-vision-id!";
+    let mut plaintext = if is_server { Vec::new() } else { vec![0, 0] };
+    plaintext.extend_from_slice(&uuid[..prefix_length]);
+    let mut ciphertext = encrypt(&mut sender, &plaintext);
+    if clean_eof {
+        sender.send_close_notify();
+        sender.write_tls(&mut ciphertext).unwrap();
+    }
+    let mut reads = VecDeque::from([ciphertext.into()]);
+    if !clean_eof {
+        reads.push_back(bytes::Bytes::new());
+    }
+    let tls = CryptoTlsStream::new(ScriptedIo { reads }, session, Some(TlsDeframer::new()));
+    if is_server {
+        VisionStream::new_server(tls, uuid, &[]).unwrap()
+    } else {
+        VisionStream::new_client(tls, uuid).unwrap()
+    }
+}
+
+#[test]
+fn clean_eof_returns_partial_initial_uuid_before_eof() {
+    for backend in BACKENDS {
+        for is_server in [false, true] {
+            for prefix_length in [1, 5, 15] {
+                let mut vision = partial_uuid_stream(backend, is_server, prefix_length, true);
+                let mut cx = Context::from_waker(noop_waker_ref());
+                let mut received = Vec::new();
+                while received.len() < prefix_length {
+                    let mut bytes = [0; 3];
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(matches!(
+                        Pin::new(&mut vision).poll_read(&mut cx, &mut buf),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(!buf.filled().is_empty());
+                    received.extend_from_slice(buf.filled());
+                }
+                assert_eq!(received, b"hello-vision-id!"[..prefix_length]);
+                for _ in 0..2 {
+                    let mut bytes = [0; 3];
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(matches!(
+                        Pin::new(&mut vision).poll_read(&mut cx, &mut buf),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(buf.filled().is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unclean_eof_does_not_release_a_partial_initial_uuid() {
+    for backend in BACKENDS {
+        for is_server in [false, true] {
+            for prefix_length in [1, 5, 15] {
+                let mut vision = partial_uuid_stream(backend, is_server, prefix_length, false);
+                let mut cx = Context::from_waker(noop_waker_ref());
+                let mut bytes = [0; 32];
+                let mut buf = ReadBuf::new(&mut bytes);
+                let result = Pin::new(&mut vision).poll_read(&mut cx, &mut buf);
+                assert!(
+                    matches!(result, Poll::Ready(Err(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof),
+                    "{backend:?}, server={is_server}, prefix={prefix_length}: {result:?}"
+                );
+                assert!(buf.filled().is_empty());
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn handshake_handoff_preserves_partial_record() {
     for backend in [Backend::Tls13, Backend::Reality] {

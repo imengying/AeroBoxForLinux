@@ -39,7 +39,7 @@ run_unit_tests() {
         quic_client::tuic_uot_tests quic_client::hop:: quic_client::hysteria2:: \
         quic_client::early_tests ech:: tls_fragment:: tcp::fast_open:: dial_options:: crypto:: \
         config::types::quic_client:: config::types::tls:: config::validate:: \
-        dns::builder::tests dns::parsed:: vless::encryption:: rustls_config_util:: reality:: \
+        dns::builder::tests dns::parsed:: vless::encryption:: vless::vision_unpad:: vless::vision_stream:: rustls_config_util:: reality:: \
         tcp::socket_connector_impl::tests::configured_quic_handshake_timeout --test-threads=1
 }
 if [ "$mode" = --unit ]; then
@@ -93,5 +93,8 @@ if [ "${AEROBOX_TEST_KTLS_REKEY:-0}" = 1 ]; then
 fi
 cargo test --locked --test ss_plugin_interop -- --ignored --nocapture
 if [ -n "${AEROBOX_TEST_PEER:-}" ]; then
+    cargo test --manifest-path vendor/shoes/Cargo.toml --lib \
+        dns::recovery_tests::proxy::recursive_doh_over_reality_with_and_without_vision_uses_inner_tls \
+        -- --ignored --exact --nocapture
     cargo test --locked --test interop -- --ignored --nocapture --test-threads=1
 fi

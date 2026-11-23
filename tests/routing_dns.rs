@@ -32,10 +32,19 @@ impl Dns {
                 let (name, kind, end) = question(&query);
                 observed.lock().unwrap().push((name, kind));
                 let refused = rejected.load(Ordering::Relaxed);
+                // A recursive upstream need not have an answer cached for RD=0.
+                // Model that response so generated policy lookups exercise RD.
+                let code = if refused {
+                    3
+                } else if query[2] & 1 == 0 {
+                    2
+                } else {
+                    0
+                };
                 let mut reply = query[..end].to_vec();
-                reply[2..4].copy_from_slice(&[0x81, if refused { 0x83 } else { 0x80 }]);
-                reply[6..12].copy_from_slice(&[0, u8::from(!refused), 0, 0, 0, 0]);
-                if !refused {
+                reply[2..4].copy_from_slice(&[0x80 | (query[2] & 1), 0x80 | code]);
+                reply[6..12].copy_from_slice(&[0, u8::from(code == 0), 0, 0, 0, 0]);
+                if code == 0 {
                     reply.extend_from_slice(&[0xc0, 0x0c]);
                     reply.extend_from_slice(&kind.to_be_bytes());
                     reply.extend_from_slice(&[0, 1, 0, 0, 0, 0]);
@@ -222,6 +231,43 @@ fn dns_choice(app: &App, direct: &Dns, remote: &Dns, name: &str, choice: &str) {
             "DNS routing for {name} via UDP={udp}"
         );
     }
+}
+
+#[test]
+fn policy_lookups_request_recursion_for_both_address_families() {
+    let _serial = runtime_lock();
+    let direct = Dns::new([127, 0, 0, 1]);
+    let remote = Dns::new([203, 0, 113, 2]);
+    let (node, forwarded_dns) = node(&remote);
+    let app = App::new();
+    configure(&app, &node, &direct, &remote);
+    let mut settings = app.service.snapshot().settings;
+    settings.ipv6 = true;
+    app.service.apply_settings(settings).unwrap();
+    // Force domain requests through IP-based routing, as the built-in China
+    // IP rules do. The proxy must receive traffic after remote DNS succeeds.
+    app.service
+        .save_ruleset(rule(
+            "IP route",
+            "proxy",
+            json!([{"ip_cidr":["203.0.113.0/24", "2001:db8::/32"]}]),
+        ))
+        .unwrap();
+    app.service.start().unwrap();
+    for entry in ["http", "socks5h"] {
+        let name = format!("{entry}.recursive.example.test");
+        assert_eq!(
+            support::request_via(&app.service, &format!("http://{name}/"), entry)
+                .unwrap_or_else(|error| panic!("{error:#}\n{}", app.service.logs())),
+            "through-node"
+        );
+        let queries = remote.queries.lock().unwrap();
+        for kind in [1, 28] {
+            assert!(queries.contains(&(name.clone(), kind)), "{queries:?}");
+        }
+    }
+    assert!(forwarded_dns.load(Ordering::Relaxed) > 0);
+    assert_eq!(direct.count(), 0, "remote lookup leaked to direct DNS");
 }
 
 #[test]

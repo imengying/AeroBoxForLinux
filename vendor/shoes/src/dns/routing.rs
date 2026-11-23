@@ -124,6 +124,9 @@ impl Resolver for RoutingResolver {
         let name = location.address().hostname().unwrap().to_owned();
         let query = |kind| {
             let mut message = Message::query();
+            // These are locally generated lookups sent to recursive upstreams,
+            // unlike intercepted messages whose original flags must be preserved.
+            message.metadata.recursion_desired = true;
             let parsed = Name::from_ascii(&name).map_err(io::Error::other);
             match parsed {
                 Ok(name) => {

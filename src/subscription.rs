@@ -998,7 +998,9 @@ fn clash(v: &Value) -> Result<Value> {
             v["skip-cert-verify"] != true,
             "未启用 TLS 时 skip-cert-verify 只能为 false"
         );
-        for field in ["servername", "sni", "client-fingerprint"] {
+        // Subscriptions may attach a browser profile to every node. It only
+        // affects TLS handshakes; without TLS it must not discard the node.
+        for field in ["servername", "sni"] {
             ensure!(
                 v.get(field).is_none_or(|value| value == ""),
                 "未启用 TLS 时 {field} 只能为空"
@@ -1669,7 +1671,7 @@ mod import_boundary_tests {
         for (field, value) in [
             ("unknown_option", json!(true)),
             ("detour", json!("discarded-node")),
-            ("client-fingerprint", json!("chrome")),
+            ("client-fingerprint", json!(true)),
             ("network", json!("kcp")),
             ("ws-opts", json!({"path":"/ignored"})),
             ("udp", json!("not a boolean")),

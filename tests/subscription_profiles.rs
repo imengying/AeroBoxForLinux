@@ -22,12 +22,58 @@ fn clash_sample() -> Value {
          "uuid":UUID,"network":"ws","udp":true,"tls":true,"client-fingerprint":"firefox",
          "servername":"offline.invalid","ws-opts":{"path":"/fixture","headers":{"Host":"offline.invalid"}}},
         {"name":"shadowsocks","type":"ss","server":"offline.invalid","port":443,
-         "cipher":"aes-256-gcm","password":"fixture-password","udp":true},
+         "cipher":"aes-256-gcm","password":"fixture-password","udp":true,"client-fingerprint":"chrome"},
         {"name":"anytls-chrome","type":"anytls","server":"offline.invalid","port":443,
          "password":"fixture-password","client-fingerprint":"chrome","udp":true,"udp-over-tcp":true,
          "idle-session-check-interval":30,"idle-session-timeout":30,"min-idle-session":0,
          "sni":"offline.invalid","alpn":["h2","http/1.1"],"skip-cert-verify":true}
     ]})
+}
+
+#[test]
+fn clash_browser_profiles_only_apply_when_tls_is_enabled() {
+    for kind in ["ss", "vmess", "vless", "socks5", "http"] {
+        let mut plain = json!({"type":kind,"name":"plain","server":"offline.invalid","port":443});
+        match kind {
+            "ss" => {
+                plain["cipher"] = "aes-256-gcm".into();
+                plain["password"] = "fixture-password".into();
+            }
+            "vmess" | "vless" => plain["uuid"] = UUID.into(),
+            _ => {}
+        }
+        let source = |node: Value| json!({"proxies":[node]}).to_string();
+        let expected = subscription::parse(&source(plain.clone())).unwrap();
+        for tls in [None, Some(false)] {
+            let mut node = plain.clone();
+            if let Some(tls) = tls {
+                node["tls"] = tls.into();
+            }
+            for fingerprint in ["", "chrome", "firefox", "random", "unused-profile"] {
+                node["client-fingerprint"] = fingerprint.into();
+                let body = source(node.clone());
+                let (imported, skipped) = subscription::parse_with_skips(&body)
+                    .unwrap_or_else(|error| panic!("{kind}, {tls:?}, {fingerprint}: {error:#}"));
+                assert!(skipped.is_empty());
+                assert_eq!(imported, expected);
+                assert_eq!(subscription::parse(&body).unwrap(), expected);
+            }
+            for invalid in [json!(true), json!(1), json!([]), json!({}), Value::Null] {
+                node["client-fingerprint"] = invalid;
+                let error = subscription::parse(&source(node.clone())).unwrap_err();
+                assert!(format!("{error:#}").contains("client-fingerprint"));
+            }
+        }
+        plain["tls"] = true.into();
+        for fingerprint in ["chrome", "firefox"] {
+            plain["client-fingerprint"] = fingerprint.into();
+            let imported = subscription::parse(&source(plain.clone())).unwrap();
+            assert_eq!(imported[0]["tls"]["utls"]["fingerprint"], fingerprint);
+            protocol::validate(&imported[0]).unwrap();
+        }
+        plain["client-fingerprint"] = "unknown-browser".into();
+        assert!(subscription::parse(&source(plain)).is_err());
+    }
 }
 
 #[test]

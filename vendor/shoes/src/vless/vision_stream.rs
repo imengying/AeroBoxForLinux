@@ -393,6 +393,9 @@ where
             let mut plaintext = ReadBuf::new(&mut scratch);
             ready!(Pin::new(&mut self.tls).poll_read(cx, &mut plaintext))?;
             if plaintext.filled().is_empty() {
+                self.pending_read
+                    .extend_from_slice(&self.read_unpadder.finish_input());
+                self.copy_pending_read(buf);
                 return Poll::Ready(Ok(()));
             }
             self.handle_padded_bytes(plaintext.filled())?;

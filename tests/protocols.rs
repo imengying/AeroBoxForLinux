@@ -2,7 +2,7 @@
 //! These local peers test framing, encryption, authentication and lifecycle;
 //! interoperability with independent implementations is tested separately.
 mod support;
-use aerobox_for_linux::protocol;
+use aerobox_for_linux::{protocol, subscription};
 use serde_json::json;
 use shoes::embedding::EmbeddedCore;
 use std::{
@@ -161,6 +161,19 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
         // is covered by the independent-server interoperability test.
         if matches!(kind, "shadowsocks" | "ss2022" | "naive") {
             node["udp_over_tcp"] = json!({"enabled":true,"version":2});
+        }
+        if matches!(kind, "shadowsocks" | "ss2022") {
+            // Subscription-wide fingerprints must not turn plain SS into TLS
+            // or prevent its imported TCP/UDP settings from carrying traffic.
+            node = subscription::parse(
+                &json!({"proxies":[{"type":"ss","name":node["tag"],
+                    "server":node["server"],"port":node["server_port"],
+                    "cipher":node["method"],"password":node["password"],
+                    "client-fingerprint":"chrome","udp":true,"udp-over-tcp":true}]})
+                .to_string(),
+            )
+            .unwrap()
+            .remove(0);
         }
         protocol::validate(&node).unwrap_or_else(|e| panic!("{kind} import: {e:#}"));
         let config = json!([protocol::convert_outbound(node,"node").unwrap(),server,{"address":format!("127.0.0.1:{inbound}"),"protocol":{"type":"mixed"},"rules":[{"conditions":{"any_destination":true},"action":"allow","client_chain":"test-node"}]}]);

@@ -33,7 +33,10 @@ pub struct UnpadResult {
 #[derive(Debug, Clone)]
 enum UnpadState {
     /// Initial state: expecting UUID (16 bytes) before first command
-    Initial { expected_uuid: [u8; 16] },
+    Initial {
+        expected_uuid: [u8; 16],
+        matched_len: usize,
+    },
     /// Reading the command byte (first of 5 header bytes)
     ReadingCommand,
     /// Reading content length (2 bytes)
@@ -75,7 +78,10 @@ pub struct VisionUnpadder {
 impl VisionUnpadder {
     pub fn new(expected_uuid: [u8; 16]) -> Self {
         Self {
-            state: UnpadState::Initial { expected_uuid },
+            state: UnpadState::Initial {
+                expected_uuid,
+                matched_len: 0,
+            },
             first_block: true,
             accumulated_buffer: Vec::new(),
         }
@@ -96,22 +102,30 @@ impl VisionUnpadder {
 
         loop {
             match &mut self.state {
-                UnpadState::Initial { expected_uuid } => {
-                    if data.len() < 16 {
-                        return Ok(UnpadResult::default()); // Need more data
-                    }
-
-                    // Check if this is XTLS padding data
-                    if &data[..16] != expected_uuid {
-                        // Not XTLS padding data
+                UnpadState::Initial {
+                    expected_uuid,
+                    matched_len,
+                } => {
+                    let len = data.len().min(expected_uuid.len() - *matched_len);
+                    if data[..len] != expected_uuid[*matched_len..*matched_len + len] {
+                        // A possible UUID prefix may span reads or TLS records.
+                        // On mismatch, return every byte already consumed along
+                        // with this input, including ordinary short payloads.
+                        let mut content = Vec::with_capacity(*matched_len + data.len());
+                        content.extend_from_slice(&expected_uuid[..*matched_len]);
+                        content.extend_from_slice(data);
+                        *matched_len = 0;
                         return Ok(UnpadResult {
-                            content: data.to_vec(),
+                            content,
                             command: None,
                         });
                     }
 
-                    // Consume UUID
-                    data = &data[16..];
+                    *matched_len += len;
+                    data = &data[len..];
+                    if *matched_len < expected_uuid.len() {
+                        return Ok(UnpadResult::default());
+                    }
                     self.state = UnpadState::ReadingCommand;
                 }
 
@@ -367,6 +381,19 @@ impl VisionUnpadder {
             }
         }
     }
+
+    /// At a clean EOF, an incomplete UUID candidate is ordinary input. The
+    /// caller must propagate transport errors before calling this method.
+    pub(super) fn finish_input(&mut self) -> Vec<u8> {
+        let UnpadState::Initial {
+            expected_uuid,
+            matched_len,
+        } = &mut self.state
+        else {
+            return Vec::new();
+        };
+        expected_uuid[..std::mem::take(matched_len)].to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -424,10 +451,10 @@ mod tests {
         let user_uuid = [0u8; 16];
         let mut state = VisionUnpadder::new(user_uuid);
 
-        // Data that's less than 16 bytes (too short to check UUID)
+        // A short payload that cannot match the UUID is immediately available.
         let short_data = [1, 2, 3, 4, 5];
         let result = state.unpad(&short_data[..]).unwrap();
-        assert!(result.content.is_empty()); // Need more data
+        assert_eq!(result.content, short_data);
         assert!(result.command.is_none());
 
         // Data that's exactly 16 bytes but doesn't match UUID
@@ -437,6 +464,68 @@ mod tests {
         assert_eq!(result.command, None);
         // State remains Initial (doesn't transition to Done for non-XTLS data)
         assert!(!matches!(state.state, UnpadState::Done));
+    }
+
+    #[test]
+    fn first_uuid_is_preserved_across_all_split_positions() {
+        for command in [
+            UnpadCommand::Continue,
+            UnpadCommand::End,
+            UnpadCommand::Direct,
+        ] {
+            for split in 1..16 {
+                let uuid = std::array::from_fn(|index| index as u8);
+                let mut frame = uuid.to_vec();
+                frame.extend_from_slice(&[command as u8, 0, 5, 0, 2]);
+                frame.extend_from_slice(b"hello\0\0");
+                let mut state = VisionUnpadder::new(uuid);
+                let first = state.unpad(&frame[..split]).unwrap();
+                assert!(first.content.is_empty());
+                assert_eq!(first.command, None);
+                let second = state.unpad(&frame[split..]).unwrap();
+                assert_eq!(second.content, b"hello", "split={split}");
+                assert_eq!(second.command, Some(command));
+            }
+        }
+    }
+
+    #[test]
+    fn first_uuid_and_padding_header_can_arrive_one_byte_at_a_time() {
+        let uuid = std::array::from_fn(|index| index as u8);
+        let mut frame = uuid.to_vec();
+        frame.extend_from_slice(&[UnpadCommand::End as u8, 0, 5, 0, 2]);
+        frame.extend_from_slice(b"hello\0\0");
+        let mut state = VisionUnpadder::new(uuid);
+        let mut received = Vec::new();
+        for (index, byte) in frame.iter().enumerate() {
+            let result = state.unpad(std::slice::from_ref(byte)).unwrap();
+            received.extend(result.content);
+            assert_eq!(
+                result.command,
+                (index + 1 == frame.len()).then_some(UnpadCommand::End)
+            );
+        }
+        assert_eq!(received, b"hello");
+    }
+
+    #[test]
+    fn mismatched_uuid_prefix_returns_all_buffered_bytes() {
+        let uuid = std::array::from_fn(|index| index as u8);
+        for matched in 0..16 {
+            let mut state = VisionUnpadder::new(uuid);
+            assert!(state.unpad(&uuid[..matched]).unwrap().content.is_empty());
+            let data = [0xff, 1, 2];
+            let result = state.unpad(&data).unwrap();
+            assert_eq!(result.content, [&uuid[..matched], &data].concat());
+            assert_eq!(result.command, None);
+
+            // A plain prefix does not prevent detection of a following block.
+            let mut frame = uuid.to_vec();
+            frame.extend_from_slice(&[UnpadCommand::End as u8, 0, 1, 0, 0, 42]);
+            let result = state.unpad(&frame).unwrap();
+            assert_eq!(result.content, [42]);
+            assert_eq!(result.command, Some(UnpadCommand::End));
+        }
     }
 
     #[test]
