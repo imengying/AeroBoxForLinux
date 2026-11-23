@@ -4,6 +4,10 @@ use std::path::PathBuf;
 mod ui;
 
 fn main() -> gtk::glib::ExitCode {
+    // Standalone startup windows also need the installed desktop entry's ID.
+    // Set this before GTK initializes and caches its Wayland application ID.
+    gtk::glib::set_prgname(Some(platform::APP_ID));
+    gtk::glib::set_application_name("AeroBox");
     match run() {
         Ok(code) => code,
         Err(e) => {

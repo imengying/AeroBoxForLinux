@@ -8,3 +8,5 @@ Icon=io.github.imengying.AeroBoxForLinux
 Terminal=false
 Categories=Network;Settings;
 StartupNotify=true
+StartupWMClass=io.github.imengying.AeroBoxForLinux
+SingleMainWindow=true

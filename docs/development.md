@@ -19,7 +19,7 @@ make clean
 
 普通集成测试使用临时目录、回环地址和临时端口，验证实际流量、节点与模式切换、回滚、下载、测速和启停，不依赖外部内核，不启动特权 TUN。慢规则下载测试同时持续查询状态，验证在线更新不会被首页轮询打断；传输测试检查分享链接缺省路径、Host 和免认证 SOCKS 的实际请求。
 
-`make test` 和 GitHub Actions 还运行 `scripts/test-protocols.sh --unit`，覆盖内置传输、DNS、TLS 与密码组件的回归测试。这个模式无需 Go 或独立协议服务端。组件测试以主项目的 `Cargo.lock` 为基础解析测试依赖，结束时清理临时锁文件。
+`make test` 和 GitHub Actions 还运行 `scripts/test-protocols.sh --unit`，覆盖内置传输、DNS、TLS 与密码组件的回归测试。这个模式无需 Go、独立协议服务端或内核 kTLS 支持。组件测试以主项目的 `Cargo.lock` 为基础解析测试依赖，结束时清理临时锁文件。
 
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 
@@ -39,13 +39,17 @@ scripts/test-protocols.sh
 AEROBOX_TEST_PEER=/path/to/sing-box scripts/test-protocols.sh
 # Linux 6.14+ 且启用 kTLS：增加 TLS 1.3 密钥更新测试
 AEROBOX_TEST_KTLS_REKEY=1 scripts/test-protocols.sh
+# 单独验证 kTLS 的密码套件、收发方向、半关闭、异常 EOF 与密钥更新
+scripts/test-protocols.sh --ktls
 ```
 
 独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片、kTLS 的组合，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
 
 TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使用独立 SOCKS 测试服务端，覆盖 IPv4/IPv6 数据报、UDP/TCP DNS 接管、切换网关、断网恢复与停止，以及强制结束进程后的恢复；所有路由更改均限制在测试命名空间内。
 
-界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放；截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
+kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / ChaCha20-Poly1305 内核算法。模块化内核可先执行 `sudo modprobe tls`；Ubuntu 托管 runner 可能未提供该模块，因此普通 CI 不运行这三项环境测试。`--ktls` 下的错误仍会使测试失败，不会静默跳过。
+
+界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，并运行安装器检查桌面启动器与窗口标识、重复启动和启动恢复窗口；`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放。截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
 
 `src/runtime.rs` 组装原生运行配置，`engine.rs` 管理连接生命周期和事务回滚，`protocol/` 严格转换节点参数，`model.rs` 管理数据与原子存储，`ui/` 为 GTK 界面。`vendor/` 保存带本项目修改的第三方源码，`tests/` 包含集成测试。GitHub Actions 使用 `ubuntu-latest`，仅构建 amd64，推送 `v*` 标签后发布安装包。
 

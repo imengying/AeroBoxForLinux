@@ -44,4 +44,4 @@ ECH 支持 `tls.ech.enabled`、内联 PEM `config`、PEM 文件 `config_path` �
 
 这些功能在应用内实现，不包含旧版应用数据迁移或旧配置兼容层。
 
-互通测试入口为 `scripts/test-protocols.sh`，使用固定依赖的独立 Go 服务。Linux 6.14+ 环境可设置 `AEROBOX_TEST_KTLS_REKEY=1`，同时运行 kTLS 密钥更新测试。
+互通测试入口为 `scripts/test-protocols.sh`，使用固定依赖的独立 Go 服务。`scripts/test-protocols.sh --ktls` 单独运行全部 kTLS 环境测试，要求 Linux 6.14+ 且已启用 kTLS 与所需密码算法；普通 `--unit` 回归不依赖这些内核能力。

@@ -89,6 +89,8 @@ jobs:
             - 完善浏览器 TLS、REALITY、ECH、TLS 分片和 Linux kTLS，并修复握手重试校验。
             - 首页统一显示出口 IP、流量与应用内存，集中切换规则、全局和直连；界面支持窄窗口与 1.25 倍缩放。
             - 使用 Rust 1.100；仅发布 AMD64 安装包，在 ubuntu-latest 构建并执行应用、网络组件及 Wayland 回归测试。
+            - 修正启动恢复窗口与桌面启动器标识不一致的问题，验证重复启动复用原窗口。
+            - 将依赖 Linux kTLS 模块的测试改为显式执行，修复 Ubuntu runner 缺少该模块时阻断构建的问题。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             安装包适用于 Intel / AMD 的 x86_64 电脑。下载并解压 tar.gz 后运行 `./install.sh`。

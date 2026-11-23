@@ -112,6 +112,7 @@ async fn exercise(
 }
 
 #[tokio::test]
+#[ignore = "requires a Linux kernel with kTLS and the tested cipher modules enabled"]
 async fn linux_tls_offload_all_ciphers_directions_and_half_close() {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for (version, ciphers) in [
@@ -162,6 +163,7 @@ async fn linux_tls13_key_updates() {
 }
 
 #[tokio::test]
+#[ignore = "requires a Linux kernel with kTLS and the tested cipher modules enabled"]
 async fn linux_tls_truncated_transport_is_not_clean_eof() {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         for (tx, rx) in [(true, false), (false, true), (true, true)] {

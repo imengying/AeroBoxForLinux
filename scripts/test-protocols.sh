@@ -5,8 +5,8 @@ cd "$(dirname "$0")/.."
 project_dir=$(pwd)
 mode=${1:-interop}
 case "$mode" in
-    --unit|interop) ;;
-    *) printf 'Usage: %s [--unit]\n' "$0" >&2; exit 2 ;;
+    --unit|--ktls|interop) ;;
+    *) printf 'Usage: %s [--unit|--ktls]\n' "$0" >&2; exit 2 ;;
 esac
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$project_dir/target"}
 mkdir -p "$CARGO_TARGET_DIR"
@@ -44,6 +44,13 @@ run_unit_tests() {
 }
 if [ "$mode" = --unit ]; then
     run_unit_tests
+    exit 0
+fi
+if [ "$mode" = --ktls ]; then
+    # Explicit environment test: Linux 6.14+ with kTLS and cipher modules.
+    # Keep failures fatal when requested; ordinary CI does not assume support.
+    cargo test --manifest-path vendor/shoes/Cargo.toml --lib crypto::ktls::tests:: \
+        -- --ignored --nocapture --test-threads=1
     exit 0
 fi
 

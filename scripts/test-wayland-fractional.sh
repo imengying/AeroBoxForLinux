@@ -4,6 +4,7 @@ set -eu
 binary=$1
 output_dir=$2
 rm -f "$output_dir"/*.png
+rm -f "$output_dir/desktop-windows.json" "$output_dir/desktop-launch.log"
 test_dir=$(mktemp -d)
 cleanup() {
   if [ -d "$test_dir/screenshots" ]; then
@@ -17,6 +18,9 @@ mkdir -m 700 "$test_dir/runtime" "$test_dir/screenshots"
 export XDG_RUNTIME_DIR="$test_dir/runtime"
 cp "$binary" "$test_dir/AeroBox"
 chmod 755 "$test_dir/AeroBox"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cp "$script_dir/install.sh" "$script_dir/test-desktop.py" "$test_dir/"
+cp "$script_dir/../resources/icons/io.github.imengying.AeroBoxForLinux.png" "$test_dir/"
 cat > "$test_dir/sway.config" <<'CONFIG'
 xwayland disable
 output * bg #f4f5f8 solid_color
@@ -65,6 +69,7 @@ assert any(o['active'] and o['scale'] == 1.25 for o in outputs), outputs
 PY
 "$test_dir/AeroBox" --data-dir "$test_dir/data" --smoke-test "$test_dir/screenshots/home.png"
 test -s "$test_dir/screenshots/home.png"
+python3 "$test_dir/test-desktop.py" "$test_dir"
 SESSION
 # A headless compositor still refuses to run as root. Drop privileges inside
 # this disposable directory; all application and D-Bus state stays isolated.

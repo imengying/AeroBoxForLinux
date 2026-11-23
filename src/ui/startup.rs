@@ -14,6 +14,7 @@ pub fn recover_store(
     loop {
         let window = adw::Window::builder()
             .title("AeroBox")
+            .icon_name(platform::APP_ID)
             .default_width(560)
             .default_height(450)
             .build();
