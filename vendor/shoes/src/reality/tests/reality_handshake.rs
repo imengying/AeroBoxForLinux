@@ -58,7 +58,9 @@ fn interleaved_connections_do_not_share_authentication_state() {
 fn real_target_certificate_never_authenticates_reality() {
     let (cc, _) = configs(CipherSuite::AES_128_GCM_SHA256);
     let cert = rcgen::generate_simple_self_signed(vec!["cover.test".into()]).unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+    let config = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
         .with_no_client_auth()
         .with_single_cert(
             vec![cert.cert.der().clone()],
@@ -106,7 +108,7 @@ fn authenticated_hellos_longer_than_one_record_reach_rustls() {
     let mut aad = hello[5..].to_vec();
     aad[39..71].fill(0);
     let mut payload = [0; 16];
-    payload[..3].copy_from_slice(&[1, 8, 0]);
+    payload[..3].copy_from_slice(&[1, 8, 1]);
     payload[8..].fill(1);
     let session = encrypt_session_id(&payload, &auth, &hello[31..43], &aad).unwrap();
     hello[44..76].copy_from_slice(&session);
@@ -128,7 +130,9 @@ fn authenticated_hellos_longer_than_one_record_reach_rustls() {
 #[test]
 fn ordinary_tls_client_hello_is_denied() {
     let (_, sc) = configs(CipherSuite::AES_128_GCM_SHA256);
-    let config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+    let config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
     let mut client =
@@ -330,8 +334,8 @@ fn client_hello_carries_authenticated_reality_metadata() {
     let short_id = [1, 2, 3, 4, 5, 6, 7, 8];
     cc.short_id = short_id;
     sc.short_ids = vec![[0; 8], short_id, [255; 8]];
-    sc.min_client_version = Some([1, 8, 0]);
-    sc.max_client_version = Some([1, 8, 0]);
+    sc.min_client_version = Some([1, 8, 1]);
+    sc.max_client_version = Some([1, 8, 1]);
     sc.max_time_diff = Some(60_000);
 
     let mut client = cc.create_connection().unwrap();
@@ -346,7 +350,7 @@ fn client_hello_carries_authenticated_reality_metadata() {
     let mut aad = hello[5..].to_vec();
     aad[39..71].fill(0);
     let metadata = decrypt_session_id(session, &auth, &hello[31..43], &aad).unwrap();
-    assert_eq!(metadata[..4], [1, 8, 0, 0]);
+    assert_eq!(metadata[..4], [1, 8, 1, 0]);
     let timestamp = u32::from_be_bytes(metadata[4..8].try_into().unwrap()) as u64;
     assert!(timestamp.abs_diff(crate::clock::unix_seconds().unwrap()) <= 1);
     assert_eq!(metadata[8..], short_id);
@@ -419,8 +423,8 @@ fn authentication_policy_and_client_share_variants() {
         match case {
             "short-id" => cc.short_id = [2; 8],
             "static-key" => sc.private_key = [43; 32],
-            "minimum" => sc.min_client_version = Some([1, 8, 1]),
-            "maximum" => sc.max_client_version = Some([1, 7, 9]),
+            "minimum" => sc.min_client_version = Some([1, 8, 2]),
+            "maximum" => sc.max_client_version = Some([1, 8, 0]),
             _ => {}
         }
         let mut crypto = reality_rustls_adapter::provider(&cc.cipher_suites);
@@ -448,7 +452,7 @@ fn authentication_policy_and_client_share_variants() {
             let mut aad = hello[5..].to_vec();
             aad[39..71].fill(0);
             let mut payload = [0; 16];
-            payload[..3].copy_from_slice(&[1, 8, 0]);
+            payload[..3].copy_from_slice(&[1, 8, 1]);
             payload[8..].fill(1);
             let session = encrypt_session_id(&payload, &auth, &hello[31..43], &aad).unwrap();
             hello[44..76].copy_from_slice(&session);
@@ -643,7 +647,7 @@ fn authenticated_invalid_tls_shares_forward_before_commit() {
         let mut aad = hello[5..].to_vec();
         aad[39..71].fill(0);
         let mut payload = [0; 16];
-        payload[..3].copy_from_slice(&[1, 8, 0]);
+        payload[..3].copy_from_slice(&[1, 8, 1]);
         payload[8..].fill(1);
         let session = encrypt_session_id(&payload, &auth, &hello[31..43], &aad).unwrap();
         hello[44..76].copy_from_slice(&session);

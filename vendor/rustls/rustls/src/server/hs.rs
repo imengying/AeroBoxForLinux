@@ -585,6 +585,8 @@ impl ExpectClientHello {
                 KeyExchangeAlgorithm::ECDHE => {
                     ecdhe_possible |= supported.is_some();
                 }
+                // RSA key transport is client-only and has no named groups.
+                KeyExchangeAlgorithm::RSA => {}
             }
 
             supported_groups.push(supported);

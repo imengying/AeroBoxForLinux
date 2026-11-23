@@ -36,6 +36,20 @@ use crate::sync::Arc;
 use crate::tls12::{self, ConnectionSecrets, Tls12CipherSuite};
 use crate::verify::{self, DigitallySignedStruct};
 
+// Allocated only for opt-in TLS 1.2 connections able to renegotiate; freed
+// after the single renegotiation. TLS 1.3 connections retain no such state.
+#[derive(Debug)]
+pub(super) struct Renegotiation {
+    config: Arc<ClientConfig>,
+    server_name: ServerName<'static>,
+    pub(super) client_verify: [u8; 12],
+    server_verify: [u8; 12],
+    using_ems: bool,
+    pub(super) resumed: bool,
+    previous_leaf: Option<pki_types::CertificateDer<'static>>,
+    hello: Option<Box<crate::msgs::handshake::ClientHelloPayload>>,
+}
+
 mod server_hello {
     use super::*;
     use crate::client::hs::{ClientHelloInput, ClientSessionValue};
@@ -92,6 +106,7 @@ mod server_hello {
             let ClientHelloInput {
                 config,
                 server_name,
+                renegotiation_hello,
                 ..
             } = self.input;
 
@@ -114,6 +129,61 @@ mod server_hello {
                         PeerIncompatible::ExtendedMasterSecretExtensionRequired,
                     )
                 });
+            }
+
+            if cx.common.tls12_renegotiating {
+                let previous = cx
+                    .data
+                    .tls12_renegotiation
+                    .as_ref()
+                    .expect("renegotiation context");
+                let mut binding = [0; 24];
+                binding[..12].copy_from_slice(&previous.client_verify);
+                binding[12..].copy_from_slice(&previous.server_verify);
+                if (previous.using_ems && !using_ems)
+                    || server_hello
+                        .renegotiation_info
+                        .as_ref()
+                        .map(|p| p.0.as_slice())
+                        != Some(binding.as_slice())
+                {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        Error::General(
+                            "TLS 1.2 renegotiation changed EMS or the previous Finished binding"
+                                .into(),
+                        ),
+                    ));
+                }
+            } else {
+                if server_hello
+                    .renegotiation_info
+                    .as_ref()
+                    .is_some_and(|p| !p.0.is_empty())
+                {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        Error::General(
+                            "initial TLS 1.2 renegotiation binding must be empty".into(),
+                        ),
+                    ));
+                }
+                if config.enable_tls12_renegotiation
+                    && server_hello
+                        .renegotiation_info
+                        .is_some()
+                {
+                    cx.data.tls12_renegotiation = Some(Box::new(Renegotiation {
+                        config: config.clone(),
+                        server_name: server_name.clone(),
+                        client_verify: [0; 12],
+                        server_verify: [0; 12],
+                        using_ems,
+                        resumed: false,
+                        previous_leaf: None,
+                        hello: renegotiation_hello,
+                    }));
+                }
             }
 
             // Might the server send a ticket?
@@ -140,6 +210,11 @@ mod server_hello {
             if let Some(resuming) = resuming_session {
                 if resuming.session_id == server_hello.session_id {
                     debug!("Server agreed to resume");
+                    // RFC7627 section 5.4 forbids renegotiation after an
+                    // abbreviated handshake without extended master secret.
+                    if !using_ems {
+                        cx.data.tls12_renegotiation = None;
+                    }
 
                     // Is the server telling lies about the ciphersuite?
                     if resuming.suite() != suite {
@@ -308,6 +383,31 @@ impl State<ClientConnectionData> for ExpectCertificateStatusOrServerKx<'_> {
     where
         Self: 'm,
     {
+        // A static RSA server has no ServerKeyExchange. CertificateStatus is
+        // still optional, followed by CertificateRequest or ServerHelloDone.
+        if self.suite.kx == KeyExchangeAlgorithm::RSA
+            && !matches!(
+                m.payload,
+                MessagePayload::Handshake {
+                    parsed: HandshakeMessagePayload(HandshakePayload::CertificateStatus(..)),
+                    ..
+                }
+            )
+        {
+            return Box::new(ExpectServerKx {
+                config: self.config,
+                resuming_session: self.resuming_session,
+                session_id: self.session_id,
+                server_name: self.server_name,
+                randoms: self.randoms,
+                using_ems: self.using_ems,
+                transcript: self.transcript,
+                suite: self.suite,
+                server_cert: ServerCertDetails::new(self.server_cert_chain, vec![]),
+                must_issue_new_ticket: self.must_issue_new_ticket,
+            })
+            .handle(cx, m);
+        }
         match m.payload {
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerKeyExchange(..)),
@@ -457,6 +557,22 @@ impl State<ClientConnectionData> for ExpectServerKx<'_> {
     where
         Self: 'm,
     {
+        if self.suite.kx == KeyExchangeAlgorithm::RSA {
+            return Box::new(ExpectServerDoneOrCertReq {
+                config: self.config,
+                resuming_session: self.resuming_session,
+                session_id: self.session_id,
+                server_name: self.server_name,
+                randoms: self.randoms,
+                using_ems: self.using_ems,
+                transcript: self.transcript,
+                suite: self.suite,
+                server_cert: self.server_cert,
+                server_kx: None,
+                must_issue_new_ticket: self.must_issue_new_ticket,
+            })
+            .handle(cx, m);
+        }
         let opaque_kx = require_handshake_msg!(
             m,
             HandshakeType::ServerKeyExchange,
@@ -500,7 +616,7 @@ impl State<ClientConnectionData> for ExpectServerKx<'_> {
             transcript: self.transcript,
             suite: self.suite,
             server_cert: self.server_cert,
-            server_kx,
+            server_kx: Some(server_kx),
             must_issue_new_ticket: self.must_issue_new_ticket,
         }))
     }
@@ -534,7 +650,7 @@ fn emit_certificate(
     };
 
     transcript.add_message(&cert);
-    common.send_msg(cert, false);
+    common.send_msg(cert, common.record_layer.is_encrypting());
 }
 
 fn emit_client_kx(
@@ -551,6 +667,9 @@ fn emit_client_kx(
         KeyExchangeAlgorithm::DHE => ClientKeyExchangeParams::Dh(ClientDhParams {
             public: PayloadU16::new(pub_key.to_vec()),
         }),
+        KeyExchangeAlgorithm::RSA => {
+            ClientKeyExchangeParams::Rsa(PayloadU16::new(pub_key.to_vec()))
+        }
     }
     .encode(&mut buf);
     let pubkey = Payload::new(buf);
@@ -563,7 +682,7 @@ fn emit_client_kx(
     };
 
     transcript.add_message(&ckx);
-    common.send_msg(ckx, false);
+    common.send_msg(ckx, common.record_layer.is_encrypting());
 }
 
 fn emit_certverify(
@@ -587,7 +706,7 @@ fn emit_certverify(
     };
 
     transcript.add_message(&m);
-    common.send_msg(m, false);
+    common.send_msg(m, common.record_layer.is_encrypting());
     Ok(())
 }
 
@@ -597,16 +716,21 @@ fn emit_ccs(common: &mut CommonState) {
         payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload {}),
     };
 
-    common.send_msg(ccs, false);
+    common.send_msg(ccs, common.record_layer.is_encrypting());
 }
 
 fn emit_finished(
     secrets: &ConnectionSecrets,
     transcript: &mut HandshakeHash,
-    common: &mut CommonState,
+    cx: &mut ClientContext<'_>,
 ) {
     let vh = transcript.current_hash();
     let verify_data = secrets.client_verify_data(&vh);
+    if let Some(previous) = cx.data.tls12_renegotiation.as_mut() {
+        previous
+            .client_verify
+            .copy_from_slice(&verify_data);
+    }
     let verify_data_payload = Payload::new(verify_data);
 
     let f = Message {
@@ -617,7 +741,26 @@ fn emit_finished(
     };
 
     transcript.add_message(&f);
-    common.send_msg(f, true);
+    cx.common.send_msg(f, true);
+}
+
+enum PreparedClientKx {
+    Dh {
+        active: Box<dyn crate::crypto::ActiveKeyExchange>,
+        peer: Vec<u8>,
+    },
+    Rsa {
+        ciphertext: Vec<u8>,
+        premaster: crate::crypto::SharedSecret,
+    },
+}
+impl PreparedClientKx {
+    fn public(&self) -> &[u8] {
+        match self {
+            Self::Dh { active, .. } => active.pub_key(),
+            Self::Rsa { ciphertext, .. } => ciphertext,
+        }
+    }
 }
 
 struct ServerKxDetails {
@@ -647,7 +790,7 @@ struct ExpectServerDoneOrCertReq<'a> {
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails<'a>,
-    server_kx: ServerKxDetails,
+    server_kx: Option<ServerKxDetails>,
     must_issue_new_ticket: bool,
 }
 
@@ -729,7 +872,7 @@ struct ExpectCertificateRequest<'a> {
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails<'a>,
-    server_kx: ServerKxDetails,
+    server_kx: Option<ServerKxDetails>,
     must_issue_new_ticket: bool,
 }
 
@@ -820,7 +963,7 @@ struct ExpectServerDone<'a> {
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails<'a>,
-    server_kx: ServerKxDetails,
+    server_kx: Option<ServerKxDetails>,
     client_auth: Option<ClientAuthDetails>,
     must_issue_new_ticket: bool,
 }
@@ -877,6 +1020,19 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             .split_first()
             .ok_or(Error::NoCertificatesPresented)?;
 
+        if cx.common.tls12_renegotiating
+            && cx
+                .data
+                .tls12_renegotiation
+                .as_ref()
+                .and_then(|p| p.previous_leaf.as_ref())
+                != Some(end_entity)
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::BadCertificate,
+                Error::General("TLS 1.2 peer certificate changed during renegotiation".into()),
+            ));
+        }
         let now = st.config.current_time()?;
 
         let cert_verified = st
@@ -897,9 +1053,19 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
         // 2.
         // Build up the contents of the signed message.
         // It's ClientHello.random || ServerHello.random || ServerKeyExchange.params
-        let sig_verified = {
+        let sig_verified = if let Some(server_kx) = &st.server_kx {
             // Check the signature is compatible with the ciphersuite.
-            let sig = &st.server_kx.kx_sig;
+            let sig = &server_kx.kx_sig;
+            if st
+                .config
+                .client_hello_layout
+                .is_some_and(|p| !p.permits_signature(sig.scheme))
+            {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+                ));
+            }
             let Some(sig_alg) = sig.scheme.algorithm() else {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::IllegalParameter,
@@ -910,7 +1076,7 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             let mut message = Vec::new();
             message.extend_from_slice(&st.randoms.client);
             message.extend_from_slice(&st.randoms.server);
-            message.extend_from_slice(&st.server_kx.kx_params);
+            message.extend_from_slice(&server_kx.kx_params);
 
             if !SupportedCipherSuite::from(suite).usable_for_signature_algorithm(sig_alg) {
                 warn!(
@@ -931,8 +1097,15 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
                     cx.common
                         .send_cert_verify_error_alert(err)
                 })?
+        } else if suite.kx == KeyExchangeAlgorithm::RSA {
+            // Static RSA has no SKE signature. Authentication is completed by
+            // the server Finished, which proves possession of the private key
+            // needed to recover our fresh premaster. No application data is
+            // released before that Finished is verified.
+            verify::HandshakeSignatureValid::assertion()
+        } else {
+            return Err(InvalidMessage::MissingKeyExchange.into());
         };
-        cx.common.peer_certificates = Some(st.server_cert.cert_chain.into_owned());
 
         // 3.
         if let Some(client_auth) = &st.client_auth {
@@ -943,39 +1116,60 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             emit_certificate(&mut st.transcript, certs, cx.common);
         }
 
-        // 4a.
-        let kx_params = tls12::decode_kx_params::<ServerKeyExchangeParams>(
-            st.suite.kx,
-            cx.common,
-            &st.server_kx.kx_params,
-        )?;
-        let maybe_skxg = match &kx_params {
-            ServerKeyExchangeParams::Ecdh(ecdh) => st
-                .config
-                .find_kx_group(ecdh.curve_params.named_group, ProtocolVersion::TLSv1_2),
-            ServerKeyExchangeParams::Dh(dh) => {
-                let ffdhe_group = dh.as_ffdhe_group();
-
-                st.config
+        // 4a. Static RSA encrypts a fresh premaster to the certified key;
+        // ephemeral DH exchanges use the authenticated ServerKeyExchange.
+        let kx = if let Some(server_kx) = &st.server_kx {
+            let params = tls12::decode_kx_params::<ServerKeyExchangeParams>(
+                st.suite.kx,
+                cx.common,
+                &server_kx.kx_params,
+            )?;
+            let group = match &params {
+                ServerKeyExchangeParams::Ecdh(ecdh) => st
+                    .config
+                    .find_kx_group(ecdh.curve_params.named_group, ProtocolVersion::TLSv1_2),
+                ServerKeyExchangeParams::Dh(dh) => st
+                    .config
                     .provider
                     .kx_groups
                     .iter()
-                    .find(|kxg| kxg.ffdhe_group() == Some(ffdhe_group))
-                    .copied()
+                    .find(|group| group.ffdhe_group() == Some(dh.as_ffdhe_group()))
+                    .copied(),
+            }
+            .ok_or_else(|| {
+                cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedUnofferedKxGroup,
+                )
+            })?;
+            cx.common.kx_state = KxState::Start(group);
+            PreparedClientKx::Dh {
+                active: group.start()?,
+                peer: params.pub_key().to_vec(),
+            }
+        } else {
+            let (ciphertext, premaster) = st
+                .config
+                .provider
+                .key_provider
+                .encrypt_tls12_rsa_premaster(end_entity, ProtocolVersion::TLSv1_2)
+                .map_err(|err| {
+                    cx.common
+                        .send_cert_verify_error_alert(err)
+                })?;
+            // The TLS 1.3 offer may have prepared a share. It did not become
+            // the negotiated key exchange when the server selected RSA.
+            cx.common.kx_state = KxState::None;
+            PreparedClientKx::Rsa {
+                ciphertext,
+                premaster,
             }
         };
-        let Some(skxg) = maybe_skxg else {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::SelectedUnofferedKxGroup,
-            ));
-        };
-        cx.common.kx_state = KxState::Start(skxg);
-        let kx = skxg.start()?;
+        cx.common.peer_certificates = Some(st.server_cert.cert_chain.into_owned());
 
         // 4b.
         let mut transcript = st.transcript;
-        emit_client_kx(&mut transcript, st.suite.kx, cx.common, kx.pub_key());
+        emit_client_kx(&mut transcript, st.suite.kx, cx.common, kx.public());
         // Note: EMS handshake hash only runs up to ClientKeyExchange.
         let ems_seed = st
             .using_ems
@@ -989,18 +1183,22 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
         // 4d. Derive secrets.
         // An alert at this point will be sent in plaintext.  That must happen
         // prior to the CCS, or else the peer will try to decrypt it.
-        let secrets = ConnectionSecrets::from_key_exchange(
-            kx,
-            kx_params.pub_key(),
-            ems_seed,
-            st.randoms,
-            suite,
-        )
-        .map_err(|err| {
-            cx.common
-                .send_fatal_alert(AlertDescription::IllegalParameter, err)
-        })?;
-        cx.common.kx_state.complete();
+        let secrets = match kx {
+            PreparedClientKx::Dh { active, peer } => {
+                let secrets = ConnectionSecrets::from_key_exchange(
+                    active, &peer, ems_seed, st.randoms, suite,
+                )
+                .map_err(|err| {
+                    cx.common
+                        .send_fatal_alert(AlertDescription::IllegalParameter, err)
+                })?;
+                cx.common.kx_state.complete();
+                secrets
+            }
+            PreparedClientKx::Rsa { premaster, .. } => {
+                ConnectionSecrets::from_rsa_premaster(&premaster, ems_seed, st.randoms, suite)
+            }
+        };
 
         // 4e. CCS. We are definitely going to switch on encryption.
         emit_ccs(cx.common);
@@ -1018,7 +1216,7 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             .start_encrypting();
 
         // 5.
-        emit_finished(&secrets, &mut transcript, cx.common);
+        emit_finished(&secrets, &mut transcript, cx);
 
         if st.must_issue_new_ticket {
             Ok(Box::new(ExpectNewTicket {
@@ -1155,6 +1353,10 @@ impl State<ClientConnectionData> for ExpectCcs {
         // message.
         cx.common.check_aligned_handshake()?;
 
+        // After this CCS, application records must wait for authenticated Finished.
+        if cx.common.tls12_renegotiating {
+            cx.common.may_receive_application_data = false;
+        }
         // Note: msgs layer validates trivial contents of CCS.
         cx.common
             .record_layer
@@ -1274,6 +1476,12 @@ impl State<ClientConnectionData> for ExpectFinished {
                 }
             };
 
+        if let Some(previous) = cx.data.tls12_renegotiation.as_mut() {
+            previous
+                .server_verify
+                .copy_from_slice(finished.bytes());
+            previous.resumed = st.resuming;
+        }
         // Hash this message too.
         st.transcript.add_message(&m);
 
@@ -1284,12 +1492,18 @@ impl State<ClientConnectionData> for ExpectFinished {
             cx.common
                 .record_layer
                 .start_encrypting();
-            emit_finished(&st.secrets, &mut st.transcript, cx.common);
+            emit_finished(&st.secrets, &mut st.transcript, cx);
         }
 
+        if cx.common.tls12_renegotiating {
+            cx.common.tls12_renegotiating = false;
+            cx.data.tls12_renegotiation = None;
+        }
         cx.common
             .start_traffic(&mut cx.sendable_plaintext);
         Ok(Box::new(ExpectTraffic {
+            can_renegotiate: cx.data.tls12_renegotiation.is_some(),
+            using_ems: st.using_ems,
             secrets: st.secrets,
             _cert_verified: st.cert_verified,
             _sig_verified: st.sig_verified,
@@ -1316,6 +1530,8 @@ impl State<ClientConnectionData> for ExpectFinished {
 
 // -- Traffic transit state --
 struct ExpectTraffic {
+    can_renegotiate: bool,
+    using_ems: bool,
     secrets: ConnectionSecrets,
     _cert_verified: verify::ServerCertVerified,
     _sig_verified: verify::HandshakeSignatureValid,
@@ -1331,6 +1547,47 @@ impl State<ClientConnectionData> for ExpectTraffic {
     where
         Self: 'm,
     {
+        if m.is_handshake_type(HandshakeType::HelloRequest) && self.can_renegotiate {
+            cx.common.check_aligned_handshake()?;
+            let previous = cx
+                .data
+                .tls12_renegotiation
+                .as_mut()
+                .expect("renegotiation context");
+            previous.previous_leaf = cx
+                .common
+                .peer_certificates
+                .as_ref()
+                .and_then(|p| p.first())
+                .cloned();
+            let mut config = (*previous.config).clone();
+            config.resumption = crate::client::Resumption::disabled();
+            config.enable_early_data = false;
+            let server_name = previous.server_name.clone();
+            let cached_hello = previous.hello.take();
+            let extra = crate::msgs::handshake::ClientExtensionsInput {
+                protocols: Some(
+                    config
+                        .alpn_protocols
+                        .iter()
+                        .cloned()
+                        .map(crate::msgs::handshake::ProtocolName::from)
+                        .collect(),
+                ),
+                ..Default::default()
+            };
+            cx.common.may_send_application_data = false;
+            cx.common.tls12_renegotiating = true;
+            cx.common.handshake_kind = None;
+            cx.common.kx_state = KxState::default();
+            cx.data.pending_application_settings = None;
+            cx.data.send_application_settings = false;
+            if let Some(hello) = cached_hello {
+                return hs::start_cached_renegotiation(hello, server_name, Arc::new(config), cx);
+            }
+            let input = hs::ClientHelloInput::new(server_name, &extra, cx, Arc::new(config))?;
+            return input.start_handshake(extra, cx);
+        }
         match m.payload {
             MessagePayload::ApplicationData(payload) => cx
                 .common
@@ -1351,6 +1608,11 @@ impl State<ClientConnectionData> for ExpectTraffic {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
+        if !self.using_ems {
+            return Err(Error::General(
+                "TLS 1.2 key exporters require extended master secret".into(),
+            ));
+        }
         self.secrets
             .export_keying_material(output, label, context);
         Ok(())
@@ -1361,7 +1623,16 @@ impl State<ClientConnectionData> for ExpectTraffic {
             .extract_secrets(Side::Client)
     }
 
+    fn can_handle_renegotiation(&self) -> bool {
+        self.can_renegotiate
+    }
+
     fn into_external_state(self: Box<Self>) -> Result<Box<dyn KernelState + 'static>, Error> {
+        if self.can_renegotiate {
+            return Err(Error::General(
+                "TLS 1.2 renegotiation prevents kernel handoff".into(),
+            ));
+        }
         Ok(self)
     }
 

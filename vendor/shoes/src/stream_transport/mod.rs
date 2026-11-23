@@ -251,6 +251,18 @@ impl Handler {
 }
 #[async_trait]
 impl TcpClientHandler for Handler {
+    fn validate_alpn(&self, alpn: Option<&[u8]>) -> io::Result<()> {
+        let valid = match self.options.kind {
+            Kind::Grpc | Kind::Http2 => alpn == Some(b"h2"),
+            Kind::HttpUpgrade | Kind::Http1 => alpn.is_none_or(|protocol| protocol == b"http/1.1"),
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(invalid("HTTP transport does not match negotiated TLS ALPN"))
+        }
+    }
+
     fn has_session_pool(&self) -> bool {
         self.inner.has_session_pool()
     }

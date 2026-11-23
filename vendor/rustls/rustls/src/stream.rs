@@ -45,24 +45,23 @@ where
     }
 
     fn prepare_read(&mut self) -> Result<()> {
-        // Return buffered plaintext without doing any IO: `complete_io()` does not read
-        // while plaintext is buffered, so blocked writes would otherwise hide it.
-        if !self.conn.received_plaintext.is_empty() {
-            return Ok(());
-        }
-
-        self.complete_prior_io()?;
-
-        // We call complete_io() in a loop since a single call may read only
-        // a partial packet from the underlying transport, or may only write
-        // pending TLS data (like an alert queued while processing received
-        // records). A full packet is needed to get more plaintext, which we
-        // must do if EOF has not been hit.
-        while self.conn.wants_read() {
+        loop {
+            // Respect bounded receive buffering, including application data
+            // received under the old epoch during TLS 1.2 renegotiation.
+            if !self.conn.received_plaintext.is_empty() {
+                return Ok(());
+            }
+            self.complete_prior_io()?;
+            if !self.conn.wants_read() {
+                break;
+            }
             let (read, written) = self.conn.complete_io(self.sock)?;
             if read == 0 && written == 0 {
                 break;
             }
+            // HelloRequest can start a handshake while reading. Its pending
+            // ClientHello makes wants_read false until it has been written,
+            // so run complete_prior_io again before testing wants_read.
         }
 
         Ok(())

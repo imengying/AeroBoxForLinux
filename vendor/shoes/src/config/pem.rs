@@ -478,7 +478,9 @@ fn gather_pem_file_paths_from_client_config(
 ) {
     // Check QUIC settings
     if let Some(ref mut quic_config) = client_config.quic_settings {
-        for root in &mut quic_config.options.root_certificates { visitor(root, PemUsage::Reload); }
+        for root in &mut quic_config.options.root_certificates {
+            visitor(root, PemUsage::Reload);
+        }
         visit_optional_pem(&mut quic_config.cert, visitor);
         visit_optional_pem(&mut quic_config.key, visitor);
     }
@@ -492,6 +494,16 @@ fn gather_pem_file_paths_from_client_proxy(
     visitor: &mut PemVisitor<'_>,
 ) {
     match client_proxy {
+        ClientProxyConfig::Shadowsocks {
+            plugin: Some(plugin),
+            ..
+        } => {
+            if let Some(roots) = plugin.roots_mut() {
+                for root in roots {
+                    visitor(root, PemUsage::Reload);
+                }
+            }
+        }
         ClientProxyConfig::Wireguard(config) => {
             if let Some(chain) = &mut config.peer_client_chain {
                 for hop in chain.hops.iter_mut() {
@@ -500,7 +512,9 @@ fn gather_pem_file_paths_from_client_proxy(
             }
         }
         ClientProxyConfig::Tls(tls_config) => {
-            for root in &mut tls_config.options.root_certificates { visitor(root, PemUsage::Reload); }
+            for root in &mut tls_config.options.root_certificates {
+                visitor(root, PemUsage::Reload);
+            }
             visit_optional_pem(&mut tls_config.cert, visitor);
             visit_optional_pem(&mut tls_config.key, visitor);
             // Recurse into inner protocol
@@ -513,7 +527,9 @@ fn gather_pem_file_paths_from_client_proxy(
         ClientProxyConfig::ShadowTls { protocol, .. } => {
             gather_pem_file_paths_from_client_proxy(protocol, visitor);
         }
-        ClientProxyConfig::Multiplex(config) => { gather_pem_file_paths_from_client_proxy(&mut config.protocol, visitor); }
+        ClientProxyConfig::Multiplex(config) => {
+            gather_pem_file_paths_from_client_proxy(&mut config.protocol, visitor);
+        }
         ClientProxyConfig::Uot(config) => {
             gather_pem_file_paths_from_client_proxy(&mut config.protocol, visitor);
         }

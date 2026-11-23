@@ -605,7 +605,7 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
     app.service.select_subscription_node(&first, "B").unwrap();
     assert_eq!(request(&app.service, &url).unwrap(), "node B");
     assert_eq!(app.service.status().generation, generation);
-    assert!(app.service.subscription_nodes_runtime(&first).unwrap()[1].selected);
+    assert!(app.service.subscription_nodes(&first).unwrap()[1].selected);
 
     app.service.set_routing_mode("rule").unwrap();
     assert_eq!(request(&app.service, &url).unwrap(), "node B");
@@ -629,12 +629,12 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
     assert_eq!(request(&app.service, &url).unwrap(), "node C");
     assert!(
         app.service
-            .subscription_nodes_runtime(&first)
+            .subscription_nodes(&first)
             .unwrap()
             .iter()
             .all(|node| !node.available && !node.selected)
     );
-    assert!(app.service.subscription_nodes_runtime(&second).unwrap()[0].selected);
+    assert!(app.service.subscription_nodes(&second).unwrap()[0].selected);
     app.service.restart().unwrap();
     assert_ne!(app.service.status().generation, generation);
     assert_eq!(request(&app.service, &url).unwrap(), "node C");

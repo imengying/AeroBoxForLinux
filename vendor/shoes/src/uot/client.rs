@@ -21,7 +21,7 @@ impl Handler {
 }
 pub(crate) async fn frame(version:u8, result:TcpClientSetupResult, target:ResolvedLocation)->io::Result<Box<dyn AsyncMessageStream>> {
         let mut stream=result.client_stream;
-        if let Some(bytes)=result.early_data { if !bytes.is_empty() {return Err(io::Error::new(io::ErrorKind::InvalidData,"unexpected data before UoT request"));} }
+        if let Some(bytes)=result.early_data && !bytes.is_empty() {return Err(io::Error::new(io::ErrorKind::InvalidData,"unexpected data before UoT request"));}
         if version==2 {
             stream.write_u8(1).await?;stream.write_all(&crate::socks_handler::write_location_to_vec(target.location())?).await?;stream.flush().await?;
             Ok(Box::new(super::UotV2Stream::new(stream)))

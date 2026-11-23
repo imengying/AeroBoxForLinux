@@ -190,8 +190,8 @@ fn common_inactive_clash_fields_do_not_hide_live_settings() {
         ("alpn", json!(["h2"])),
         ("alpn", json!("")),
         ("client-fingerprint", json!("chrome")),
-        ("tfo", json!(true)),
-        ("mptcp", json!(true)),
+        ("tfo", json!("true")),
+        ("mptcp", json!("true")),
     ] {
         let mut invalid = node.clone();
         invalid[field] = value;
@@ -213,7 +213,7 @@ fn common_inactive_clash_fields_do_not_hide_live_settings() {
 fn skipped_node_reports_keep_names_fields_and_actionable_reasons() {
     let mut invalid = clash();
     invalid["alterId"] = "broken".into();
-    let mut plugin = json!({"type":"ss", "name":"plugin-node", "server":"offline.invalid", "port":443, "cipher":"aes-128-gcm", "password":"secret", "plugin":"obfs-local"});
+    let mut plugin = json!({"type":"ss", "name":"plugin-node", "server":"offline.invalid", "port":443, "cipher":"aes-128-gcm", "password":"secret", "plugin":"unknown-plugin"});
     let body = json!({"proxies":[invalid, plugin]}).to_string();
     let error = format!("{:#}", subscription::parse_with_skips(&body).unwrap_err());
     for expected in ["legacy", "alterId", "65535", "plugin-node", "plugin"] {

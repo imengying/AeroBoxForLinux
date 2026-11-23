@@ -43,11 +43,18 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     pub(crate) fn from_config(config: &ResolvedClientConfig) -> io::Result<Option<Self>> {
-        if config.transport != Transport::Tcp {
+        if config.transport != Transport::Tcp
+            && !(config.transport == Transport::Quic
+                && crate::ss_plugin::quic::resolved(&config.protocol).is_some())
+        {
             return Ok(None);
         }
         Ok(match &config.protocol {
-            ResolvedClientProxyConfig::Socks { username, password, udp_enabled: true } => {
+            ResolvedClientProxyConfig::Socks {
+                username,
+                password,
+                udp_enabled: true,
+            } => {
                 let auth = match (username, password) {
                     (None, None) => None,
                     (username, password) => Some((
@@ -60,6 +67,7 @@ impl Client {
             ResolvedClientProxyConfig::Shadowsocks {
                 config,
                 udp_enabled: true,
+                ..
             } => Some(Self::Shadowsocks(Arc::new(shadowsocks::Client::new(
                 config.clone(),
             )?))),

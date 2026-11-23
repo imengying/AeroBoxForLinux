@@ -42,6 +42,39 @@ fn native_runtime_validates_dns_transports_and_domain_bootstrap() {
 }
 
 #[test]
+fn invalid_dns_ports_and_themes_cannot_replace_saved_settings() {
+    let app = setup();
+    let before = app.service.snapshot().settings;
+    let state_path = app.dir.path().join("state.json");
+    let saved = fs::read(&state_path).unwrap();
+    for address in [
+        "udp://127.0.0.1:0",
+        "tcp://[::1]:0",
+        "tls://dns.example.test:0",
+        "https://dns.example.test:0/dns-query",
+        "quic://[::1]:0",
+    ] {
+        for direct in [true, false] {
+            let mut settings = before.clone();
+            if direct {
+                settings.direct_dns = address.into();
+            } else {
+                settings.remote_dns = address.into();
+            }
+            let error = app.service.apply_settings(settings).unwrap_err();
+            assert!(error.to_string().contains("DNS 端口"), "{error:#}");
+            assert_eq!(app.service.snapshot().settings, before);
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+        }
+    }
+    let mut settings = before.clone();
+    settings.theme = "unknown".into();
+    assert!(app.service.apply_settings(settings).is_err());
+    assert_eq!(app.service.snapshot().settings, before);
+    assert_eq!(fs::read(state_path).unwrap(), saved);
+}
+
+#[test]
 fn android_rule_seeds_are_accepted_without_an_external_compiler() {
     let _serial = support::runtime_lock();
     let app = setup();
@@ -128,8 +161,10 @@ fn native_modes_and_network_settings_validate_without_binding_privileged_interfa
 #[test]
 fn stored_data_requires_the_current_schema_and_rejects_external_core_settings() {
     let app = setup();
-    let original = serde_json::to_value(app.service.snapshot()).unwrap();
-    let invalid = [
+    let mut state = app.service.snapshot();
+    state.rulesets.push(RuleSet::default());
+    let original = serde_json::to_value(state).unwrap();
+    let mut invalid = vec![
         {
             let mut v = original.clone();
             v["schema_version"] = json!(1);
@@ -151,11 +186,35 @@ fn stored_data_requires_the_current_schema_and_rejects_external_core_settings() 
             v
         },
         {
-            let mut v = original;
+            let mut v = original.clone();
             v["settings"]["unknown_option"] = json!(120);
             v
         },
+        {
+            let mut v = original.clone();
+            v["settings"]["theme"] = json!("unknown");
+            v
+        },
     ];
+    for (path, field) in [
+        ("/settings", "ipv6"),
+        ("/settings", "system_proxy"),
+        ("/subscriptions/0", "id"),
+        ("/subscriptions/0", "nodes"),
+        ("/subscriptions/0", "import_issues"),
+        ("/rulesets/0", "id"),
+        ("/rulesets/0", "enabled"),
+        ("/rulesets/0", "content"),
+    ] {
+        let mut value = original.clone();
+        value
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        invalid.push(value);
+    }
     for data in invalid {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");

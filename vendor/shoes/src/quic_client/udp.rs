@@ -196,7 +196,7 @@ impl Association {
 impl Drop for Association {
     fn drop(&mut self) {
         if self.close()
-            && let Some(sender) = &self.generation.dissociate
+            && let Some(sender) = self.generation.dissociate()
         {
             let _ = sender.try_send(tuic::Dissociate {
                 id: self.id as u16,
@@ -280,8 +280,7 @@ impl AsyncWriteMessage for Association {
         if use_uni_stream {
             let commands = self
                 .generation
-                .commands
-                .as_ref()
+                .commands()
                 .expect("TUIC command writer")
                 .clone();
             self.pending_write = Some(Box::pin(
@@ -310,7 +309,7 @@ impl AsyncShutdownMessage for Association {
     ) -> Poll<io::Result<()>> {
         std::task::ready!(poll_pending(&mut self.pending_write, cx))?;
         if self.close()
-            && let Some(sender) = self.generation.dissociate.clone()
+            && let Some(sender) = self.generation.dissociate().cloned()
         {
             self.pending_shutdown =
                 Some(Box::pin(tuic::request_dissociate(sender, self.id as u16)));

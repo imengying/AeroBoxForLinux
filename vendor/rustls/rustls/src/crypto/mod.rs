@@ -336,6 +336,30 @@ pub trait SecureRandom: Send + Sync + Debug {
 ///
 /// [customizing private key usage]: <https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#customising-private-key-usage>
 pub trait KeyProvider: Send + Sync + Debug {
+    /// Whether this provider implements the opt-in TLS 1.2 static RSA client
+    /// key exchange. This does not enable RSA suites in a provider's defaults.
+    #[cfg(feature = "tls12")]
+    fn supports_rsa_key_exchange(&self) -> bool {
+        false
+    }
+
+    /// Produce a freshly randomized 48-byte premaster secret and its RSA
+    /// PKCS#1 v1.5 ciphertext for an already authenticated server certificate.
+    /// Implementations must additionally enforce an RSA encryption key and
+    /// keyEncipherment when the certificate contains a KeyUsage extension.
+    /// The secret's first two bytes must contain `client_version`.
+    /// This is a client operation; no RSA decryption oracle is exposed.
+    #[cfg(feature = "tls12")]
+    fn encrypt_tls12_rsa_premaster(
+        &self,
+        _certificate: &pki_types::CertificateDer<'_>,
+        _client_version: ProtocolVersion,
+    ) -> Result<(Vec<u8>, SharedSecret), Error> {
+        Err(Error::General(
+            "static RSA key exchange is not supported".into(),
+        ))
+    }
+
     /// Decode and validate a private signing key from `key_der`.
     ///
     /// This is used by [`ConfigBuilder::with_client_auth_cert()`], [`ConfigBuilder::with_single_cert()`],

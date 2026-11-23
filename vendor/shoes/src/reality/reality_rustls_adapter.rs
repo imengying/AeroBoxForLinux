@@ -201,7 +201,8 @@ impl rustls::reality::ClientHooks for ClientAuthentication {
         let timestamp =
             crate::clock::unix_seconds().map_err(|_| Error::FailedToGetCurrentTime)? as u32;
         let mut plaintext = Zeroizing::new([0; 16]);
-        plaintext[..3].copy_from_slice(&[1, 8, 0]);
+        // Protocol version used by the pinned sing-box REALITY wrapper.
+        plaintext[..3].copy_from_slice(&[1, 8, 1]);
         plaintext[4..8].copy_from_slice(&timestamp.to_be_bytes());
         plaintext[8..].copy_from_slice(&self.short_id);
         let mut aad = hello.to_vec();

@@ -1,5 +1,8 @@
-pub(crate) mod hop;
 mod brutal;
+mod early_stream;
+#[cfg(test)]
+mod early_tests;
+pub(crate) mod hop;
 mod hysteria2;
 #[cfg(all(test, feature = "optional-peer-tests"))]
 mod interop;
@@ -8,6 +11,8 @@ mod lifecycle_tests;
 pub(crate) mod salamander;
 mod session;
 mod tuic;
+#[cfg(test)]
+mod tuic_uot_tests;
 mod udp;
 
 use std::{io, sync::Arc};
@@ -27,6 +32,7 @@ use crate::{
 };
 
 pub(crate) fn validate(config: &ClientConfig, first: bool) -> io::Result<()> {
+    crate::ss_plugin::quic::validate(config, first)?;
     if !config.protocol.is_native_quic() {
         return Ok(());
     }
@@ -39,12 +45,13 @@ pub(crate) fn validate(config: &ClientConfig, first: bool) -> io::Result<()> {
     match &config.protocol {
         ClientProxyConfig::Hysteria2(settings) => settings.validate(),
         ClientProxyConfig::Tuic(settings) => settings.validate(),
-        ClientProxyConfig::Naiveproxy{settings,..} => settings.validate(),
+        ClientProxyConfig::Naiveproxy { settings, .. } => settings.validate(),
         _ => unreachable!(),
     }
 }
 
 pub(crate) fn validate_resolved(config: &ResolvedClientConfig, first: bool) -> io::Result<()> {
+    crate::ss_plugin::quic::validate_resolved(config, first)?;
     if !config.protocol.is_native_quic() {
         return Ok(());
     }
@@ -57,7 +64,7 @@ pub(crate) fn validate_resolved(config: &ResolvedClientConfig, first: bool) -> i
     match &config.protocol {
         ResolvedClientProxyConfig::Hysteria2(settings) => settings.validate(),
         ResolvedClientProxyConfig::Tuic(settings) => settings.validate(),
-        ResolvedClientProxyConfig::Naiveproxy{settings,..} => settings.validate(),
+        ResolvedClientProxyConfig::Naiveproxy { settings, .. } => settings.validate(),
         _ => unreachable!(),
     }
 }
@@ -144,20 +151,32 @@ impl ProxyConnector for Client {
         if !self.supports_udp() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "UDP disabled"));
         }
+        if matches!(&self.protocol, Protocol::Tuic(config) if config.udp_over_stream) {
+            // SagerNet UoT v2 uses a bidirectional CONNECT stream. It does not
+            // allocate a native TUIC UDP association or send COMMAND_PACKET.
+            let generation = self.sessions.get(dialer, &self.protocol, false).await?;
+            let magic = ResolvedLocation::new(NetLocation::new(
+                crate::address::Address::Hostname(crate::uot::UOT_V2_MAGIC_ADDRESS.into()),
+                0,
+            ));
+            let stream = tuic::connect(generation, &magic).await?;
+            return crate::uot::client::frame(2, stream, target).await;
+        }
         // Allocation races can exhaust a generation after the pool checked it.
         loop {
             let generation = self
                 .sessions
                 .get(dialer.clone(), &self.protocol, true)
                 .await?;
-            if !generation.udp_enabled {
+            if !generation.udp_enabled() {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "peer disabled UDP",
                 ));
             }
             if !matches!(&self.protocol, Protocol::Tuic(config) if config.udp_relay_mode == crate::config::quic_client::TuicUdpMode::Quic)
-                && generation.connection().max_datagram_size().is_none() {
+                && generation.connection().max_datagram_size().is_none()
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "peer did not negotiate QUIC datagrams",

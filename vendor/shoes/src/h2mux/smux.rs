@@ -29,7 +29,7 @@ impl Session {
                     let mut header=[0;8];read.read_exact(&mut header).await?;
                     let len=u16::from_le_bytes([header[2],header[3]]) as usize;
                     let id=u32::from_le_bytes(header[4..].try_into().unwrap());
-                    if header[0]!=1 || !matches!(header[1],1|2|3) || (header[1]!=2 && len!=0) {return Err(io::Error::new(io::ErrorKind::InvalidData,"invalid SMUX v1 frame"));}
+                    if header[0]!=1 || !matches!(header[1],1..=3) || (header[1]!=2 && len!=0) {return Err(io::Error::new(io::ErrorKind::InvalidData,"invalid SMUX v1 frame"));}
                     match header[1] {
                         1=>{if let Some(inbox)=reader_state.streams.lock().remove(&id){inbox.finished.store(true,Ordering::Release);}},
                         2=>{
@@ -94,7 +94,8 @@ impl AsyncRead for Stream {
 }
 impl AsyncWrite for Stream {
     fn poll_write(mut self:Pin<&mut Self>,cx:&mut Context<'_>,data:&[u8])->Poll<io::Result<usize>> {
-        if self.shutdown{return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));}if data.is_empty(){return Poll::Ready(Ok(0));}
+        if self.shutdown{return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));}
+        if data.is_empty(){return Poll::Ready(Ok(0));}
         std::task::ready!(self.output.poll_reserve(cx)).map_err(|_|io::Error::from(io::ErrorKind::BrokenPipe))?;
         let count=data.len().min(MAX_FRAME);let id=self.id;
         self.output.send_item(Write::Frame(2,id,Bytes::copy_from_slice(&data[..count]))).map_err(|_|io::Error::from(io::ErrorKind::BrokenPipe))?;Poll::Ready(Ok(count))

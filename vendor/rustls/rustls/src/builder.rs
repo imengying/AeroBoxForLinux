@@ -240,6 +240,15 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
 
         for cs in self.provider.cipher_suites.iter() {
             let cs_kx = cs.key_exchange_algorithms();
+            #[cfg(feature = "tls12")]
+            if cs_kx == [crate::msgs::handshake::KeyExchangeAlgorithm::RSA]
+                && self
+                    .provider
+                    .key_provider
+                    .supports_rsa_key_exchange()
+            {
+                continue;
+            }
             if cs_kx
                 .iter()
                 .any(|kx| supported_kx_algos.contains(kx))

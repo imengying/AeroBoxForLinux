@@ -65,6 +65,8 @@ pub(in crate::reality) fn configs(
     let private = [42; 32];
     (
         RealityClientConfig {
+            client_fingerprint: None,
+            alpn_protocols: None,
             mldsa65_verify: None,
             public_key: public_key(&private),
             short_id: [1; 8],

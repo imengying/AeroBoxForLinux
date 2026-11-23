@@ -22,6 +22,8 @@ enum DirectionState {
 pub(crate) struct RecordLayer {
     message_encrypter: Box<dyn MessageEncrypter>,
     message_decrypter: Box<dyn MessageDecrypter>,
+    pending_encrypter: Option<(Box<dyn MessageEncrypter>, u64)>,
+    pending_decrypter: Option<Box<dyn MessageDecrypter>>,
     write_seq_max: u64,
     write_seq: u64,
     read_seq: u64,
@@ -41,6 +43,8 @@ impl RecordLayer {
         Self {
             message_encrypter: <dyn MessageEncrypter>::invalid(),
             message_decrypter: <dyn MessageDecrypter>::invalid(),
+            pending_encrypter: None,
+            pending_decrypter: None,
             write_seq_max: 0,
             write_seq: 0,
             read_seq: 0,
@@ -141,31 +145,44 @@ impl RecordLayer {
         cipher: Box<dyn MessageEncrypter>,
         max_messages: u64,
     ) {
-        self.message_encrypter = cipher;
-        self.write_seq = 0;
-        self.write_seq_max = min(SEQ_SOFT_LIMIT, max_messages);
-        self.encrypt_state = DirectionState::Prepared;
+        // TLS 1.2 renegotiation still protects records with the current epoch
+        // until ChangeCipherSpec. Preparing the next keys must not reset it.
+        self.pending_encrypter = Some((cipher, min(SEQ_SOFT_LIMIT, max_messages)));
+        if self.encrypt_state == DirectionState::Invalid {
+            self.encrypt_state = DirectionState::Prepared;
+        }
     }
 
     /// Prepare to use the given `MessageDecrypter` for future message decryption.
     /// It is not used until you call `start_decrypting`.
     pub(crate) fn prepare_message_decrypter(&mut self, cipher: Box<dyn MessageDecrypter>) {
-        self.message_decrypter = cipher;
-        self.read_seq = 0;
-        self.decrypt_state = DirectionState::Prepared;
+        self.pending_decrypter = Some(cipher);
+        if self.decrypt_state == DirectionState::Invalid {
+            self.decrypt_state = DirectionState::Prepared;
+        }
     }
 
     /// Start using the `MessageEncrypter` previously provided to the previous
     /// call to `prepare_message_encrypter`.
     pub(crate) fn start_encrypting(&mut self) {
-        debug_assert!(self.encrypt_state == DirectionState::Prepared);
+        let (cipher, max_messages) = self
+            .pending_encrypter
+            .take()
+            .expect("prepared encryption key");
+        self.message_encrypter = cipher;
+        self.write_seq = 0;
+        self.write_seq_max = max_messages;
         self.encrypt_state = DirectionState::Active;
     }
 
     /// Start using the `MessageDecrypter` previously provided to the previous
     /// call to `prepare_message_decrypter`.
     pub(crate) fn start_decrypting(&mut self) {
-        debug_assert!(self.decrypt_state == DirectionState::Prepared);
+        self.message_decrypter = self
+            .pending_decrypter
+            .take()
+            .expect("prepared decryption key");
+        self.read_seq = 0;
         self.decrypt_state = DirectionState::Active;
     }
 

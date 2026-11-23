@@ -18,6 +18,7 @@ pub enum Security {
         config: Arc<rustls::ClientConfig>,
         name: rustls::pki_types::ServerName<'static>,
         buffer_size: Option<usize>,
+        handshake_timeout: std::time::Duration,
     },
     Reality(Box<dyn TcpClientHandler>),
 }
@@ -39,19 +40,24 @@ impl Security {
                 config,
                 name,
                 buffer_size,
+                handshake_timeout,
             } => {
                 let mut connection = rustls::ClientConnection::new(config.clone(), name.clone())
                     .map_err(io::Error::other)?;
                 if let Some(size) = buffer_size {
                     connection.set_buffer_limit(Some(*size));
                 }
-                let stream = CryptoTlsStream::handshake(
-                    stream,
-                    TlsConnection::new(connection),
-                    TlsReadMode::Stream,
-                    &[],
+                let stream = tokio::time::timeout(
+                    *handshake_timeout,
+                    CryptoTlsStream::handshake(
+                        stream,
+                        TlsConnection::new(connection),
+                        TlsReadMode::Stream,
+                        &[],
+                    ),
                 )
-                .await?;
+                .await
+                .map_err(io::Error::from)??;
                 let expected: &[u8] = if version == XhttpVersion::H1 {
                     b"http/1.1"
                 } else {
@@ -180,6 +186,9 @@ pub(crate) fn build_with_limits(
                     config: Arc::new(client),
                     name,
                     buffer_size: tls.tls_buffer_size,
+                    handshake_timeout: crate::config::tls::handshake_timeout(
+                        tls.options.handshake_timeout_ms,
+                    ),
                 },
                 Some(version),
                 false,

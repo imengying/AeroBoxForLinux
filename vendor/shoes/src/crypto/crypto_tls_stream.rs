@@ -18,6 +18,7 @@ use crate::sync_adapter::{SyncReadAdapter, SyncWriteAdapter};
 pub enum TlsReadMode {
     Stream,
     PreserveRecords,
+    ExactRecords,
 }
 
 enum TlsInput {
@@ -78,16 +79,40 @@ impl TlsState {
 }
 
 /// Writes may buffer output; callers must flush before waiting for a response.
-/// Reads only drive input, except for best-effort fatal alerts.
+/// Reads drive TLS 1.2 renegotiation when requested by the peer; otherwise
+/// reads only drive input, except for best-effort fatal alerts.
 pub struct CryptoTlsStream<IO> {
     io: IO,
     writer_waker: Option<Waker>,
+    reader_waker: Option<Waker>,
     pub(super) session: TlsConnection,
     state: TlsState,
     need_flush: bool,
     input: TlsInput,
     write_raw: bool,
     raw_write_prefix: Option<Bytes>,
+    exact_records: bool,
+    kernel: Option<Box<super::ktls::Connection>>,
+}
+
+struct HandshakeWake {
+    reader: Option<Waker>,
+    writer: Option<Waker>,
+}
+impl futures::task::ArcWake for HandshakeWake {
+    fn wake_by_ref(this: &std::sync::Arc<Self>) {
+        if let Some(reader) = &this.reader {
+            reader.wake_by_ref();
+        }
+        if let Some(writer) = &this.writer
+            && !this
+                .reader
+                .as_ref()
+                .is_some_and(|reader| reader.will_wake(writer))
+        {
+            writer.wake_by_ref();
+        }
+    }
 }
 
 impl<IO: AsyncStream> CryptoTlsStream<IO> {
@@ -98,7 +123,8 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
         preread: &[u8],
     ) -> io::Result<Self> {
         let preserve = matches!(mode, TlsReadMode::PreserveRecords);
-        let input = if preserve || !preread.is_empty() {
+        let input = if preserve || matches!(mode, TlsReadMode::ExactRecords) || !preread.is_empty()
+        {
             let mut deframer = TlsDeframer::new();
             deframer.feed(preread);
             TlsInput::Records { deframer, preserve }
@@ -106,6 +132,7 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
             TlsInput::Stream
         };
         let mut stream = Self::with_input(io, session, input);
+        stream.exact_records = matches!(mode, TlsReadMode::ExactRecords);
         super::crypto_handshake::perform_crypto_handshake(&mut stream).await?;
         Ok(stream)
     }
@@ -114,12 +141,15 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
         Self {
             io,
             writer_waker: None,
+            reader_waker: None,
             session,
             state: TlsState::Stream,
             need_flush: false,
             input,
             write_raw: false,
             raw_write_prefix: None,
+            exact_records: false,
+            kernel: None,
         }
     }
 
@@ -137,11 +167,32 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
     }
 
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
-        self.session.alpn_protocol()
+        self.kernel.as_ref().map_or_else(
+            || self.session.alpn_protocol(),
+            |kernel| kernel.alpn.as_deref(),
+        )
+    }
+
+    pub(crate) fn enable_kernel(&mut self, tx: bool, rx: bool) -> io::Result<()> {
+        if !tx && !rx {
+            return Ok(());
+        }
+        if !self.exact_records {
+            return Err(io::Error::other("kTLS requires exact TLS record reads"));
+        }
+        let alpn = self.session.alpn_protocol().map(<[u8]>::to_vec);
+        let group = self.session.negotiated_group();
+        let (secrets, kernel) = self.session.take_kernel()?;
+        self.kernel = Some(Box::new(super::ktls::Connection::new(
+            &self.io, secrets, kernel, tx, rx, alpn, group,
+        )?));
+        Ok(())
     }
 
     pub fn negotiated_group(&self) -> Option<rustls::NamedGroup> {
-        self.session.negotiated_group()
+        self.kernel
+            .as_ref()
+            .map_or_else(|| self.session.negotiated_group(), |kernel| kernel.group)
     }
 
     pub fn is_reality(&self) -> bool {
@@ -176,7 +227,8 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
     }
 
     fn release_empty_deframer(&mut self) {
-        if matches!(&self.input, TlsInput::Records { deframer, preserve: false }
+        if !self.exact_records
+            && matches!(&self.input, TlsInput::Records { deframer, preserve: false }
             if deframer.pending_bytes() == 0)
         {
             self.input = TlsInput::Stream;
@@ -249,6 +301,7 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
     }
 
     pub(super) fn poll_receive_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let was_handshaking = self.session.is_handshaking();
         let n = match &mut self.input {
             TlsInput::Stream => {
                 let mut adapter = SyncReadAdapter {
@@ -286,6 +339,18 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
                 .session
                 .process_new_packets()
                 .map_err(|error| self.packet_error(error))?;
+            if was_handshaking {
+                if plaintext_len > 0
+                    && let Some(reader) = self.reader_waker.take()
+                {
+                    reader.wake();
+                }
+                if !self.session.is_handshaking()
+                    && let Some(writer) = self.writer_waker.take()
+                {
+                    writer.wake();
+                }
+            }
             log::trace!("TLS received {n} bytes, {plaintext_len} plaintext bytes available");
         }
         Poll::Ready(Ok(n))
@@ -356,6 +421,52 @@ impl<IO: AsyncStream> CryptoTlsStream<IO> {
         Poll::Ready(Ok(()))
     }
 
+    // A renegotiation read may need to write (and vice versa). Keep both
+    // tasks reachable even on carriers with a single readiness waiter, so
+    // cancelling either half cannot strand the other half. The Arc lives only
+    // in the readiness registration; there is no unbounded queue of wakers.
+    fn handshake_waker(&self) -> Waker {
+        futures::task::waker(std::sync::Arc::new(HandshakeWake {
+            reader: self.reader_waker.clone(),
+            writer: self.writer_waker.clone(),
+        }))
+    }
+
+    fn poll_handshake_output(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        ready!(self.poll_drain_tls_inner(cx))?;
+        if self.need_flush {
+            ready!(Pin::new(&mut self.io).poll_flush(cx))?;
+            self.need_flush = false;
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_finish_renegotiation(&mut self) -> Poll<io::Result<()>> {
+        // This only checks the stored TLS error; it performs no transport I/O.
+        // Failed REALITY sessions discard their inner connection and still report
+        // is_handshaking(), so surface that failure before waiting for readiness.
+        self.session.writer().flush()?;
+        let waker = self.handshake_waker();
+        let mut cx = Context::from_waker(&waker);
+        while self.session.is_handshaking() {
+            ready!(self.poll_handshake_output(&mut cx))?;
+            // Retain normal read backpressure. The read half wakes the writer
+            // after consuming plaintext from the previous TLS epoch.
+            if !self.session.wants_read() {
+                return Poll::Pending;
+            }
+            match ready!(self.poll_receive_tls(&mut cx)) {
+                Ok(0) => return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into())),
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = self.poll_handshake_output(&mut cx);
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+        self.poll_handshake_output(&mut cx)
+    }
+
     fn register_writer(&mut self, cx: &Context<'_>) {
         match &mut self.writer_waker {
             Some(waker) => waker.clone_from(cx.waker()),
@@ -371,6 +482,13 @@ impl<IO: AsyncStream> AsyncRead for CryptoTlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if let Some(kernel) = &mut this.kernel {
+            return kernel.poll_read(&mut this.io, cx, buf);
+        }
+        match &mut this.reader_waker {
+            Some(waker) => waker.clone_from(cx.waker()),
+            None => this.reader_waker = Some(cx.waker().clone()),
+        }
         if buf.remaining() == 0 || !this.state.readable() {
             return Poll::Ready(Ok(()));
         }
@@ -393,6 +511,11 @@ impl<IO: AsyncStream> AsyncRead for CryptoTlsStream<IO> {
                     let len = buf.remaining().min(available.len());
                     buf.put_slice(&available[..len]);
                     reader.consume(len);
+                    if this.session.is_handshaking()
+                        && let Some(writer) = this.writer_waker.take()
+                    {
+                        writer.wake();
+                    }
                     return Poll::Ready(Ok(()));
                 }
                 Ok(_) => {
@@ -402,7 +525,15 @@ impl<IO: AsyncStream> AsyncRead for CryptoTlsStream<IO> {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Poll::Ready(Err(error)),
             }
-            if let Err(error) = ready!(this.poll_receive_tls(cx)) {
+            let received = if this.session.is_handshaking() {
+                let waker = this.handshake_waker();
+                let mut handshake_cx = Context::from_waker(&waker);
+                ready!(this.poll_handshake_output(&mut handshake_cx))?;
+                this.poll_receive_tls(&mut handshake_cx)
+            } else {
+                this.poll_receive_tls(cx)
+            };
+            if let Err(error) = ready!(received) {
                 if let Some(writer) = this.writer_waker.take() {
                     writer.wake();
                 }
@@ -419,6 +550,10 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        if let Some(kernel) = &mut this.kernel {
+            return kernel.poll_write(&mut this.io, cx, buf);
+        }
         self.register_writer(cx);
         if !self.state.writeable() {
             return Poll::Ready(Err(io::Error::new(
@@ -433,6 +568,12 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
             return Pin::new(&mut self.io).poll_write(cx, buf);
         }
 
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.session.is_handshaking() {
+            ready!(self.poll_finish_renegotiation())?;
+        }
         let mut pos = 0;
         while pos < buf.len() {
             pos += self.session.writer().write(&buf[pos..])?;
@@ -451,6 +592,14 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if self.kernel.is_some() {
+            return self.poll_write(
+                cx,
+                bufs.iter()
+                    .find(|b| !b.is_empty())
+                    .map_or(&[], |b| b.as_ref()),
+            );
+        }
         self.register_writer(cx);
         if !self.state.writeable() {
             return Poll::Ready(Err(io::Error::new(
@@ -468,6 +617,9 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
             return Poll::Ready(Ok(0));
         }
 
+        if self.session.is_handshaking() {
+            ready!(self.poll_finish_renegotiation())?;
+        }
         loop {
             let written = self.session.writer().write_vectored(bufs)?;
             let pending = match self.poll_drain_tls_inner(cx) {
@@ -485,6 +637,9 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
     }
 
     fn is_write_vectored(&self) -> bool {
+        if self.kernel.is_some() {
+            return false;
+        }
         if self.write_raw {
             self.io.is_write_vectored()
         } else {
@@ -493,6 +648,10 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        if let Some(kernel) = &mut this.kernel {
+            return kernel.poll_flush(&mut this.io, cx);
+        }
         self.register_writer(cx);
         if !self.write_raw {
             self.session.writer().flush()?;
@@ -507,6 +666,10 @@ impl<IO: AsyncStream> AsyncWrite for CryptoTlsStream<IO> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        if let Some(kernel) = &mut this.kernel {
+            return kernel.poll_shutdown(&mut this.io, cx);
+        }
         self.register_writer(cx);
         if !self.write_raw {
             if self.state.writeable() {
@@ -549,7 +712,7 @@ impl<IO: AsyncStream> AsyncStream for CryptoTlsStream<IO> {
     fn peer_addr(&self) -> Option<std::net::SocketAddr> {
         self.io.peer_addr()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn plain_tcp(&self) -> Option<&tokio::net::TcpStream> {
         if self.state != TlsState::Stream
             || !matches!(&self.input, TlsInput::Raw(pending) if pending.is_empty())

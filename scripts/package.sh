@@ -3,7 +3,6 @@ set -eu
 arch=${1:-$(uname -m)}
 case "$arch" in
   amd64|x86_64) arch=amd64 ;;
-  arm64|aarch64) arch=arm64 ;;
   *) printf 'Unsupported architecture: %s\n' "$arch" >&2; exit 1 ;;
 esac
 target_dir=${CARGO_TARGET_DIR:-target}
@@ -21,8 +20,9 @@ trap 'exit 1' HUP INT TERM
 mkdir "$stage/$name"
 install -m755 "$binary" "$stage/$name/AeroBox"
 install -m755 scripts/install.sh scripts/uninstall.sh "$stage/$name/"
-install -m644 resources/io.github.imengying.AeroBoxForLinux.desktop resources/io.github.imengying.AeroBoxForLinux.png README.md LICENSE THIRD_PARTY.md "$stage/$name/"
+install -m644 resources/desktop/io.github.imengying.AeroBoxForLinux.desktop resources/icons/io.github.imengying.AeroBoxForLinux.png README.md LICENSE THIRD_PARTY.md "$stage/$name/"
 cp -R licenses "$stage/$name/licenses"
+cp -R docs "$stage/$name/docs"
 mkdir -p "$stage/$name/resources/rules"
 install -m644 resources/rules/README.md resources/rules/*-LICENSE "$stage/$name/resources/rules/"
 tar -C "$stage" -czf "$output_dir/$name.tar.gz" "$name"

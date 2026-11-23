@@ -191,7 +191,7 @@ impl PayloadCipher {
             Self::ChaCha20(key) => key.encrypt_in_place_detached(&nonce.into(), header, payload),
         };
         result
-            .map(|tag| Tag::from(tag.as_slice()))
+            .map(|tag| Tag::from(&tag[..]))
             .map_err(|_| Error::EncryptError)
     }
 
@@ -203,11 +203,13 @@ impl PayloadCipher {
     ) -> Result<&'a [u8], Error> {
         let plain_len = payload.len().checked_sub(16).ok_or(Error::DecryptError)?;
         let (body, tag) = payload.split_at_mut(plain_len);
-        let tag = aes_gcm::Tag::from_slice(tag);
+        let tag: aes_gcm::Tag = <[u8; 16]>::try_from(tag)
+            .map_err(|_| Error::DecryptError)?
+            .into();
         let result = match self {
-            Self::Aes128(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, tag),
-            Self::Aes256(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, tag),
-            Self::ChaCha20(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, tag),
+            Self::Aes128(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, &tag),
+            Self::Aes256(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, &tag),
+            Self::ChaCha20(key) => key.decrypt_in_place_detached(&nonce.into(), header, body, &tag),
         };
         result.map_err(|_| Error::DecryptError)?;
         Ok(body)

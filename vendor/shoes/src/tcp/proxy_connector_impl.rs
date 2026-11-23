@@ -126,20 +126,31 @@ pub struct ProxyConnectorImpl {
     client_handler: Box<dyn TcpClientHandler>,
     xhttp: Option<Arc<crate::xhttp::client::Client>>,
     native_udp: Option<crate::native_udp::Client>,
+    plugin_quic: Option<crate::ss_plugin::quic::Pool>,
+    ech: bool,
 }
 
 impl ProxyConnectorImpl {
     fn client_transport(&self, dialer: Arc<dyn CarrierDialer>) -> ClientTransport<'_> {
-        ClientTransport {
-            route: dialer.clone(),
-            open: Box::pin(async move {
+        let route = dialer.clone();
+        let reopen: crate::tcp::tcp_handler::ReopenTransport<'_> = Arc::new(move || {
+            let dialer = dialer.clone();
+            Box::pin(async move {
+                if let Some(pool) = &self.plugin_quic {
+                    return pool.open(dialer).await;
+                }
                 match &self.xhttp {
                     Some(client) => {
                         Ok(Box::new(client.open(dialer).await?) as Box<dyn AsyncStream>)
                     }
                     None => dialer.open_stream().await,
                 }
-            }),
+            })
+        });
+        ClientTransport {
+            route: route.clone(),
+            open: reopen(),
+            reopen: Some(reopen),
         }
     }
 
@@ -151,6 +162,7 @@ impl ProxyConnectorImpl {
         resolver: Arc<dyn Resolver>,
     ) -> std::io::Result<Option<Self>> {
         crate::sudoku_mask::validate_resolved_client(&config.protocol, &config.transport)?;
+        let ech = crate::ech::contains(&config.protocol);
         if config.protocol.is_direct() {
             return Ok(None);
         }
@@ -159,19 +171,26 @@ impl ProxyConnectorImpl {
             crate::xhttp::connector::build(&config, resolver.clone())?
         {
             return Ok(Some(Self {
+                ech,
                 location: config.address,
                 client_handler,
                 xhttp: Some(xhttp),
                 native_udp: None,
+                plugin_quic: None,
             }));
         }
 
+        crate::ss_plugin::quic::validate_resolved(&config, true)?;
+        let plugin_quic = crate::ss_plugin::quic::resolved(&config.protocol)
+            .map(|_| crate::ss_plugin::quic::Pool::default());
         let native_udp = crate::native_udp::Client::from_config(&config)?;
         let client_handler = create_tcp_client_handler(config.protocol, &config.address, resolver)?;
 
         Ok(Some(Self {
+            ech,
             xhttp: None,
             native_udp,
+            plugin_quic,
             location: config.address,
             client_handler,
         }))
@@ -189,7 +208,11 @@ impl ProxyConnector for ProxyConnectorImpl {
     }
 
     fn needs_carrier_dialer(&self) -> bool {
-        self.native_udp.is_some() || self.xhttp.is_some() || self.client_handler.has_session_pool()
+        self.ech
+            || self.native_udp.is_some()
+            || self.plugin_quic.is_some()
+            || self.xhttp.is_some()
+            || self.client_handler.has_session_pool()
     }
 
     async fn connect_tcp_with_dialer(
@@ -452,8 +475,10 @@ mod tests {
             let connector = ProxyConnectorImpl {
                 location: NetLocation::from_str("localhost:443", None).unwrap(),
                 client_handler,
+                ech: false,
                 xhttp: None,
                 native_udp: None,
+                plugin_quic: None,
             };
             assert_pool_forwarding(&connector).await;
         }
@@ -466,6 +491,7 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_secs(2), async {
                     let (client, mut peer) = tokio::io::duplex(4096);
                     let transport = ClientTransport {
+                        reopen: None,
                         route: Arc::new(UnopenedDialer(RouteKey(vec![1]))),
                         open: Box::pin(async { Ok(Box::new(client) as Box<dyn AsyncStream>) }),
                     };
@@ -614,8 +640,10 @@ mod tests {
         });
         let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let proxy = ProxyConnectorImpl {
+            ech: false,
             xhttp: None,
             native_udp: None,
+            plugin_quic: None,
             location: NetLocation::from_str("localhost:443", None).unwrap(),
             client_handler: Box::new(TlsClientHandler::new(
                 client_config,

@@ -2,7 +2,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use async_trait::async_trait;
 use aerobox_primitives::aead::{
     AES_128_GCM, Aad, BoundKey, CHACHA20_POLY1305, OpeningKey, SealingKey, UnboundKey,
 };
@@ -10,6 +9,7 @@ use aerobox_primitives::cipher::{
     AES_128, DecryptingKey as CipherDecryptingKey, DecryptionContext,
     EncryptingKey as CipherEncryptingKey, EncryptionContext, UnboundCipherKey,
 };
+use async_trait::async_trait;
 use bytes::BytesMut;
 use rand::{Rng, RngExt};
 use shake::Shake128;
@@ -58,6 +58,7 @@ const COMMAND_MUX: u8 = 3; // MUX/XUDP mode
 pub(crate) enum DataCipher {
     Any,
     Aes128Gcm,
+    Aes128Cfb,
     ChaCha20Poly1305,
     None,
 }
@@ -69,8 +70,9 @@ impl TryFrom<&str> for DataCipher {
         Ok(match name {
             "" | "any" => DataCipher::Any,
             "aes-128-gcm" => DataCipher::Aes128Gcm,
+            "aes-128-cfb" => DataCipher::Aes128Cfb,
             "chacha20-poly1305" | "chacha20-ietf-poly1305" => DataCipher::ChaCha20Poly1305,
-            "none" => DataCipher::None,
+            "none" | "zero" => DataCipher::None,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -369,19 +371,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
         let response_authentication_v = fixed_header[33];
         let option = fixed_header[34];
 
-        if option & 0x01 != 0x01 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Standard format data stream was not requested",
-            ));
-        }
-
-        if option & 0x10 == 0x10 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Auth length option is not supported",
-            ));
-        }
+        let authenticated_length = option & 0x10 != 0;
 
         let enable_chunk_masking = option & 0x04 == 0x04;
         let enable_global_padding = option & 0x08 == 0x08;
@@ -396,12 +386,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
         // the developer docs have incorrect values for the data type,
         // see headers.pb.go in v2ray-core for the correct values.
         let requested_data_cipher = match fixed_header[35] & 0b1111 {
-            1 => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unsupported aes-128-cfb data cipher requested",
-                ));
-            }
+            1 => DataCipher::Aes128Cfb,
             3 => DataCipher::Aes128Gcm,
             4 => DataCipher::ChaCha20Poly1305,
             5 => DataCipher::None,
@@ -412,6 +397,24 @@ impl TcpServerHandler for VmessTcpServerHandler {
                 ));
             }
         };
+
+        if option & 1 == 0
+            && (!matches!(
+                requested_data_cipher,
+                DataCipher::None | DataCipher::Aes128Cfb
+            ) || command == COMMAND_UDP)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "VMess payload requires chunk framing",
+            ));
+        }
+        if requested_data_cipher == DataCipher::Aes128Cfb && authenticated_length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CFB does not support authenticated lengths",
+            ));
+        }
 
         if self.data_cipher != DataCipher::Any && requested_data_cipher != self.data_cipher {
             return Err(std::io::Error::new(
@@ -456,7 +459,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
                         .unwrap(),
                 ))
             }
-            DataCipher::None => None,
+            DataCipher::None | DataCipher::Aes128Cfb => None,
             DataCipher::Any => unreachable!(),
         };
 
@@ -553,8 +556,23 @@ impl TcpServerHandler for VmessTcpServerHandler {
                         enable_global_padding,
                         Some(prefix_bytes),
                         None,
+                    )
+                    .with_authenticated_length(
+                        authenticated_length,
+                        requested_data_cipher == DataCipher::ChaCha20Poly1305,
+                        data_encryption_key,
+                        data_encryption_iv,
                     );
 
+                    vmess_stream = vmess_stream.with_raw_body(option & 1 == 0);
+                    if requested_data_cipher == DataCipher::Aes128Cfb {
+                        vmess_stream = vmess_stream.with_cfb(
+                            data_encryption_key.try_into().unwrap(),
+                            data_encryption_iv.try_into().unwrap(),
+                            &response_header_key,
+                            &response_header_iv,
+                        );
+                    }
                     let unparsed_data = stream_reader.unparsed_data();
                     if !unparsed_data.is_empty() {
                         vmess_stream.feed_initial_read_data(unparsed_data)?;
@@ -588,8 +606,23 @@ impl TcpServerHandler for VmessTcpServerHandler {
                     enable_global_padding,
                     Some(prefix_bytes),
                     None,
+                )
+                .with_authenticated_length(
+                    authenticated_length,
+                    requested_data_cipher == DataCipher::ChaCha20Poly1305,
+                    data_encryption_key,
+                    data_encryption_iv,
                 );
 
+                vmess_stream = vmess_stream.with_raw_body(option & 1 == 0);
+                if requested_data_cipher == DataCipher::Aes128Cfb {
+                    vmess_stream = vmess_stream.with_cfb(
+                        data_encryption_key.try_into().unwrap(),
+                        data_encryption_iv.try_into().unwrap(),
+                        &response_header_key,
+                        &response_header_iv,
+                    );
+                }
                 let unparsed_data = stream_reader.unparsed_data();
                 if !unparsed_data.is_empty() {
                     vmess_stream.feed_initial_read_data(unparsed_data)?;
@@ -625,8 +658,23 @@ impl TcpServerHandler for VmessTcpServerHandler {
                     enable_global_padding,
                     Some(prefix_bytes),
                     None,
+                )
+                .with_authenticated_length(
+                    authenticated_length,
+                    requested_data_cipher == DataCipher::ChaCha20Poly1305,
+                    data_encryption_key,
+                    data_encryption_iv,
                 );
 
+                vmess_stream = vmess_stream.with_raw_body(option & 1 == 0);
+                if requested_data_cipher == DataCipher::Aes128Cfb {
+                    vmess_stream = vmess_stream.with_cfb(
+                        data_encryption_key.try_into().unwrap(),
+                        data_encryption_iv.try_into().unwrap(),
+                        &response_header_key,
+                        &response_header_iv,
+                    );
+                }
                 let unparsed_data = stream_reader.unparsed_data();
                 if !unparsed_data.is_empty() {
                     vmess_stream.feed_initial_read_data(unparsed_data)?;
@@ -659,8 +707,23 @@ impl TcpServerHandler for VmessTcpServerHandler {
                     enable_global_padding,
                     Some(prefix_bytes),
                     None,
+                )
+                .with_authenticated_length(
+                    authenticated_length,
+                    requested_data_cipher == DataCipher::ChaCha20Poly1305,
+                    data_encryption_key,
+                    data_encryption_iv,
                 );
 
+                vmess_stream = vmess_stream.with_raw_body(option & 1 == 0);
+                if requested_data_cipher == DataCipher::Aes128Cfb {
+                    vmess_stream = vmess_stream.with_cfb(
+                        data_encryption_key.try_into().unwrap(),
+                        data_encryption_iv.try_into().unwrap(),
+                        &response_header_key,
+                        &response_header_iv,
+                    );
+                }
                 let unparsed_data = stream_reader.unparsed_data();
                 if !unparsed_data.is_empty() {
                     vmess_stream.feed_initial_read_data(unparsed_data)?;
@@ -717,10 +780,13 @@ pub struct VmessTcpClientHandler {
     data_cipher: DataCipher,
     instruction_key: [u8; 16],
     aead_encrypting_key: CipherEncryptingKey,
-    legacy_auth_key: [u8; 16],
-    legacy: bool,
     udp_enabled: bool,
-    packet_encoding: crate::config::client::PacketEncoding,
+    global_padding: bool,
+    authenticated_length: bool,
+    packet_encoding: crate::packet_encoding::PacketEncoding,
+    resolver: Option<Arc<dyn Resolver>>,
+    alter_key: [u8; 16],
+    alter_id: u16,
 }
 
 impl std::fmt::Debug for VmessTcpClientHandler {
@@ -733,9 +799,35 @@ impl std::fmt::Debug for VmessTcpClientHandler {
 }
 
 impl VmessTcpClientHandler {
+    pub fn with_alter_id(mut self, alter_id: u16) -> Self {
+        self.alter_id = alter_id;
+        self
+    }
+
+    pub fn with_packet_encoding(
+        mut self,
+        encoding: crate::config::client::PacketEncoding,
+        resolver: Option<Arc<dyn Resolver>>,
+    ) -> Self {
+        self.packet_encoding = encoding;
+        self.resolver = resolver;
+        self
+    }
+
+    #[cfg(test)]
     pub fn new(cipher_name: &str, user_id: &str, udp_enabled: bool) -> std::io::Result<Self> {
+        Self::with_options(cipher_name, user_id, udp_enabled, false, false)
+    }
+
+    pub fn with_options(
+        cipher_name: &str,
+        user_id: &str,
+        udp_enabled: bool,
+        global_padding: bool,
+        authenticated_length: bool,
+    ) -> std::io::Result<Self> {
         let mut user_id_bytes = parse_uuid(user_id)?;
-        let legacy_auth_key = super::legacy::alter_key(&user_id_bytes);
+        let alter_key = super::legacy::alter_id(user_id_bytes.as_slice().try_into().unwrap());
         user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
         let instruction_key: [u8; 16] = compute_md5(&user_id_bytes);
 
@@ -746,462 +838,20 @@ impl VmessTcpClientHandler {
         Ok(Self {
             data_cipher: DataCipher::try_from(cipher_name)?,
             aead_encrypting_key,
-            legacy_auth_key,
-            legacy: false,
             instruction_key,
             udp_enabled,
+            global_padding,
+            authenticated_length,
             packet_encoding: Default::default(),
+            resolver: None,
+            alter_key,
+            alter_id: 0,
         })
     }
-
-    pub(crate) fn with_alter_id(mut self, alter_id: u16) -> Self {
-        // Servers accept any configured alternate identity; the first derived
-        // identity works for every positive alterId count, as in sing-vmess.
-        self.legacy = alter_id != 0;
-        self
-    }
-
-    fn response_key(&self, request_key: &[u8]) -> [u8; 16] {
-        if self.legacy {
-            compute_md5(request_key)
-        } else {
-            super::sha2::compute_sha256(request_key)[..16].try_into().unwrap()
-        }
-    }
-
-    fn encode_request(&self, header: &mut [u8]) -> std::io::Result<Vec<u8>> {
-        if self.legacy {
-            // Legacy authentication is keyed by a timestamp. Use the actual
-            // corrected clock; the AEAD timestamp randomization is unnecessary.
-            return Ok(super::legacy::request(
-                &self.legacy_auth_key,
-                &self.instruction_key,
-                unix_time_secs(crate::clock::now()?)?,
-                header,
-            ));
-        }
-
-        let mut auth_id = [0; 16];
-        auth_id[..8].copy_from_slice(&random_auth_id_timestamp()?.to_be_bytes());
-        rand::rng().fill_bytes(&mut auth_id[8..12]);
-        let checksum = super::crc32::crc32c(&auth_id[..12]);
-        auth_id[12..].copy_from_slice(&checksum.to_be_bytes());
-        self.aead_encrypting_key
-            .less_safe_encrypt(&mut auth_id, EncryptionContext::None)
-            .map_err(|_| std::io::Error::other("VMess auth ID encryption failed"))?;
-
-        let mut nonce = [0; 8];
-        rand::rng().fill_bytes(&mut nonce);
-        let length_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key_Length", &auth_id, &nonce],
-        );
-        let length_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce_Length", &auth_id, &nonce],
-        );
-        let mut length = (header.len() as u16).to_be_bytes();
-        let mut length_cipher = SealingKey::new(
-            UnboundKey::new(&AES_128_GCM, &length_key[..16]).unwrap(),
-            SingleUseNonce::new(&length_nonce[..12]),
-        );
-        let length_tag = length_cipher
-            .seal_in_place_separate_tag(Aad::from(&auth_id), &mut length)
-            .map_err(|_| std::io::Error::other("VMess header length encryption failed"))?;
-
-        let header_key = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Key", &auth_id, &nonce],
-        );
-        let header_nonce = super::sha2::kdf(
-            &self.instruction_key,
-            &[b"VMess Header AEAD Nonce", &auth_id, &nonce],
-        );
-        let mut header_cipher = SealingKey::new(
-            UnboundKey::new(&AES_128_GCM, &header_key[..16]).unwrap(),
-            SingleUseNonce::new(&header_nonce[..12]),
-        );
-        let header_tag = header_cipher
-            .seal_in_place_separate_tag(Aad::from(&auth_id), header)
-            .map_err(|_| std::io::Error::other("VMess header encryption failed"))?;
-        let mut request = Vec::with_capacity(16 + 18 + 8 + header.len() + TAG_LEN);
-        request.extend_from_slice(&auth_id);
-        request.extend_from_slice(&length);
-        request.extend_from_slice(length_tag.as_ref());
-        request.extend_from_slice(&nonce);
-        request.extend_from_slice(header);
-        request.extend_from_slice(header_tag.as_ref());
-        Ok(request)
-    }
-
-    pub(crate) fn with_packet_encoding(
-        mut self,
-        encoding: crate::config::client::PacketEncoding,
-    ) -> Self {
-        self.packet_encoding = encoding;
-        self
-    }
 }
 
-#[async_trait]
-impl TcpClientHandler for VmessTcpClientHandler {
-    async fn setup_client_tcp_stream(
-        &self,
-        mut client_stream: Box<dyn AsyncStream>,
-        remote_location: ResolvedLocation,
-    ) -> std::io::Result<TcpClientSetupResult> {
-        // max length of encrypted header:
-        // 41 (instructions up to addr type) + 256 (max domain name length 255 + 1 length byte) +
-        // 15 (max margin length, 4 bits) + 4 (fnv1a hash) = 316 + TAG_LEN
-        let mut header_bytes = [0u8; 316 + TAG_LEN];
-
-        header_bytes[0] = 1;
-
-        // this fills:
-        // - data encryption iv (16 bytes)
-        // - data encryption key (16 bytes)
-        // - response authentication v (1 byte)
-        rand::rng().fill_bytes(&mut header_bytes[1..34]);
-
-        let data_encryption_iv: &[u8] = &header_bytes[1..17];
-        let data_encryption_key: &[u8] = &header_bytes[17..33];
-        let response_authentication_v = header_bytes[33];
-
-        // construct everything where we need data_encryption_iv and data_encryption_key now,
-        // because instructions_to_addr_type will be encrypted once it's filled.
-        let response_header_iv = self.response_key(data_encryption_iv);
-        let response_header_key = self.response_key(data_encryption_key);
-
-        let (read_length_shake_reader, write_length_shake_reader) = {
-            let mut request_hasher = Shake128::default();
-            request_hasher.update(data_encryption_iv);
-            let request_reader = request_hasher.finalize_xof();
-
-            let mut response_hasher = Shake128::default();
-            response_hasher.update(&response_header_iv);
-            let response_reader = response_hasher.finalize_xof();
-
-            (Some(response_reader), Some(request_reader))
-        };
-
-        let (encryption_method, unbound_keys) = match self.data_cipher {
-            DataCipher::Aes128Gcm => {
-                // key is 16 bytes
-                (
-                    3u8,
-                    Some((
-                        UnboundKey::new(&AES_128_GCM, &response_header_key).unwrap(),
-                        UnboundKey::new(&AES_128_GCM, data_encryption_key).unwrap(),
-                    )),
-                )
-            }
-            DataCipher::ChaCha20Poly1305 | DataCipher::Any => {
-                // default to chacha.
-                // key is 32 bytes
-                (
-                    4u8,
-                    Some((
-                        UnboundKey::new(
-                            &CHACHA20_POLY1305,
-                            &create_chacha_key(&response_header_key),
-                        )
-                        .unwrap(),
-                        UnboundKey::new(
-                            &CHACHA20_POLY1305,
-                            &create_chacha_key(data_encryption_key),
-                        )
-                        .unwrap(),
-                    )),
-                )
-            }
-            DataCipher::None => (5u8, None),
-        };
-
-        let data_keys = if let Some((unbound_opening_key, unbound_sealing_key)) = unbound_keys {
-            let opening_key = OpeningKey::new(
-                unbound_opening_key,
-                VmessNonceSequence::new(&response_header_iv),
-            );
-            let sealing_key = SealingKey::new(
-                unbound_sealing_key,
-                VmessNonceSequence::new(data_encryption_iv),
-            );
-            Some((opening_key, sealing_key))
-        } else {
-            None
-        };
-
-        // continue filling out other parts of instructions_to_addr_type.
-
-        // set options, standard format data stream and metadata obfuscation
-        header_bytes[34] = 0x01 | 0x04;
-
-        // only 4 bits, generate this now before our first await.
-        let margin_len: u8 = rand::random::<u8>() & 0xf;
-        header_bytes[35] = (margin_len << 4) | encryption_method;
-
-        // specify tcp protocol
-        header_bytes[37] = 1;
-
-        let (remote_address, remote_port) = remote_location.into_location().unwrap_components();
-
-        header_bytes[38] = (remote_port >> 8) as u8;
-        header_bytes[39] = (remote_port & 0xff) as u8;
-
-        let mut cursor = match remote_address {
-            Address::Ipv4(v4addr) => {
-                header_bytes[40] = 1;
-                header_bytes[41..45].copy_from_slice(&v4addr.octets());
-                45
-            }
-            Address::Ipv6(v6addr) => {
-                header_bytes[40] = 3;
-                header_bytes[41..57].copy_from_slice(&v6addr.octets());
-                57
-            }
-            Address::Hostname(hostname) => {
-                if hostname.len() > 255 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Hostname is too long: {hostname}"),
-                    ));
-                }
-                header_bytes[40] = 2;
-                header_bytes[41] = hostname.len() as u8;
-                header_bytes[42..42 + hostname.len()].copy_from_slice(hostname.as_bytes());
-                42 + hostname.len()
-            }
-        };
-
-        if margin_len > 0 {
-            rand::rng().fill_bytes(&mut header_bytes[cursor..cursor + margin_len as usize]);
-            cursor += margin_len as usize;
-        }
-
-        let mut fnv_hasher = Fnv1aHasher::new();
-        fnv_hasher.write(&header_bytes[0..cursor]);
-        let check_bytes = fnv_hasher.finish().to_be_bytes();
-        header_bytes[cursor..cursor + 4].copy_from_slice(&check_bytes);
-        cursor += 4;
-
-        let complete_request = self.encode_request(&mut header_bytes[..cursor])?;
-
-        write_all(&mut client_stream, &complete_request).await?;
-
-        // Flush the entire request.
-        client_stream.flush().await?;
-
-        // Info for reading the server response, which arrives along with the initial data.
-        let read_header_info = ReadHeaderInfo {
-            legacy: self.legacy,
-            response_header_key,
-            response_header_iv,
-            response_authentication_v,
-        };
-
-        let client_stream = Box::new(VmessStream::new(
-            client_stream,
-            false,
-            data_keys,
-            read_length_shake_reader,
-            write_length_shake_reader,
-            false,
-            None,
-            Some(read_header_info),
-        ));
-
-        Ok(TcpClientSetupResult {
-            client_stream,
-            early_data: None,
-        })
-    }
-
-    fn supports_udp_over_tcp(&self) -> bool {
-        self.udp_enabled // VMess supports UDP-over-TCP tunneling when enabled
-    }
-
-    async fn setup_client_udp_bidirectional(
-        &self,
-        client_stream: Box<dyn AsyncStream>,
-        target: ResolvedLocation,
-    ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
-        // XUDP frames use a stream carrier; ordinary UDP uses VMess's
-        // datagram framing. Both retain the same authenticated handshake.
-        self.setup_udp_stream_impl(client_stream, target.into_location())
-            .await
-    }
-}
-
-impl VmessTcpClientHandler {
-    /// Setup a single-target UDP association using native or XUDP framing.
-    async fn setup_udp_stream_impl(
-        &self,
-        mut client_stream: Box<dyn AsyncStream>,
-        remote_location: NetLocation,
-    ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
-        let xudp = self.packet_encoding.is_xudp();
-        let target = remote_location.clone();
-
-        // max length of encrypted header (same as TCP):
-        // 41 (instructions up to addr type) + 256 (max domain name length) +
-        // 15 (max margin length) + 4 (fnv1a hash) = 316 + TAG_LEN
-        let mut header_bytes = [0u8; 316 + TAG_LEN];
-
-        header_bytes[0] = 1; // version
-
-        // Fill encryption keys and response auth:
-        // - data encryption iv (16 bytes)
-        // - data encryption key (16 bytes)
-        // - response authentication v (1 byte)
-        rand::rng().fill_bytes(&mut header_bytes[1..34]);
-
-        let data_encryption_iv: &[u8] = &header_bytes[1..17];
-        let data_encryption_key: &[u8] = &header_bytes[17..33];
-        let response_authentication_v = header_bytes[33];
-
-        let response_header_iv = self.response_key(data_encryption_iv);
-        let response_header_key = self.response_key(data_encryption_key);
-
-        let (read_length_shake_reader, write_length_shake_reader) = {
-            let mut request_hasher = Shake128::default();
-            request_hasher.update(data_encryption_iv);
-            let request_reader = request_hasher.finalize_xof();
-
-            let mut response_hasher = Shake128::default();
-            response_hasher.update(&response_header_iv);
-            let response_reader = response_hasher.finalize_xof();
-
-            (Some(response_reader), Some(request_reader))
-        };
-
-        let (encryption_method, unbound_keys) = match self.data_cipher {
-            DataCipher::Aes128Gcm => (
-                3u8,
-                Some((
-                    UnboundKey::new(&AES_128_GCM, &response_header_key).unwrap(),
-                    UnboundKey::new(&AES_128_GCM, data_encryption_key).unwrap(),
-                )),
-            ),
-            DataCipher::ChaCha20Poly1305 | DataCipher::Any => (
-                4u8,
-                Some((
-                    UnboundKey::new(&CHACHA20_POLY1305, &create_chacha_key(&response_header_key))
-                        .unwrap(),
-                    UnboundKey::new(&CHACHA20_POLY1305, &create_chacha_key(data_encryption_key))
-                        .unwrap(),
-                )),
-            ),
-            DataCipher::None => (5u8, None),
-        };
-
-        let data_keys = if let Some((unbound_opening_key, unbound_sealing_key)) = unbound_keys {
-            let opening_key = OpeningKey::new(
-                unbound_opening_key,
-                VmessNonceSequence::new(&response_header_iv),
-            );
-            let sealing_key = SealingKey::new(
-                unbound_sealing_key,
-                VmessNonceSequence::new(data_encryption_iv),
-            );
-            Some((opening_key, sealing_key))
-        } else {
-            None
-        };
-
-        // Set options: standard format data stream and metadata obfuscation
-        header_bytes[34] = 0x01 | 0x04;
-
-        // Margin length (4 bits) + encryption method
-        let margin_len: u8 = rand::random::<u8>() & 0xf;
-        header_bytes[35] = (margin_len << 4) | encryption_method;
-
-        // Reserved byte
-        header_bytes[36] = 0;
-
-        // XUDP's target is encoded in its own frames, so COMMAND_MUX omits
-        // the destination from the encrypted request header entirely.
-        header_bytes[37] = if xudp { COMMAND_MUX } else { COMMAND_UDP };
-
-        let (remote_address, remote_port) = remote_location.unwrap_components();
-
-        header_bytes[38] = (remote_port >> 8) as u8;
-        header_bytes[39] = (remote_port & 0xff) as u8;
-
-        let mut cursor = if xudp {
-            38
-        } else {
-            match remote_address {
-                Address::Ipv4(v4addr) => {
-                    header_bytes[40] = 1;
-                    header_bytes[41..45].copy_from_slice(&v4addr.octets());
-                    45
-                }
-                Address::Ipv6(v6addr) => {
-                    header_bytes[40] = 3;
-                    header_bytes[41..57].copy_from_slice(&v6addr.octets());
-                    57
-                }
-                Address::Hostname(hostname) => {
-                    if hostname.len() > 255 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Hostname is too long: {hostname}"),
-                        ));
-                    }
-                    header_bytes[40] = 2;
-                    header_bytes[41] = hostname.len() as u8;
-                    header_bytes[42..42 + hostname.len()].copy_from_slice(hostname.as_bytes());
-                    42 + hostname.len()
-                }
-            }
-        };
-
-        if margin_len > 0 {
-            rand::rng().fill_bytes(&mut header_bytes[cursor..cursor + margin_len as usize]);
-            cursor += margin_len as usize;
-        }
-
-        let mut fnv_hasher = Fnv1aHasher::new();
-        fnv_hasher.write(&header_bytes[0..cursor]);
-        let check_bytes = fnv_hasher.finish().to_be_bytes();
-        header_bytes[cursor..cursor + 4].copy_from_slice(&check_bytes);
-        cursor += 4;
-
-        let complete_request = self.encode_request(&mut header_bytes[..cursor])?;
-
-        write_all(&mut client_stream, &complete_request).await?;
-        client_stream.flush().await?;
-
-        // Info for reading the server response
-        let read_header_info = ReadHeaderInfo {
-            legacy: self.legacy,
-            response_header_key,
-            response_header_iv,
-            response_authentication_v,
-        };
-
-        // XUDP has its own datagram boundaries on a normal VMess byte stream.
-        let vmess_stream = VmessStream::new(
-            client_stream,
-            !xudp,
-            data_keys,
-            read_length_shake_reader,
-            write_length_shake_reader,
-            false,
-            None,
-            Some(read_header_info),
-        );
-
-        if xudp {
-            Ok(Box::new(crate::xudp::client_stream::XudpClientStream::new(
-                Box::new(vmess_stream),
-                target,
-            )))
-        } else {
-            Ok(Box::new(vmess_stream))
-        }
-    }
-}
+#[path = "client.rs"]
+mod client;
 
 #[cfg(test)]
 mod header_tests {
@@ -1292,6 +942,8 @@ mod header_tests {
             ("", DataCipher::Any),
             ("any", DataCipher::Any),
             ("none", DataCipher::None),
+            ("zero", DataCipher::None),
+            ("aes-128-cfb", DataCipher::Aes128Cfb),
             ("aes-128-gcm", DataCipher::Aes128Gcm),
             ("chacha20-poly1305", DataCipher::ChaCha20Poly1305),
             ("chacha20-ietf-poly1305", DataCipher::ChaCha20Poly1305),

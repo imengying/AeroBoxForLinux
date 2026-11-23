@@ -14,6 +14,7 @@ pub(super) fn client(
         address: source.address,
         domain_resolver: source.domain_resolver,
         connect_timeout_ms: source.connect_timeout_ms,
+        dial_options: source.dial_options,
         protocol: client_protocol(source.protocol, carrier),
         transport: source.transport,
         tcp_settings: source.tcp_settings,
@@ -82,9 +83,11 @@ fn client_protocol(
         ClientProxyConfig::Shadowsocks {
             config,
             udp_enabled,
+            plugin,
         } => ResolvedClientProxyConfig::Shadowsocks {
             config,
             udp_enabled,
+            plugin,
         },
         ClientProxyConfig::Snell {
             config,
@@ -122,7 +125,11 @@ fn client_protocol(
             h2mux,
         },
         ClientProxyConfig::Reality {
+            fragmentation,
+            handshake_timeout_ms,
             mldsa65_verify,
+            client_fingerprint,
+            alpn_protocols,
             public_key,
             short_id,
             sni_hostname,
@@ -130,7 +137,11 @@ fn client_protocol(
             vision,
             protocol,
         } => ResolvedClientProxyConfig::Reality {
+            fragmentation,
+            handshake_timeout_ms,
             mldsa65_verify,
+            client_fingerprint,
+            alpn_protocols,
             public_key,
             short_id,
             sni_hostname,
@@ -164,6 +175,8 @@ fn client_protocol(
             cipher,
             user_id,
             alter_id,
+            global_padding,
+            authenticated_length,
             udp_enabled,
             packet_encoding,
             h2mux,
@@ -171,6 +184,8 @@ fn client_protocol(
             cipher,
             user_id,
             alter_id,
+            global_padding,
+            authenticated_length,
             udp_enabled,
             packet_encoding,
             h2mux,
@@ -215,6 +230,7 @@ fn client_protocol(
         ClientProxyConfig::PortForward => ResolvedClientProxyConfig::PortForward,
         ClientProxyConfig::Anytls {
             password,
+            client_metadata,
             udp_enabled,
             padding_scheme,
             idle_session_check_interval_secs,
@@ -223,6 +239,7 @@ fn client_protocol(
             disable_reuse,
         } => ResolvedClientProxyConfig::Anytls {
             password,
+            client_metadata,
             udp_enabled,
             padding_scheme,
             idle_session_check_interval_secs,

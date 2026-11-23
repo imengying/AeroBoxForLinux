@@ -2,6 +2,7 @@
 //! Unrecognized options return a field path, never a silent security downgrade.
 #![forbid(unsafe_code)]
 mod outbound;
+pub(crate) mod ss_plugin;
 use anyhow::Context;
 pub use outbound::convert_outbound;
 use serde_json::{Map, Value};
@@ -103,6 +104,26 @@ pub(crate) fn address(host: &str, port: u64, path: &str) -> Result<String> {
     } else {
         format!("{host}:{port}")
     })
+}
+
+/// Hysteria2 hopping ports supersede its single port. Use the same endpoint
+/// test for import, selection and runtime conversion.
+pub(crate) fn server_port(node: &Value) -> Option<u16> {
+    let port = if node["type"] == "hysteria2"
+        && let Some(ports) = node.get("server_ports")
+    {
+        ports
+            .as_array()?
+            .first()?
+            .as_str()?
+            .split(':')
+            .next()?
+            .parse()
+            .ok()?
+    } else {
+        u16::try_from(node["server_port"].as_u64()?).ok()?
+    };
+    (port != 0).then_some(port)
 }
 pub(crate) fn seconds(value: Value, path: &str) -> Result<u64> {
     let text = value

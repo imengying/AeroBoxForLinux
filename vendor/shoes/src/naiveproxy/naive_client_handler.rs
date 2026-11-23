@@ -4,7 +4,10 @@
 //! existing tunnels alive through their session owners.
 
 use std::io;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use base64::engine::{Engine as _, general_purpose::STANDARD as BASE64};
@@ -52,13 +55,30 @@ impl std::fmt::Debug for NaiveProxyTcpClientHandler {
 }
 
 impl NaiveProxyTcpClientHandler {
+    #[cfg(test)]
     pub fn new(username: &str, password: &str, padding_enabled: bool) -> Self {
-        Self::with_options(username, password, padding_enabled, super::options::Options::default()).expect("default Naive options")
+        Self::with_options(
+            username,
+            password,
+            padding_enabled,
+            super::options::Options::default(),
+        )
+        .expect("default Naive options")
     }
 
-    pub fn with_options(username: &str, password: &str, padding_enabled: bool, options: super::options::Options) -> io::Result<Self> {
+    pub fn with_options(
+        username: &str,
+        password: &str,
+        padding_enabled: bool,
+        options: super::options::Options,
+    ) -> io::Result<Self> {
         options.validate()?;
-        if options.quic {return Err(io::Error::new(io::ErrorKind::InvalidInput,"Naive QUIC requires a QUIC carrier"));}
+        if options.quic {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Naive QUIC requires a QUIC carrier",
+            ));
+        }
         let credentials = format!("{}:{}", username, password);
         let auth_header = format!("Basic {}", BASE64.encode(&credentials));
 
@@ -74,6 +94,17 @@ impl NaiveProxyTcpClientHandler {
 
 #[async_trait]
 impl TcpClientHandler for NaiveProxyTcpClientHandler {
+    fn validate_alpn(&self, alpn: Option<&[u8]>) -> io::Result<()> {
+        if alpn == Some(b"h2") {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Naive HTTP/2 requires h2 TLS ALPN",
+            ))
+        }
+    }
+
     fn has_session_pool(&self) -> bool {
         true
     }
@@ -87,17 +118,37 @@ impl TcpClientHandler for NaiveProxyTcpClientHandler {
         self.open_stream(session, &target).await
     }
 
-    fn supports_udp_over_tcp(&self) -> bool { self.options.udp_over_tcp.is_some() }
+    fn supports_udp_over_tcp(&self) -> bool {
+        self.options.udp_over_tcp.is_some()
+    }
 
-    async fn connect_client_udp(&self, transport: ClientTransport<'_>, target: ResolvedLocation) -> io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
-        let version = self.options.udp_over_tcp.ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"Naive UDP disabled"))?;
-        let result = self.connect_client_tcp(transport, super::request::uot_target(version)).await?;
+    async fn connect_client_udp(
+        &self,
+        transport: ClientTransport<'_>,
+        target: ResolvedLocation,
+    ) -> io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
+        let version = self
+            .options
+            .udp_over_tcp
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "Naive UDP disabled"))?;
+        let result = self
+            .connect_client_tcp(transport, super::request::uot_target(version))
+            .await?;
         crate::uot::client::frame(version, result, target).await
     }
 
-    async fn setup_client_udp_bidirectional(&self, stream: Box<dyn AsyncStream>, target: ResolvedLocation) -> io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
-        let version = self.options.udp_over_tcp.ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"Naive UDP disabled"))?;
-        let result = self.setup_client_tcp_stream(stream, super::request::uot_target(version)).await?;
+    async fn setup_client_udp_bidirectional(
+        &self,
+        stream: Box<dyn AsyncStream>,
+        target: ResolvedLocation,
+    ) -> io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
+        let version = self
+            .options
+            .udp_over_tcp
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "Naive UDP disabled"))?;
+        let result = self
+            .setup_client_tcp_stream(stream, super::request::uot_target(version))
+            .await?;
         crate::uot::client::frame(version, result, target).await
     }
 
@@ -119,7 +170,12 @@ impl NaiveProxyTcpClientHandler {
         target: &ResolvedLocation,
     ) -> io::Result<TcpClientSetupResult> {
         let result = session
-            .open_with_headers(target.location(), &self.auth_header, self.padding_enabled, &self.options.extra_headers)
+            .open_with_headers(
+                target.location(),
+                &self.auth_header,
+                self.padding_enabled,
+                &self.options.extra_headers,
+            )
             .await;
         let stream = match result {
             Ok(stream) => stream,
@@ -142,11 +198,14 @@ impl NaiveProxyTcpClientHandler {
         })
     }
     async fn session_for(&self, transport: ClientTransport<'_>) -> io::Result<NaiveClientSession> {
-        let lane = self.next_lane.fetch_add(1, Ordering::Relaxed) % self.options.insecure_concurrency;
+        let lane =
+            self.next_lane.fetch_add(1, Ordering::Relaxed) % self.options.insecure_concurrency;
         let cached = {
             let mut sessions = self.sessions.lock();
             let index = sessions.iter().position(|cached| {
-                cached.lane == lane && cached.route.route_key() == transport.route.route_key() && cached.session.is_ready()
+                cached.lane == lane
+                    && cached.route.route_key() == transport.route.route_key()
+                    && cached.session.is_ready()
             });
             index.map(|index| {
                 let cached = sessions.remove(index);
@@ -162,7 +221,8 @@ impl NaiveProxyTcpClientHandler {
 
         // Dialing stays outside the lock so a stalled prefix cannot block others.
         // Each cold flow uses its own transport, even if another flow publishes first.
-        let session = NaiveClientSession::with_options(transport.open.await?, &self.options).await?;
+        let session =
+            NaiveClientSession::with_options(transport.open.await?, &self.options).await?;
         let mut retired = Vec::new();
         {
             let mut sessions = self.sessions.lock();
@@ -170,7 +230,8 @@ impl NaiveProxyTcpClientHandler {
             while index < sessions.len() {
                 let cached = &sessions[index];
                 if !cached.session.is_ready()
-                    || (cached.lane == lane && cached.route.route_key() == transport.route.route_key())
+                    || (cached.lane == lane
+                        && cached.route.route_key() == transport.route.route_key())
                 {
                     retired.push(sessions.remove(index));
                 } else {
@@ -214,6 +275,7 @@ mod tests {
 
     fn transport(id: usize, stream: Option<tokio::io::DuplexStream>) -> ClientTransport<'static> {
         ClientTransport {
+            reopen: None,
             route: Arc::new(Route(RouteKey(vec![id]))),
             open: Box::pin(async move {
                 Ok(Box::new(stream.expect("warm acquisition must not dial"))
@@ -230,15 +292,27 @@ mod tests {
 
     #[tokio::test]
     async fn configured_concurrency_rotates_distinct_sessions_per_route() {
-        let handler=NaiveProxyTcpClientHandler::with_options("user","pass",false,super::super::options::Options{insecure_concurrency:2,..Default::default()}).unwrap();
-        let (a,peer_a)=tokio::io::duplex(8192);let (b,peer_b)=tokio::io::duplex(8192);
-        let first=handler.session_for(transport(1,Some(a))).await.unwrap();
-        let second=handler.session_for(transport(1,Some(b))).await.unwrap();
+        let handler = NaiveProxyTcpClientHandler::with_options(
+            "user",
+            "pass",
+            false,
+            super::super::options::Options {
+                insecure_concurrency: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (a, peer_a) = tokio::io::duplex(8192);
+        let (b, peer_b) = tokio::io::duplex(8192);
+        let first = handler.session_for(transport(1, Some(a))).await.unwrap();
+        let second = handler.session_for(transport(1, Some(b))).await.unwrap();
         assert!(!first.same_generation(&second));
-        for expected in [&first,&second,&first,&second] {
-            assert!(expected.same_generation(&handler.session_for(transport(1,None)).await.unwrap()));
+        for expected in [&first, &second, &first, &second] {
+            assert!(
+                expected.same_generation(&handler.session_for(transport(1, None)).await.unwrap())
+            );
         }
-        drop((peer_a,peer_b));
+        drop((peer_a, peer_b));
     }
 
     #[tokio::test]
@@ -415,6 +489,7 @@ mod tests {
         let first = handler.session_for(transport(1, Some(a))).await.unwrap();
         let (started, starting) = tokio::sync::oneshot::channel();
         let b = ClientTransport {
+            reopen: None,
             route: transport(2, None).route,
             open: Box::pin(async move {
                 started.send(()).unwrap();
@@ -624,11 +699,13 @@ mod tests {
             .await
             .unwrap();
         let failed = ClientTransport {
+            reopen: None,
             route: transport(2, None).route,
             open: Box::pin(async { Err(io::Error::other("dial failed")) }),
         };
         assert!(handler.session_for(failed).await.is_err());
         let stalled = ClientTransport {
+            reopen: None,
             route: transport(2, None).route,
             open: Box::pin(std::future::pending()),
         };

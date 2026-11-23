@@ -3,6 +3,7 @@
 set -eu
 binary=$1
 output_dir=$2
+rm -f "$output_dir"/*.png
 test_dir=$(mktemp -d)
 cleanup() {
   if [ -d "$test_dir/screenshots" ]; then

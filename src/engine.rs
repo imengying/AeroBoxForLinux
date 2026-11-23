@@ -29,13 +29,6 @@ pub struct CoreStatus {
     pub proxy: bool,
 }
 #[derive(Clone, Debug)]
-pub struct CoreInfo {
-    pub name: String,
-    pub version: String,
-    pub status: CoreStatus,
-    pub routing_mode: String,
-}
-#[derive(Clone, Debug)]
 pub struct SubscriptionNode {
     pub subscription_id: String,
     pub node_tag: String,
@@ -154,14 +147,6 @@ impl Service {
                 self.log(format!("清理连接失败：{e:#}"));
             }
         }
-    }
-    pub fn core_info(&self) -> Result<CoreInfo> {
-        Ok(CoreInfo {
-            name: "AeroBox Rust".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            status: self.status(),
-            routing_mode: self.runtime_mode()?,
-        })
     }
     pub fn generate_current(&self) -> Result<Value> {
         Ok(self.prepare_current(&self.snapshot())?.config)
@@ -427,9 +412,6 @@ impl Service {
             })
             .collect())
     }
-    pub fn subscription_nodes_runtime(&self, id: &str) -> Result<Vec<SubscriptionNode>> {
-        self.subscription_nodes(id)
-    }
     pub fn select_subscription(&self, id: &str) -> Result<()> {
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
@@ -677,7 +659,7 @@ impl Service {
         Ok(lines.join("\n"))
     }
     pub fn memory_usage(&self) -> network::MemoryUsage {
-        network::memory_usage(None)
+        network::memory_usage()
     }
     fn ensure_tun_available(&self, settings: &Settings) -> Result<()> {
         if settings.tun_enabled {
@@ -868,6 +850,7 @@ impl Service {
         ensure!(model::has_selectable_node(&nodes), "订阅没有可连接节点");
         let mut next = original.clone();
         next.nodes = nodes;
+        next.import_issues.clear();
         next.updated = now();
         self.apply_subscription_update(&original.id, original, &next)
     }
@@ -1253,6 +1236,7 @@ impl Service {
             ));
         }
         sub.nodes = nodes;
+        sub.import_issues = skipped;
         ensure!(!sub.nodes.is_empty(), "订阅没有节点");
         model::validate_nodes(&sub.nodes)?;
         sub.updated = now();
@@ -1466,6 +1450,7 @@ impl Drop for Service {
 }
 fn copy_subscription_data(target: &mut model::Subscription, source: &model::Subscription) {
     target.nodes.clone_from(&source.nodes);
+    target.import_issues.clone_from(&source.import_issues);
     target.updated = source.updated;
     target.upload = source.upload;
     target.download = source.download;

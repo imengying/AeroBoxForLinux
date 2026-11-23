@@ -73,6 +73,7 @@ enum ShutdownState {
 
 pub struct VmessStream {
     stream: Box<dyn AsyncStream>,
+    is_udp: bool,
 
     read_header_state: ReadHeaderState,
     read_header_info: Option<ReadHeaderInfo>,
@@ -80,8 +81,14 @@ pub struct VmessStream {
     opening_key: Option<OpeningKey<VmessNonceSequence>>,
     sealing_key: Option<SealingKey<VmessNonceSequence>>,
     tag_len: usize,
+    read_cfb: Option<super::legacy::Cfb128>,
+    write_cfb: Option<super::legacy::Cfb128>,
+    legacy_response_cfb: Option<super::legacy::Cfb128>,
+    raw_body: bool,
     read_length_mask: Option<LengthMask>,
     write_length_mask: Option<LengthMask>,
+    read_length_key: Option<OpeningKey<VmessNonceSequence>>,
+    write_length_key: Option<SealingKey<VmessNonceSequence>>,
 
     unprocessed_buf: Box<[u8]>,
     unprocessed_start_offset: usize,
@@ -91,6 +98,7 @@ pub struct VmessStream {
     processed_buf: Box<[u8]>,
     processed_start_offset: usize,
     processed_end_offset: usize,
+    processed_empty_message: bool,
 
     write_cache: Box<[u8]>,
     write_cache_size: usize,
@@ -104,6 +112,7 @@ pub struct VmessStream {
 
     shutdown_state: ShutdownState,
     is_eof: bool,
+    read_failure: Option<(std::io::ErrorKind, String)>,
 }
 
 enum DecryptState {
@@ -115,7 +124,6 @@ enum DecryptState {
 
 // Expected VMess header response, when we're a client.
 pub struct ReadHeaderInfo {
-    pub legacy: bool,
     pub response_header_key: [u8; 16],
     pub response_header_iv: [u8; 16],
     pub response_authentication_v: u8,
@@ -123,10 +131,10 @@ pub struct ReadHeaderInfo {
 
 #[derive(PartialEq, Eq, Debug)]
 enum ReadHeaderState {
-    ReadLegacy,
-    ReadLegacyCommand(usize),
     ReadAeadLength,
     ReadAeadContent(usize),
+    ReadLegacy,
+    ReadLegacyCommand(usize),
     Done,
 }
 
@@ -177,13 +185,13 @@ impl VmessStream {
         let max_unencrypted_read_data_size = MAX_ENCRYPTED_READ_DATA_SIZE - tag_len;
         let max_unencrypted_write_data_size = MAX_ENCRYPTED_WRITE_DATA_SIZE - tag_len;
 
-        const MAX_READ_PACKET_SIZE: usize = MAX_ENCRYPTED_READ_DATA_SIZE + 2;
+        const MAX_READ_PACKET_SIZE: usize = MAX_ENCRYPTED_READ_DATA_SIZE + 18;
         let unprocessed_buf = allocate_vec(MAX_READ_PACKET_SIZE).into_boxed_slice();
         let processed_buf = allocate_vec(max_unencrypted_read_data_size).into_boxed_slice();
 
         let (write_cache, write_packet) = if !is_udp {
             let write_cache = allocate_vec(max_unencrypted_write_data_size).into_boxed_slice();
-            const MAX_WRITE_PACKET_SIZE: usize = MAX_ENCRYPTED_WRITE_DATA_SIZE + 2;
+            const MAX_WRITE_PACKET_SIZE: usize = MAX_ENCRYPTED_WRITE_DATA_SIZE + 18;
             // we need to be able to send a full packet, and the prefix (response) data all
             // at once. the response is relatively small, check vmess_handler.
             let write_packet = allocate_vec(MAX_WRITE_PACKET_SIZE + 40).into_boxed_slice();
@@ -202,19 +210,25 @@ impl VmessStream {
             (write_cache, write_packet)
         };
 
-        let read_header_state = match &read_header_info {
-            Some(info) if info.legacy => ReadHeaderState::ReadLegacy,
+        let read_header_state = match read_header_info {
             Some(_) => ReadHeaderState::ReadAeadLength,
             None => ReadHeaderState::Done,
         };
 
         Self {
             stream,
+            is_udp,
             read_header_state,
             read_header_info,
             opening_key,
             sealing_key,
             tag_len,
+            read_cfb: None,
+            write_cfb: None,
+            legacy_response_cfb: None,
+            raw_body: false,
+            read_length_key: None,
+            write_length_key: None,
             read_length_mask: read_length_shake_reader
                 .map(|reader| LengthMask::new(reader, enable_global_padding)),
             write_length_mask: write_length_shake_reader
@@ -226,6 +240,7 @@ impl VmessStream {
             processed_buf,
             processed_start_offset: 0,
             processed_end_offset: 0,
+            processed_empty_message: false,
             write_cache,
             write_cache_size: 0,
             write_packet,
@@ -236,10 +251,42 @@ impl VmessStream {
             pending_prefix_write: prefix_write_bytes,
             shutdown_state: ShutdownState::WriteRemainingData,
             is_eof: false,
+            read_failure: None,
         }
     }
 
     pub fn feed_initial_read_data(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.check_read_failure()?;
+        let result = self.feed_initial_read_data_inner(data);
+        if let Err(error) = &result {
+            self.poison_read(error);
+        }
+        result
+    }
+
+    fn check_read_failure(&self) -> std::io::Result<()> {
+        match &self.read_failure {
+            Some((kind, message)) => Err(std::io::Error::new(*kind, message.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn poison_read(&mut self, error: &std::io::Error) {
+        // A caller may retry a datagram with a larger destination buffer. All
+        // other read failures are terminal: cipher state and in-place header
+        // decoding cannot safely be replayed after an authentication failure.
+        if error.kind() != std::io::ErrorKind::InvalidInput && self.read_failure.is_none() {
+            self.read_failure = Some((error.kind(), error.to_string()));
+            self.processed_start_offset = 0;
+            self.processed_end_offset = 0;
+            self.processed_empty_message = false;
+            self.unprocessed_start_offset = 0;
+            self.unprocessed_end_offset = 0;
+            self.unprocessed_pending_len = None;
+        }
+    }
+
+    fn feed_initial_read_data_inner(&mut self, data: &[u8]) -> std::io::Result<()> {
         assert!(self.unprocessed_end_offset == 0);
 
         if data.len() > self.unprocessed_buf.len() {
@@ -271,7 +318,9 @@ impl VmessStream {
                     break;
                 }
                 DecryptState::Success => {
-                    continue;
+                    if self.is_udp {
+                        break;
+                    }
                 }
             }
         }
@@ -281,11 +330,12 @@ impl VmessStream {
 
     fn process_read_header(&mut self) -> std::io::Result<()> {
         match self.read_header_state {
-            ReadHeaderState::ReadLegacy => self.process_read_header_legacy(),
-            ReadHeaderState::ReadLegacyCommand(length) => self.skip_legacy_command(length),
             ReadHeaderState::ReadAeadLength => self.process_read_header_aead_length(),
             ReadHeaderState::ReadAeadContent(content_len) => {
                 self.process_read_header_aead_content(content_len)
+            }
+            ReadHeaderState::ReadLegacy | ReadHeaderState::ReadLegacyCommand(_) => {
+                self.process_read_header_legacy()
             }
             ReadHeaderState::Done => {
                 panic!("process_read_header called with Done state");
@@ -293,29 +343,76 @@ impl VmessStream {
         }
     }
 
-    fn process_read_header_legacy(&mut self) -> std::io::Result<()> {
-        if self.unprocessed_end_offset - self.unprocessed_start_offset < 4 {
-            return Ok(());
-        }
-        let mut header: [u8; 4] = self.unprocessed_buf
-            [self.unprocessed_start_offset..self.unprocessed_start_offset + 4]
-            .try_into().unwrap();
-        let info = self.read_header_info.as_ref().unwrap();
-        super::legacy::response(&info.response_header_key, &info.response_header_iv, &mut header);
-        check_header_response(&header, info.response_authentication_v)?;
-        self.unprocessed_start_offset += 4;
-        let command_len = usize::from(header[3]);
-        self.read_header_state = ReadHeaderState::ReadLegacyCommand(command_len);
-        self.skip_legacy_command(command_len)
+    pub(super) fn with_raw_body(mut self, raw: bool) -> Self {
+        self.raw_body = raw;
+        self
     }
 
-    fn skip_legacy_command(&mut self, length: usize) -> std::io::Result<()> {
+    pub(super) fn with_cfb(
+        mut self,
+        read_key: &[u8; 16],
+        read_iv: &[u8; 16],
+        write_key: &[u8; 16],
+        write_iv: &[u8; 16],
+    ) -> Self {
+        self.read_cfb = Some(super::legacy::Cfb128::new(read_key, read_iv));
+        self.write_cfb = Some(super::legacy::Cfb128::new(write_key, write_iv));
+        // CFB chunks prepend a four-byte FNV-1a checksum, rather than an AEAD tag.
+        self.tag_len = 4;
+        self
+    }
+
+    pub(super) fn with_legacy_response(mut self, legacy: bool) -> Self {
+        if legacy {
+            let info = self
+                .read_header_info
+                .as_ref()
+                .expect("client response metadata");
+            self.legacy_response_cfb = Some(super::legacy::Cfb128::new(
+                &info.response_header_key,
+                &info.response_header_iv,
+            ));
+            self.read_header_state = ReadHeaderState::ReadLegacy;
+        }
+        self
+    }
+
+    fn process_read_header_legacy(&mut self) -> std::io::Result<()> {
+        if self.read_header_state == ReadHeaderState::ReadLegacy {
+            if self.unprocessed_end_offset - self.unprocessed_start_offset < 4 {
+                return Ok(());
+            }
+            let header = &mut self.unprocessed_buf
+                [self.unprocessed_start_offset..self.unprocessed_start_offset + 4];
+            self.legacy_response_cfb.as_mut().unwrap().decrypt(header);
+            check_header_response(
+                header,
+                self.read_header_info
+                    .as_ref()
+                    .unwrap()
+                    .response_authentication_v,
+            )?;
+            let command_length = usize::from(header[3]);
+            self.unprocessed_start_offset += 4;
+            self.read_header_state = ReadHeaderState::ReadLegacyCommand(command_length);
+        }
+        let ReadHeaderState::ReadLegacyCommand(length) = self.read_header_state else {
+            unreachable!()
+        };
         if self.unprocessed_end_offset - self.unprocessed_start_offset < length {
             return Ok(());
         }
-        // Dynamic server commands do not alter this connection's payload keys.
-        // Skip their exact wire length, preserving any coalesced payload bytes.
+        self.legacy_response_cfb.as_mut().unwrap().decrypt(
+            &mut self.unprocessed_buf
+                [self.unprocessed_start_offset..self.unprocessed_start_offset + length],
+        );
         self.unprocessed_start_offset += length;
+        if self.read_cfb.is_some() {
+            // Legacy CFB data continues the response header's cipher state.
+            self.read_cfb = self.legacy_response_cfb.take();
+        } else {
+            self.legacy_response_cfb = None;
+        }
         self.read_header_info = None;
         self.read_header_state = ReadHeaderState::Done;
         if self.unprocessed_start_offset == self.unprocessed_end_offset {
@@ -362,13 +459,13 @@ impl VmessStream {
 
         let response_header_length =
             u16::from_be_bytes(encrypted_response_header_length[0..2].try_into().unwrap()) as usize;
+
         if !(4..=259).contains(&response_header_length) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid VMess response header length",
             ));
         }
-
         self.read_header_state = ReadHeaderState::ReadAeadContent(response_header_length);
         self.unprocessed_start_offset += 2 + HEADER_TAG_LEN;
         if self.unprocessed_start_offset == self.unprocessed_end_offset {
@@ -414,13 +511,13 @@ impl VmessStream {
             ));
         }
 
-        let command_len = encrypted_response_header[3];
-        if content_len != 4 + usize::from(command_len) {
+        if content_len < 4 || usize::from(encrypted_response_header[3]) + 4 != content_len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "invalid VMess response command length",
+                "invalid VMess response header length",
             ));
         }
+        let command_len = encrypted_response_header[3];
         if command_len > 0 {
             warn!("Ignoring unused command bytes from AEAD block");
         }
@@ -440,31 +537,122 @@ impl VmessStream {
         check_header_response(encrypted_response_header, response_authentication_v)
     }
 
+    pub(super) fn with_authenticated_length(
+        mut self,
+        enabled: bool,
+        chacha: bool,
+        request_key: &[u8],
+        request_iv: &[u8],
+    ) -> Self {
+        if !enabled {
+            return self;
+        }
+        let derived = super::sha2::kdf(request_key, &[b"auth_len"]);
+        let (algorithm, key) = if chacha {
+            (
+                &aerobox_primitives::aead::CHACHA20_POLY1305,
+                super::md5::create_chacha_key(&derived[..16]).to_vec(),
+            )
+        } else {
+            (&AES_128_GCM, derived[..16].to_vec())
+        };
+        self.read_length_key = Some(OpeningKey::new(
+            UnboundKey::new(algorithm, &key).unwrap(),
+            VmessNonceSequence::new(request_iv),
+        ));
+        self.write_length_key = Some(SealingKey::new(
+            UnboundKey::new(algorithm, &key).unwrap(),
+            VmessNonceSequence::new(request_iv),
+        ));
+        self
+    }
+
     fn try_decrypt(&mut self) -> std::io::Result<DecryptState> {
         // returns true if a full packet was decrypted, false if not (ie. more data required)
         let available_len = self.unprocessed_end_offset - self.unprocessed_start_offset;
 
+        if self.raw_body {
+            if available_len == 0 {
+                return Ok(DecryptState::NeedData);
+            }
+            let count = available_len.min(self.processed_buf.len() - self.processed_end_offset);
+            if count == 0 {
+                return Ok(DecryptState::BufferFull);
+            }
+            if let Some(cipher) = &mut self.read_cfb {
+                cipher.decrypt(
+                    &mut self.unprocessed_buf
+                        [self.unprocessed_start_offset..self.unprocessed_start_offset + count],
+                );
+            }
+            self.processed_buf[self.processed_end_offset..self.processed_end_offset + count]
+                .copy_from_slice(
+                    &self.unprocessed_buf
+                        [self.unprocessed_start_offset..self.unprocessed_start_offset + count],
+                );
+            self.processed_end_offset += count;
+            self.unprocessed_start_offset += count;
+            if self.unprocessed_start_offset == self.unprocessed_end_offset {
+                self.unprocessed_start_offset = 0;
+                self.unprocessed_end_offset = 0;
+            }
+            return Ok(DecryptState::Success);
+        }
+
         let (padding_len, data_len) = match self.unprocessed_pending_len {
             None => {
-                if available_len < 2 {
+                let header_len = if self.read_length_key.is_some() {
+                    18
+                } else {
+                    2
+                };
+                if available_len < header_len {
                     return Ok(DecryptState::NeedData);
                 }
 
                 let length_bytes = &mut self.unprocessed_buf
-                    [self.unprocessed_start_offset..self.unprocessed_start_offset + 2];
+                    [self.unprocessed_start_offset..self.unprocessed_start_offset + header_len];
+
+                if let Some(cipher) = &mut self.read_cfb {
+                    cipher.decrypt(length_bytes);
+                }
+
+                if let Some(key) = &mut self.read_length_key {
+                    key.open_in_place(Aad::empty(), length_bytes).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "VMess length authentication failed",
+                        )
+                    })?;
+                }
 
                 let mut data_len = ((length_bytes[0] as u16) << 8) | (length_bytes[1] as u16);
 
                 let padding_len = match self.read_length_mask {
                     Some(ref mut mask) => {
-                        let (padding_len, length_mask) = mask.next_values();
+                        let (padding_len, length_mask) = if self.read_length_key.is_some() {
+                            (
+                                if mask.enable_padding {
+                                    (mask.next_u16() % 64) as usize
+                                } else {
+                                    0
+                                },
+                                0,
+                            )
+                        } else {
+                            mask.next_values()
+                        };
                         data_len ^= length_mask;
                         padding_len
                     }
                     None => 0,
                 };
 
-                let data_len = data_len as usize;
+                let data_len = if self.read_length_key.is_some() {
+                    data_len.wrapping_add(16)
+                } else {
+                    data_len
+                } as usize;
 
                 if data_len > MAX_ENCRYPTED_READ_DATA_SIZE {
                     return Err(std::io::Error::new(
@@ -479,6 +667,14 @@ impl VmessStream {
                         "padding exceeds VMess chunk length",
                     ));
                 }
+                if self.read_cfb.is_some() && data_len == 0 && padding_len == 0 {
+                    self.unprocessed_start_offset += header_len;
+                    if self.unprocessed_start_offset == self.unprocessed_end_offset {
+                        self.unprocessed_start_offset = 0;
+                        self.unprocessed_end_offset = 0;
+                    }
+                    return Ok(DecryptState::ReceivedEof);
+                }
                 if self.tag_len > 0 && (data_len - padding_len) < self.tag_len {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -489,14 +685,9 @@ impl VmessStream {
                     ));
                 }
 
-                if data_len - padding_len == self.tag_len {
-                    // TODO: should we bother to decrypt the eof packet?
-                    return Ok(DecryptState::ReceivedEof);
-                }
+                self.unprocessed_start_offset += header_len;
 
-                self.unprocessed_start_offset += 2;
-
-                if available_len - 2 < data_len {
+                if available_len - header_len < data_len {
                     self.unprocessed_pending_len = Some((padding_len, data_len));
                     if self.unprocessed_start_offset == self.unprocessed_end_offset {
                         self.unprocessed_start_offset = 0;
@@ -549,11 +740,27 @@ impl VmessStream {
         }
 
         let processed_data_len = data_len - padding_len - self.tag_len;
+        let payload_start = if let Some(cipher) = &mut self.read_cfb {
+            let bytes = &mut self.unprocessed_buf
+                [self.unprocessed_start_offset..self.unprocessed_start_offset + data_len];
+            cipher.decrypt(bytes);
+            let expected = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+            let mut checksum = super::fnv1a::Fnv1aHasher::new();
+            checksum.write(&bytes[4..4 + processed_data_len]);
+            if checksum.finish() != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "VMess CFB chunk checksum mismatch",
+                ));
+            }
+            self.unprocessed_start_offset + 4
+        } else {
+            self.unprocessed_start_offset
+        };
         self.processed_buf
             [self.processed_end_offset..self.processed_end_offset + processed_data_len]
             .copy_from_slice(
-                &self.unprocessed_buf[self.unprocessed_start_offset
-                    ..self.unprocessed_start_offset + processed_data_len],
+                &self.unprocessed_buf[payload_start..payload_start + processed_data_len],
             );
 
         self.processed_end_offset += processed_data_len;
@@ -564,7 +771,55 @@ impl VmessStream {
             self.unprocessed_end_offset = 0;
         }
 
-        Ok(DecryptState::Success)
+        Ok(
+            if processed_data_len == 0 && self.is_udp && self.tag_len > 0 {
+                self.processed_empty_message = true;
+                DecryptState::Success
+            } else if processed_data_len == 0 {
+                DecryptState::ReceivedEof
+            } else {
+                DecryptState::Success
+            },
+        )
+    }
+
+    fn check_transport_eof(&self) -> std::io::Result<()> {
+        if self.read_header_state != ReadHeaderState::Done
+            || self.unprocessed_pending_len.is_some()
+            || self.unprocessed_end_offset != self.unprocessed_start_offset
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated VMess frame",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_processed_message(&mut self, buf: &mut ReadBuf<'_>) -> std::io::Result<()> {
+        if self.processed_empty_message {
+            self.processed_empty_message = false;
+            return Ok(());
+        }
+        if buf.remaining() < self.processed_end_offset - self.processed_start_offset {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "buffer too small for VMess datagram",
+            ));
+        }
+        self.read_processed(buf);
+        Ok(())
+    }
+
+    fn message_eof(&self) -> std::io::Result<()> {
+        if self.is_udp && self.tag_len > 0 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "VMess datagram transport closed",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn read_processed(&mut self, buf: &mut ReadBuf<'_>) {
@@ -597,7 +852,7 @@ impl VmessStream {
         }
     }
 
-    fn create_write_packet(&mut self) -> bool {
+    fn create_write_packet(&mut self) -> std::io::Result<bool> {
         // If we have a pending prefix, prepend it to the write_packet buffer
         // so that the response header and first data packet go out together.
         if let Some(prefix) = self.pending_prefix_write.take() {
@@ -609,24 +864,61 @@ impl VmessStream {
 
         // note that this should allow creating an empty packet.
         let write_packet_space = self.write_packet.len() - self.write_packet_end_offset;
+        if self.raw_body {
+            let count = self.write_cache_size.min(write_packet_space);
+            if count == 0 {
+                return Ok(self.write_cache_size == 0);
+            }
+            self.write_packet[self.write_packet_end_offset..self.write_packet_end_offset + count]
+                .copy_from_slice(&self.write_cache[..count]);
+            if let Some(cipher) = &mut self.write_cfb {
+                cipher.encrypt(
+                    &mut self.write_packet
+                        [self.write_packet_end_offset..self.write_packet_end_offset + count],
+                );
+            }
+            self.write_packet_end_offset += count;
+            self.write_cache
+                .copy_within(count..self.write_cache_size, 0);
+            self.write_cache_size -= count;
+            return Ok(true);
+        }
         let max_padding_len = if self.write_length_mask.is_some() {
             MAX_PADDING_LEN
         } else {
             0
         };
 
-        let max_metadata_size = 2 + max_padding_len + self.tag_len;
+        let header_len = if self.write_length_key.is_some() {
+            18
+        } else {
+            2
+        };
+        let max_metadata_size = header_len + max_padding_len + self.tag_len;
         if max_metadata_size >= write_packet_space {
-            return false;
+            return Ok(false);
         }
 
         // TODO: allow peeking so that we don't need to use MAX_PADDING_LEN above.
         let (padding_len, length_mask) = match self.write_length_mask {
-            Some(ref mut mask) => mask.next_values(),
+            Some(ref mut mask) => {
+                if self.write_length_key.is_some() {
+                    (
+                        if mask.enable_padding {
+                            (mask.next_u16() % 64) as usize
+                        } else {
+                            0
+                        },
+                        0,
+                    )
+                } else {
+                    mask.next_values()
+                }
+            }
             None => (0, 0),
         };
 
-        let metadata_size = 2 + padding_len + self.tag_len;
+        let metadata_size = header_len + padding_len + self.tag_len;
         let max_data_size = std::cmp::min(
             write_packet_space - metadata_size,
             MAX_ENCRYPTED_WRITE_DATA_SIZE - padding_len - self.tag_len,
@@ -634,27 +926,47 @@ impl VmessStream {
         let data_size = std::cmp::min(max_data_size, self.write_cache_size);
 
         let write_packet_size: usize = data_size + padding_len + self.tag_len;
-        assert!(write_packet_size + 2 <= self.write_packet.len());
+        assert!(write_packet_size + header_len <= self.write_packet.len());
 
-        let mut next_index = self.write_packet_end_offset;
+        let frame_start = self.write_packet_end_offset;
+        let mut next_index = frame_start;
 
-        let write_packet_size = (write_packet_size as u16) ^ length_mask;
+        let write_packet_size = if self.write_length_key.is_some() {
+            (write_packet_size as u16).wrapping_sub(16)
+        } else {
+            (write_packet_size as u16) ^ length_mask
+        };
         self.write_packet[next_index] = (write_packet_size >> 8) as u8;
         self.write_packet[next_index + 1] = (write_packet_size & 0xff) as u8;
 
-        next_index += 2;
+        if let Some(key) = &mut self.write_length_key {
+            let tag = key
+                .seal_in_place_separate_tag(
+                    Aad::empty(),
+                    &mut self.write_packet[next_index..next_index + 2],
+                )
+                .map_err(|_| std::io::Error::other("VMess length encryption failed"))?;
+            self.write_packet[next_index + 2..next_index + 18].copy_from_slice(tag.as_ref());
+        }
+        next_index += header_len;
+        if self.write_cfb.is_some() {
+            let mut checksum = super::fnv1a::Fnv1aHasher::new();
+            checksum.write(&self.write_cache[..data_size]);
+            self.write_packet[next_index..next_index + 4]
+                .copy_from_slice(&checksum.finish().to_be_bytes());
+            next_index += 4;
+        }
         self.write_packet[next_index..next_index + data_size]
             .copy_from_slice(&self.write_cache[0..data_size]);
 
         match self.sealing_key {
             Some(ref mut sealing_key) => {
-                // TODO: don't unwrap here.
                 let tag = sealing_key
                     .seal_in_place_separate_tag(
                         Aad::empty(),
                         &mut self.write_packet[next_index..next_index + data_size],
                     )
-                    .unwrap();
+                    .map_err(|_| std::io::Error::other("VMess payload encryption failed"))?;
                 next_index += data_size;
 
                 self.write_packet[next_index..next_index + self.tag_len]
@@ -671,6 +983,10 @@ impl VmessStream {
             next_index += padding_len;
         }
 
+        if let Some(cipher) = &mut self.write_cfb {
+            cipher.encrypt(&mut self.write_packet[frame_start..next_index]);
+        }
+
         self.write_packet_end_offset = next_index;
 
         // TODO: keep track of start/stop offset instead?
@@ -682,7 +998,7 @@ impl VmessStream {
             self.write_cache_size -= data_size;
         }
 
-        true
+        Ok(true)
     }
 
     #[inline]
@@ -735,10 +1051,28 @@ impl VmessStream {
 
 impl AsyncRead for VmessStream {
     fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.check_read_failure()?;
+        let result = self.as_mut().poll_read_inner(cx, buf);
+        if let Poll::Ready(Err(error)) = &result {
+            self.poison_read(error);
+        }
+        result
+    }
+}
+
+impl VmessStream {
+    fn poll_read_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         let this = self.get_mut();
 
         if this.read_header_state != ReadHeaderState::Done && !this.is_eof {
@@ -748,11 +1082,9 @@ impl AsyncRead for VmessStream {
                 ready!(Pin::new(&mut this.stream).poll_read(cx, &mut read_buf))?;
                 let len = read_buf.filled().len();
                 if len == 0 {
+                    this.check_transport_eof()?;
                     this.is_eof = true;
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "VMess response header was truncated",
-                    )));
+                    return Poll::Ready(Ok(()));
                 }
                 this.unprocessed_end_offset += len;
                 this.process_read_header()?;
@@ -792,6 +1124,25 @@ impl AsyncRead for VmessStream {
         }
 
         loop {
+            // BufferFull can leave a complete encrypted chunk after the caller
+            // drains processed bytes. Consume it before polling the transport.
+            loop {
+                match this.try_decrypt()? {
+                    DecryptState::Success => continue,
+                    DecryptState::ReceivedEof => {
+                        this.is_eof = true;
+                        break;
+                    }
+                    DecryptState::NeedData | DecryptState::BufferFull => break,
+                }
+            }
+            if this.processed_end_offset > 0 {
+                this.read_processed(buf);
+                return Poll::Ready(Ok(()));
+            }
+            if this.is_eof {
+                return Poll::Ready(Ok(()));
+            }
             if this.unprocessed_end_offset == this.unprocessed_buf.len() {
                 // if we got here, there's no data in processed buf, and we don't have
                 // space in unprocessed buf to read more to decrypt.
@@ -809,6 +1160,7 @@ impl AsyncRead for VmessStream {
 
             // Make sure we have enough space to store the processed data.
             if len == 0 {
+                this.check_transport_eof()?;
                 // We've reached EOF. Return any available data first.
                 this.is_eof = true;
                 if this.processed_end_offset > 0 {
@@ -869,7 +1221,7 @@ impl AsyncWrite for VmessStream {
         let mut cache_space = this.write_cache.len().saturating_sub(this.write_cache_size);
 
         if cache_space == 0 {
-            while this.write_cache_size > 0 && this.create_write_packet() {}
+            while this.write_cache_size > 0 && this.create_write_packet()? {}
             match this.do_write_packet(cx) {
                 Ok(all_written) => {
                     if !all_written {
@@ -882,7 +1234,7 @@ impl AsyncWrite for VmessStream {
             }
             // now that we've written out all the packet data, create more packets to free up cache
             // space.
-            while this.write_cache_size > 0 && this.create_write_packet() {}
+            while this.write_cache_size > 0 && this.create_write_packet()? {}
             cache_space = this.write_cache.len().saturating_sub(this.write_cache_size);
             assert!(cache_space > 0);
         }
@@ -908,7 +1260,7 @@ impl AsyncWrite for VmessStream {
 
         // Create a new write frame when flush is called when we don't have one.
         while this.write_cache_size > 0 || this.write_packet_end_offset > 0 {
-            while this.write_cache_size > 0 && this.create_write_packet() {}
+            while this.write_cache_size > 0 && this.create_write_packet()? {}
             match this.do_write_packet(cx) {
                 Ok(all_written) => {
                     if !all_written {
@@ -935,13 +1287,13 @@ impl AsyncWrite for VmessStream {
                 ShutdownState::WriteRemainingData => {
                     if this.write_cache_size > 0 {
                         // create data packets.
-                        while this.write_cache_size > 0 && this.create_write_packet() {}
+                        while this.write_cache_size > 0 && this.create_write_packet()? {}
                     }
 
                     // create the empty packet.
                     // it's possible that the write_packet buffer contains the server response,
                     // and the empty shutdown packet together, ready to send off together.
-                    if this.write_cache_size == 0 && this.create_write_packet() {
+                    if this.write_cache_size == 0 && this.create_write_packet()? {
                         this.shutdown_state = ShutdownState::WriteEmptyPacket;
                         continue;
                     }
@@ -986,12 +1338,38 @@ impl AsyncStream for VmessStream {
 }
 
 impl AsyncReadMessage for VmessStream {
+    fn read_message_eof_on_empty(&self) -> bool {
+        !(self.is_udp && self.tag_len > 0)
+    }
+
     fn poll_read_message(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.check_read_failure()?;
+        let result = self.as_mut().poll_read_message_inner(cx, buf);
+        if let Poll::Ready(Err(error)) = &result {
+            self.poison_read(error);
+        }
+        result
+    }
+}
+
+impl VmessStream {
+    fn poll_read_message_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
+
+        if this.processed_empty_message {
+            return Poll::Ready(this.read_processed_message(buf));
+        }
+        if this.is_eof {
+            return Poll::Ready(this.message_eof());
+        }
 
         if this.read_header_state != ReadHeaderState::Done && !this.is_eof {
             loop {
@@ -1000,11 +1378,9 @@ impl AsyncReadMessage for VmessStream {
                 ready!(Pin::new(&mut this.stream).poll_read(cx, &mut read_buf))?;
                 let len = read_buf.filled().len();
                 if len == 0 {
+                    this.check_transport_eof()?;
                     this.is_eof = true;
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "VMess response header was truncated",
-                    )));
+                    return Poll::Ready(this.message_eof());
                 }
                 this.unprocessed_end_offset += len;
                 this.process_read_header()?;
@@ -1015,30 +1391,25 @@ impl AsyncReadMessage for VmessStream {
 
             // We probably already have some user data ready to be processed, so we need
             // to do so immediately since we go straight to a poll_read below.
-            loop {
-                match this.try_decrypt()? {
-                    DecryptState::NeedData => {
-                        break;
-                    }
-                    DecryptState::ReceivedEof => {
-                        this.is_eof = true;
-                        break;
-                    }
-                    DecryptState::BufferFull => {
-                        assert!(this.processed_end_offset > 0);
-                        this.read_processed(buf);
-                        return Poll::Ready(Ok(()));
-                    }
-                    DecryptState::Success => {
-                        continue;
-                    }
+            match this.try_decrypt()? {
+                DecryptState::NeedData | DecryptState::Success => {}
+                DecryptState::ReceivedEof => {
+                    this.is_eof = true;
+                }
+                DecryptState::BufferFull => {
+                    assert!(this.processed_end_offset > 0);
+                    this.read_processed_message(buf)?;
+                    return Poll::Ready(Ok(()));
                 }
             }
         }
 
-        if this.processed_end_offset > 0 {
-            this.read_processed(buf);
+        if this.processed_end_offset > 0 || this.processed_empty_message {
+            this.read_processed_message(buf)?;
             return Poll::Ready(Ok(()));
+        }
+        if this.is_eof {
+            return Poll::Ready(this.message_eof());
         }
 
         match this.try_decrypt()? {
@@ -1048,17 +1419,17 @@ impl AsyncReadMessage for VmessStream {
             }
             DecryptState::BufferFull => {
                 assert!(this.processed_end_offset > 0);
-                this.read_processed(buf);
+                this.read_processed_message(buf)?;
                 return Poll::Ready(Ok(()));
             }
             DecryptState::Success => {
-                this.read_processed(buf);
+                this.read_processed_message(buf)?;
                 return Poll::Ready(Ok(()));
             }
         }
 
         if this.is_eof {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(this.message_eof());
         }
 
         loop {
@@ -1079,14 +1450,16 @@ impl AsyncReadMessage for VmessStream {
 
             // Make sure we have enough space to store the processed data.
             if len == 0 {
+                this.check_transport_eof()?;
                 // We've reached EOF. Return any available data first.
                 this.is_eof = true;
                 if this.processed_end_offset > 0 {
                     // TODO: I don't think we ever hit this clause.
                     // The only time we read is when processed_end_offset is 0.
-                    this.read_processed(buf);
+                    this.read_processed_message(buf)?;
+                    return Poll::Ready(Ok(()));
                 }
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(this.message_eof());
             }
 
             this.unprocessed_end_offset += len;
@@ -1096,15 +1469,15 @@ impl AsyncReadMessage for VmessStream {
                 DecryptState::NeedData => {}
                 DecryptState::ReceivedEof => {
                     this.is_eof = true;
-                    return Poll::Ready(Ok(()));
+                    return Poll::Ready(this.message_eof());
                 }
                 DecryptState::BufferFull => {
                     assert!(this.processed_end_offset > 0);
-                    this.read_processed(buf);
+                    this.read_processed_message(buf)?;
                     return Poll::Ready(Ok(()));
                 }
                 DecryptState::Success => {
-                    this.read_processed(buf);
+                    this.read_processed_message(buf)?;
                     return Poll::Ready(Ok(()));
                 }
             }
@@ -1123,9 +1496,21 @@ impl AsyncWriteMessage for VmessStream {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
+        if buf.is_empty() && this.tag_len == 0 {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "VMess none/zero native UDP cannot represent an empty datagram; use XUDP or packetaddr",
+            )));
+        }
+
         // the write cache is not used in message mode.
         assert!(this.write_cache_size == 0);
 
+        let header_len = if this.write_length_key.is_some() {
+            18
+        } else {
+            2
+        };
         let padding_reserve = if this
             .write_length_mask
             .as_ref()
@@ -1136,7 +1521,7 @@ impl AsyncWriteMessage for VmessStream {
             0
         };
         let max_payload = (u16::MAX as usize)
-            .min(this.write_packet.len().saturating_sub(2))
+            .min(this.write_packet.len().saturating_sub(header_len))
             .saturating_sub(this.tag_len + padding_reserve);
         if buf.len() > max_payload {
             return Poll::Ready(Err(std::io::Error::new(
@@ -1167,11 +1552,24 @@ impl AsyncWriteMessage for VmessStream {
             }
         }
         let (padding_len, length_mask) = match this.write_length_mask {
-            Some(ref mut mask) => mask.next_values(),
+            Some(ref mut mask) => {
+                if this.write_length_key.is_some() {
+                    (
+                        if mask.enable_padding {
+                            (mask.next_u16() % 64) as usize
+                        } else {
+                            0
+                        },
+                        0,
+                    )
+                } else {
+                    mask.next_values()
+                }
+            }
             None => (0, 0),
         };
 
-        let metadata_size = 2 + padding_len + this.tag_len;
+        let metadata_size = header_len + padding_len + this.tag_len;
 
         let available_space = this.write_packet.len() - metadata_size;
         if available_space < buf.len() {
@@ -1179,17 +1577,39 @@ impl AsyncWriteMessage for VmessStream {
         }
 
         let write_packet_size = buf.len() + padding_len + this.tag_len;
-        let write_packet_size = (write_packet_size as u16) ^ length_mask;
+        let write_packet_size = if this.write_length_key.is_some() {
+            (write_packet_size as u16).wrapping_sub(16)
+        } else {
+            (write_packet_size as u16) ^ length_mask
+        };
 
         this.write_packet[0] = (write_packet_size >> 8) as u8;
         this.write_packet[1] = (write_packet_size & 0xff) as u8;
 
-        let mut end_index = 2 + buf.len();
-        this.write_packet[2..end_index].copy_from_slice(buf);
+        if let Some(key) = &mut this.write_length_key {
+            let tag = key
+                .seal_in_place_separate_tag(Aad::empty(), &mut this.write_packet[..2])
+                .map_err(|_| std::io::Error::other("VMess length encryption failed"))?;
+            this.write_packet[2..18].copy_from_slice(tag.as_ref());
+        }
+        let payload_start = if this.write_cfb.is_some() {
+            let mut checksum = super::fnv1a::Fnv1aHasher::new();
+            checksum.write(buf);
+            this.write_packet[header_len..header_len + 4]
+                .copy_from_slice(&checksum.finish().to_be_bytes());
+            header_len + 4
+        } else {
+            header_len
+        };
+        let mut end_index = payload_start + buf.len();
+        this.write_packet[payload_start..end_index].copy_from_slice(buf);
 
         if let Some(ref mut sealing_key) = this.sealing_key {
             let tag = sealing_key
-                .seal_in_place_separate_tag(Aad::empty(), &mut this.write_packet[2..end_index])
+                .seal_in_place_separate_tag(
+                    Aad::empty(),
+                    &mut this.write_packet[header_len..end_index],
+                )
                 .map_err(|err| std::io::Error::other(format!("failed to seal message: {err}")))?;
 
             this.write_packet[end_index..end_index + this.tag_len].copy_from_slice(tag.as_ref());
@@ -1200,6 +1620,9 @@ impl AsyncWriteMessage for VmessStream {
         if padding_len > 0 {
             rand::rng().fill_bytes(&mut this.write_packet[end_index..end_index + padding_len]);
             end_index += padding_len;
+        }
+        if let Some(cipher) = &mut this.write_cfb {
+            cipher.encrypt(&mut this.write_packet[..end_index]);
         }
         this.write_packet_end_offset = end_index;
 
@@ -1238,10 +1661,17 @@ impl AsyncFlushMessage for VmessStream {
 
 impl AsyncShutdownMessage for VmessStream {
     fn poll_shutdown_message(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        self.poll_shutdown(cx)
+        if self.is_udp {
+            // A checksum/tag-only frame is a valid empty UDP packet, not a
+            // shutdown sentinel. Finish buffered data and close the transport.
+            ready!(self.as_mut().poll_flush_message(cx))?;
+            Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+        } else {
+            self.poll_shutdown(cx)
+        }
     }
 }
 

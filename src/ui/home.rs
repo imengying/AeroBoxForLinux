@@ -113,12 +113,16 @@ impl Ui {
         network.set_tooltip_text(Some("点击检测出口 IP"));
         network.update_property(&[gtk::accessible::Property::Label("检测出口 IP")]);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.set_valign(gtk::Align::Center);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        header.set_halign(gtk::Align::Center);
         header.append(&gtk::Image::from_icon_name("network-wireless-symbolic"));
         header.append(&label("出口 IP", "section-title"));
         content.append(&header);
         let exit_ip = label("—", "exit-ip");
         exit_ip.set_hexpand(true);
+        exit_ip.set_xalign(0.5);
+        exit_ip.set_justify(gtk::Justification::Center);
         exit_ip.set_wrap(true);
         exit_ip.set_wrap_mode(gtk::pango::WrapMode::Char);
         exit_ip.set_width_chars(1);
@@ -379,6 +383,15 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
     );
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
     let text = dashboard.exit_ip.layout().pixel_size();
+    let (text_x, _) = dashboard.exit_ip.layout_offsets();
+    let (_, logical) = dashboard.exit_ip.layout().pixel_extents();
+    anyhow::ensure!(
+        ((text_x + logical.x()) * 2 + logical.width() - dashboard.exit_ip.width()).abs() <= 2,
+        "出口 IP 未水平居中: offset={text_x}, logical=({}, {}), width={}",
+        logical.x(),
+        logical.width(),
+        dashboard.exit_ip.width()
+    );
     anyhow::ensure!(
         text.0 <= dashboard.exit_ip.width() && text.1 <= dashboard.exit_ip.height(),
         "出口 IP 内容被裁切"

@@ -135,6 +135,7 @@ async fn stale_checkout_falls_back_to_wrapped_transport_once_for_tcp_and_udp() {
             let calls = AtomicUsize::new(0);
             let wrappers = AtomicUsize::new(0);
             let transport = ClientTransport {
+                reopen: None,
                 route: Arc::new(Route(RouteKey(vec![1]))),
                 open: Box::pin(async {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -190,6 +191,7 @@ async fn stale_checkout_propagates_fresh_dial_failure_without_retrying_again() {
             let (handler, reusable_at_take, _peer) = stale_handler().await;
             let calls = AtomicUsize::new(0);
             let transport = ClientTransport {
+                reopen: None,
                 route: Arc::new(Route(RouteKey(vec![1]))),
                 open: Box::pin(async {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -314,27 +316,31 @@ async fn check_failed_recovery(cancel: bool) {
                 let gate = entered.clone();
                 let wraps = &wrappers;
                 let transport = ClientTransport {
+                    reopen: None,
                     route: Arc::new(Route(RouteKey(vec![1]))),
                     open: Box::pin(async {
                         calls.fetch_add(1, Ordering::SeqCst);
                         Ok(Box::new(io) as Box<dyn AsyncStream>)
                     }),
                 }
-                .wrap(move |io| async move {
-                    wraps.fetch_add(1, Ordering::SeqCst);
-                    if phase == RecoveryPhase::Wrapper {
-                        gate.store(true, Ordering::SeqCst);
-                        if cancel {
-                            std::future::pending::<()>().await;
+                .wrap(move |io| {
+                    let gate = gate.clone();
+                    async move {
+                        wraps.fetch_add(1, Ordering::SeqCst);
+                        if phase == RecoveryPhase::Wrapper {
+                            gate.store(true, Ordering::SeqCst);
+                            if cancel {
+                                std::future::pending::<()>().await;
+                            }
+                            return Err(io::Error::other("fresh wrapper"));
                         }
-                        return Err(io::Error::other("fresh wrapper"));
+                        Ok(RecoveryIo {
+                            io,
+                            phase,
+                            stall: cancel,
+                            entered: gate,
+                        })
                     }
-                    Ok(RecoveryIo {
-                        io,
-                        phase,
-                        stall: cancel,
-                        entered: gate,
-                    })
                 });
                 let mut opening = Box::pin(async {
                     if udp {
@@ -380,6 +386,7 @@ async fn check_failed_recovery(cancel: bool) {
 
                 let (io, peer) = tokio::io::duplex(4096);
                 let transport = ClientTransport {
+                    reopen: None,
                     route: Arc::new(Route(RouteKey(vec![1]))),
                     open: Box::pin(async {
                         calls.fetch_add(1, Ordering::SeqCst);
@@ -465,6 +472,7 @@ async fn pooled_open_error_after_syn_admission_never_dials_fresh() {
 
             let fresh_dials = AtomicUsize::new(0);
             let transport = ClientTransport {
+                reopen: None,
                 route: route.clone(),
                 open: Box::pin(async {
                     fresh_dials.fetch_add(1, Ordering::SeqCst);

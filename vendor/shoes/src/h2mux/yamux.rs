@@ -21,7 +21,7 @@ impl Session {
                 // Poll socket traffic on every turn, including while opening.
                 match connection.poll_next_inbound(cx){Poll::Ready(Some(Ok(stream)))=>{drop(stream);cx.waker().wake_by_ref();},Poll::Ready(_)=>return Poll::Ready(()),Poll::Pending=>{}}
                 if pending.is_none(){match requests.poll_recv(cx){Poll::Ready(Some(request))=>pending=Some(request),Poll::Ready(None)=>return Poll::Ready(()),Poll::Pending=>{}}}
-                if pending.is_some(){if let Poll::Ready(result)=connection.poll_new_outbound(cx){let _=pending.take().unwrap().send(result.map_err(io::Error::other));cx.waker().wake_by_ref();}}
+                if pending.is_some() && let Poll::Ready(result)=connection.poll_new_outbound(cx){let _=pending.take().unwrap().send(result.map_err(io::Error::other));cx.waker().wake_by_ref();}
                 Poll::Pending
             });
             tokio::select!{_=cancel.cancelled()=>{},_=driver=>{}}

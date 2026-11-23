@@ -41,9 +41,19 @@ impl ClientHooks for Hooks {
 
 #[test]
 fn finalized_session_id_and_exact_hello_context_complete_handshake() {
+    for profile in [
+        None,
+        Some(rustls::client::ClientHelloProfile::Firefox),
+    ] {
+        finalized_profile_hello(profile);
+    }
+}
+
+fn finalized_profile_hello(profile: Option<rustls::client::ClientHelloProfile>) {
     let provider = aws_lc_rs::default_provider();
-    let config =
+    let mut config =
         make_client_config_with_versions(KeyType::Rsa2048, &[&rustls::version::TLS13], &provider);
+    config.client_hello_profile = profile;
     let capture = Arc::new(Mutex::new(HelloCapture::default()));
     let mut client = ClientConnection::new_reality(
         Arc::new(config),

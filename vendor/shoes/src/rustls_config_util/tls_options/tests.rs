@@ -28,6 +28,41 @@ fn client(
     )
 }
 
+#[test]
+fn chrome_uses_independent_hybrid_shares_and_rejects_conflicting_groups() {
+    use crate::config::{TlsKeyExchangeGroups, tls::TlsClientFingerprint};
+    let options = TlsClientOptions {
+        client_fingerprint: Some(TlsClientFingerprint::Chrome),
+        ..Default::default()
+    };
+    let config = client(&options, false, false).unwrap();
+    assert_eq!(
+        config.crypto_provider().kx_groups[0].name(),
+        rustls::NamedGroup::X25519MLKEM768
+    );
+    let explicit: TlsKeyExchangeGroups = serde_yaml::from_str("[SecP384r1]").unwrap();
+    assert!(
+        try_create_client_config_with_options(
+            false,
+            vec![],
+            vec![],
+            true,
+            None,
+            false,
+            &explicit,
+            &options,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        config.initial_key_share_groups,
+        [
+            rustls::NamedGroup::X25519MLKEM768,
+            rustls::NamedGroup::X25519
+        ]
+    );
+}
+
 fn handshake(
     config: rustls::ClientConfig,
     cert: &str,
@@ -242,5 +277,28 @@ async fn named_and_file_roots_are_embedded_and_validated() {
         crate::embedding::EmbeddedCore::check_json(&entries.to_string())
             .await
             .unwrap();
+    }
+}
+
+#[test]
+fn explicit_cbc_and_rsa_suites_are_available_without_changing_default_policy() {
+    let ordinary = client(&Default::default(), true, false).unwrap();
+    assert_eq!(ordinary.crypto_provider().cipher_suites.len(), 9);
+    for (suite, identifier) in [
+        ("TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA", 0xc013),
+        ("TLS_RSA_WITH_AES_128_GCM_SHA256", 0x009c),
+        ("TLS_RSA_WITH_AES_256_CBC_SHA", 0x0035),
+    ] {
+        let policy = TlsClientOptions {
+            max_version: Some(TlsVersion::V12),
+            cipher_suites: vec![suite.into()],
+            ..Default::default()
+        };
+        let configured = client(&policy, true, false).unwrap();
+        assert_eq!(configured.crypto_provider().cipher_suites.len(), 1);
+        assert_eq!(
+            u16::from(configured.crypto_provider().cipher_suites[0].suite()),
+            identifier
+        );
     }
 }

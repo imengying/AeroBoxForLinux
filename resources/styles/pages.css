@@ -1,0 +1,95 @@
+.log-view, .log-view text { background: transparent; }
+.log-view { font-size: 0.95em; }
+.editor-root { background: @window_bg_color; }
+.editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
+.page-content > preferencesgroup { margin-top: 0.27em; }
+/* Caption-and-entry rows need separation from the preceding switch and from
+ * one another. Margins live on the child so separators stay full width. */
+.settings-page .labeled-entry {
+  margin-top: 1.2em;
+  margin-bottom: 1.3em;
+  padding-left: 0.55em;
+  padding-right: 0.55em;
+}
+.settings-page .labeled-entry-title { margin-bottom: 0.35em; }
+.settings-page > stack > box { padding-top: 0.35em; padding-bottom: 1.5em; }
+.transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
+separator { background: alpha(#728292,.13); min-height: 0.09em; }
+
+.download { color: @accent_color; }
+.upload { color: @app_muted; }
+.dark .download { color: #8cbaff; }
+.dark .upload { color: #b3bcd5; }
+.aerobox-window preferencesgroup .title, .editor-root preferencesgroup .title { font-size: 1em; }
+.aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
+.aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
+
+.settings-page entry { font-size: 1em; }
+.editor-tabs { border-radius: 999px; background: @app_sidebar_bg; padding: 0.27em; }
+.dark .editor-tabs { background: @dark_sidebar_bg; }
+.editor-tabs button { border: none; border-radius: 999px; box-shadow: none; background: transparent; padding: 0.45em 1.09em; }
+.editor-tabs button:checked { background: @app_primary_container; color: @app_on_primary_container; }
+.dark .editor-tabs button:checked { background: @dark_primary_container; color: @dark_on_primary_container; }
+
+.settings-page row { min-height: 3.9em; }
+.aerobox-window .boxed-list { border-radius: 16px; border: 1px solid transparent; box-shadow: none; background: @app_card_bg; }
+.aerobox-window.dark .boxed-list { border-color: transparent; background: @dark_card_bg; }
+.aerobox-window .dim-label, .editor-root .dim-label { opacity: 1; color: alpha(@window_fg_color, .70); }
+
+.dashboard-grid > flowboxchild { padding: 0; }
+/* Cards in the same row stretch to the tallest one so their bottom edges line
+ * up; inner spacing stays on the card class, not on the flow child. */
+.dashboard-grid > flowboxchild > .surface-card { margin: 0; }
+.aerobox-window button.home-network { padding: 0.75em 1em; min-width: 14em; font-weight: normal; }
+.home-network:hover { background: shade(@app_card_bg, .98); }
+.dark .home-network:hover { background: shade(@dark_card_bg, 1.12); }
+.home-network:active { background: @app_sidebar_bg; }
+.dark .home-network:active { background: @dark_sidebar_bg; }
+.home-network .exit-ip { font-size: 1.12em; font-weight: 600; font-feature-settings: "tnum"; }
+.speed-card { padding: 0.75em 1em; min-width: 6.6em; }
+.speed-value { font-size: 1.30em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 0.86em 1em; min-width: 14em; }
+.mode-selector { border-radius: 999px; background: @app_sidebar_bg; padding: 0.27em; }
+.mode-selector button { border-radius: 999px; border: none; box-shadow: none; background: transparent; padding: 0.36em 0.91em; font-weight: 500; }
+.mode-selector button:checked { background: @app_primary_container; color: @app_on_primary_container; }
+.dark .mode-selector button:checked { background: @dark_primary_container; color: @dark_on_primary_container; }
+.dark .mode-selector { background: @dark_sidebar_bg; }
+.home-takeover { padding: 0.18em 1em; min-width: 19em; }
+.home-switch { min-height: 3.09em; }
+.home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
+.home-stat { padding: 0.86em 1em; min-width: 7em; }
+.home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
+.floating-action { border-radius: 16px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.floating-action image { -gtk-icon-size: 20px; }
+.floating-action.suggested-action { background: @app_primary_container; color: @app_on_primary_container; }
+.dark .floating-action.suggested-action { background: @dark_primary_container; color: @dark_on_primary_container; }
+
+/* Keep one compact control density across the main pages and dialogs. These
+ * selectors override libadwaita's generous touch-sized defaults, not the
+ * user's font size: every metric still follows the discrete font setting. */
+.aerobox-window headerbar,
+.editor-root headerbar { min-height: 3.27em; }
+.aerobox-window button,
+.editor-root button { min-height: 2.36em; padding-top: 0.27em; padding-bottom: 0.27em; }
+.aerobox-window button.compact-action,
+.editor-root button.compact-action { min-height: 2.36em; }
+.aerobox-window button.primary-action { min-height: 2.73em; padding-top: 0.45em; padding-bottom: 0.45em; }
+.aerobox-window entry,
+.editor-root entry { min-height: 2.55em; }
+/* GTK's default recessed entry fill is too heavy on these white form cards.
+ * Use a quiet solid surface, but retain the native blue focus indicator. */
+.aerobox-window entry,
+.editor-root entry { background: @app_card_bg; border: 1px solid @app_outline; box-shadow: none; }
+.dark.aerobox-window entry,
+.dark .editor-root entry { background: @dark_card_bg; border-color: @dark_outline; }
+.import-dialog .import-source text { background: @app_card_bg; }
+.dark .import-dialog .import-source text { background: @dark_card_bg; }
+.aerobox-window spinbutton,
+.editor-root spinbutton { min-height: 2.36em; }
+.aerobox-window spinbutton text,
+.editor-root spinbutton text { min-height: 0; }
+.aerobox-window dropdown > button,
+.editor-root dropdown > button { min-height: 2.36em; }
+.aerobox-window .settings-page row { min-height: 3.9em; }
+.editor-root row { min-height: 3.55em; }
+.editor-root preferencesgroup .boxed-list > row { min-height: 3.55em; }

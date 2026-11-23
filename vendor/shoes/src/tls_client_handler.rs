@@ -10,10 +10,15 @@ use crate::tcp::tcp_handler::{ClientTransport, TcpClientHandler, TcpClientSetupR
 
 #[derive(Debug)]
 pub struct TlsClientHandler {
+    kernel_tx: bool,
+    kernel_rx: bool,
+    handshake_timeout: std::time::Duration,
     pub client_config: Arc<rustls::ClientConfig>,
     pub tls_buffer_size: Option<usize>,
     pub server_name: rustls::pki_types::ServerName<'static>,
     pub handler: TlsInnerClientHandler,
+    fragmentation: crate::tls_fragment::TlsFragmentOptions,
+    ech: Option<(Arc<crate::ech::Policy>, Arc<dyn crate::resolver::Resolver>)>,
 }
 
 #[derive(Debug)]
@@ -23,9 +28,11 @@ pub enum TlsInnerClientHandler {
 }
 
 impl TlsClientHandler {
-    fn create_connection(&self) -> Result<rustls::ClientConnection, rustls::Error> {
-        let mut connection =
-            rustls::ClientConnection::new(self.client_config.clone(), self.server_name.clone())?;
+    fn create_connection(
+        &self,
+        config: Arc<rustls::ClientConfig>,
+    ) -> Result<rustls::ClientConnection, rustls::Error> {
+        let mut connection = rustls::ClientConnection::new(config, self.server_name.clone())?;
         if let Some(size) = self.tls_buffer_size {
             // Vision peers require the UUID and first frame header in one TLS record.
             let size = match self.handler {
@@ -37,18 +44,112 @@ impl TlsClientHandler {
         Ok(connection)
     }
 
+    pub(crate) async fn handshake(
+        &self,
+        stream: Box<dyn AsyncStream>,
+        mode: TlsReadMode,
+        reopen: Option<crate::tcp::tcp_handler::ReopenTransport<'_>>,
+    ) -> std::io::Result<CryptoTlsStream<Box<dyn AsyncStream>>> {
+        let stream = tokio::time::timeout(
+            self.handshake_timeout,
+            self.handshake_inner(stream, mode, reopen),
+        )
+        .await
+        .map_err(std::io::Error::from)??;
+        // Every setup path, including pooled transports and ECH retries, must
+        // validate the negotiated protocol before exposing the secured stream.
+        if let TlsInnerClientHandler::Default(handler) = &self.handler {
+            handler.validate_alpn(stream.alpn_protocol())?;
+        }
+        Ok(stream)
+    }
+
+    async fn handshake_inner(
+        &self,
+        mut stream: Box<dyn AsyncStream>,
+        mode: TlsReadMode,
+        reopen: Option<crate::tcp::tcp_handler::ReopenTransport<'_>>,
+    ) -> std::io::Result<CryptoTlsStream<Box<dyn AsyncStream>>> {
+        let mut prepared = match &self.ech {
+            Some((policy, resolver)) => Some(policy.prepare(&self.client_config, resolver).await?),
+            None => None,
+        };
+        let original = prepared.as_ref().map(|prepared| prepared.mode.clone());
+        for attempt in 0..2 {
+            let config = prepared
+                .as_ref()
+                .map_or_else(|| self.client_config.clone(), |p| p.config.clone());
+            let connection = self
+                .create_connection(config)
+                .map_err(std::io::Error::other)?;
+            match CryptoTlsStream::handshake(
+                self.fragmentation.wrap(stream)?,
+                TlsConnection::new(connection),
+                if self.kernel_tx || self.kernel_rx {
+                    TlsReadMode::ExactRecords
+                } else {
+                    mode
+                },
+                &[],
+            )
+            .await
+            {
+                Ok(mut stream) => {
+                    stream.enable_kernel(self.kernel_tx, self.kernel_rx)?;
+                    if attempt == 1
+                        && let (Some((policy, _)), Some(previous), Some(prepared)) =
+                            (&self.ech, &original, &prepared)
+                    {
+                        policy.accepted_retry(previous, prepared.mode.clone());
+                    }
+                    return Ok(stream);
+                }
+                Err(error) => {
+                    if attempt == 0
+                        && let (Some(prepared_config), Some(reopen)) = (&prepared, &reopen)
+                        && let Some(mode) = prepared_config.retry.take()?
+                    {
+                        prepared = Some(crate::ech::Prepared::new(
+                            &self.client_config,
+                            Arc::new(mode),
+                        )?);
+                        stream = reopen().await?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!()
+    }
+
     async fn wrap_pooled_transport(
         &self,
         stream: Box<dyn AsyncStream>,
+        reopen: Option<crate::tcp::tcp_handler::ReopenTransport<'_>>,
     ) -> std::io::Result<CryptoTlsStream<Box<dyn AsyncStream>>> {
-        let connection = self.create_connection().map_err(std::io::Error::other)?;
-        CryptoTlsStream::handshake(
-            stream,
-            TlsConnection::new(connection),
-            TlsReadMode::Stream,
-            &[],
-        )
-        .await
+        self.handshake(stream, TlsReadMode::Stream, reopen).await
+    }
+
+    pub(crate) fn with_kernel(mut self, tx: bool, rx: bool) -> std::io::Result<Self> {
+        if (tx || rx) && matches!(self.handler, TlsInnerClientHandler::VisionVless { .. }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "kTLS cannot switch to Vision raw TLS passthrough",
+            ));
+        }
+        self.kernel_tx = tx;
+        self.kernel_rx = rx;
+        Ok(self)
+    }
+
+    pub(crate) fn with_ech(
+        mut self,
+        policy: Option<Arc<crate::ech::Policy>>,
+        resolver: Arc<dyn crate::resolver::Resolver>,
+    ) -> Self {
+        self.ech = policy.map(|policy| (policy, resolver));
+        self
     }
 
     pub fn new(
@@ -58,10 +159,15 @@ impl TlsClientHandler {
         handler: Box<dyn TcpClientHandler>,
     ) -> Self {
         Self {
+            kernel_tx: false,
+            kernel_rx: false,
+            handshake_timeout: crate::config::tls::handshake_timeout(0),
             client_config,
             tls_buffer_size,
             server_name,
             handler: TlsInnerClientHandler::Default(handler),
+            fragmentation: Default::default(),
+            ech: None,
         }
     }
 
@@ -73,30 +179,81 @@ impl TlsClientHandler {
         udp_enabled: bool,
     ) -> Self {
         Self {
+            kernel_tx: false,
+            kernel_rx: false,
+            handshake_timeout: crate::config::tls::handshake_timeout(0),
             client_config,
             tls_buffer_size,
             server_name,
             handler: TlsInnerClientHandler::VisionVless { uuid, udp_enabled },
+            fragmentation: Default::default(),
+            ech: None,
         }
+    }
+
+    pub(crate) fn with_handshake_timeout(mut self, millis: u32) -> Self {
+        self.handshake_timeout = crate::config::tls::handshake_timeout(millis);
+        self
+    }
+
+    pub fn with_fragmentation(mut self, options: crate::tls_fragment::TlsFragmentOptions) -> Self {
+        self.fragmentation = options;
+        self
     }
 
     async fn setup_client_stream_common(
         &self,
         client_stream: Box<dyn AsyncStream>,
     ) -> std::io::Result<CryptoTlsStream<Box<dyn AsyncStream>>> {
-        let client_conn = self.create_connection().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Failed to create client connection: {e}"),
-            )
-        })?;
-
-        let connection = TlsConnection::new(client_conn);
         let mode = match self.handler {
             TlsInnerClientHandler::VisionVless { .. } => TlsReadMode::PreserveRecords,
             TlsInnerClientHandler::Default(_) => TlsReadMode::Stream,
         };
-        CryptoTlsStream::handshake(client_stream, connection, mode, &[]).await
+        self.handshake(client_stream, mode, None).await
+    }
+    async fn finish_tcp(
+        &self,
+        tls_stream: CryptoTlsStream<Box<dyn AsyncStream>>,
+        remote_location: ResolvedLocation,
+    ) -> std::io::Result<TcpClientSetupResult> {
+        match &self.handler {
+            TlsInnerClientHandler::Default(handler) => {
+                handler
+                    .setup_client_tcp_stream(Box::new(tls_stream), remote_location)
+                    .await
+            }
+            TlsInnerClientHandler::VisionVless { uuid, .. } => {
+                crate::vless::vless_client_handler::setup_custom_tls_vision_vless_client_stream(
+                    tls_stream,
+                    uuid,
+                    remote_location.location(),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_udp(
+        &self,
+        tls_stream: CryptoTlsStream<Box<dyn AsyncStream>>,
+        target: ResolvedLocation,
+    ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
+        match &self.handler {
+            TlsInnerClientHandler::Default(handler) => {
+                handler
+                    .setup_client_udp_bidirectional(Box::new(tls_stream), target)
+                    .await
+            }
+            TlsInnerClientHandler::VisionVless { uuid, .. } => {
+                crate::vless::vless_client_handler::setup_vision_vless_udp_bidirectional(
+                    tls_stream,
+                    uuid,
+                    target.into_location(),
+                    crate::vless::VisionWriteErrorPolicy::Legacy,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -112,15 +269,21 @@ impl TcpClientHandler for TlsClientHandler {
         target: ResolvedLocation,
     ) -> std::io::Result<TcpClientSetupResult> {
         if let TlsInnerClientHandler::Default(handler) = &self.handler {
-            let transport = transport.wrap(|stream| async move {
-                let stream = self.wrap_pooled_transport(stream).await?;
-                handler.validate_alpn(stream.alpn_protocol())?;
-                Ok(stream)
+            let reopen = transport.reopen.clone();
+            let transport = transport.wrap(move |stream| {
+                let reopen = reopen.clone();
+                async move { self.wrap_pooled_transport(stream, reopen).await }
             });
             handler.connect_client_tcp(transport, target).await
         } else {
-            self.setup_client_tcp_stream(transport.open.await?, target)
-                .await
+            let tls_stream = self
+                .handshake(
+                    transport.open.await?,
+                    TlsReadMode::PreserveRecords,
+                    transport.reopen,
+                )
+                .await?;
+            self.finish_tcp(tls_stream, target).await
         }
     }
 
@@ -130,11 +293,21 @@ impl TcpClientHandler for TlsClientHandler {
         target: ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
         if let TlsInnerClientHandler::Default(handler) = &self.handler {
-            let transport = transport.wrap(|stream| self.wrap_pooled_transport(stream));
+            let reopen = transport.reopen.clone();
+            let transport = transport.wrap(move |stream| {
+                let reopen = reopen.clone();
+                async move { self.wrap_pooled_transport(stream, reopen).await }
+            });
             handler.connect_client_udp(transport, target).await
         } else {
-            self.setup_client_udp_bidirectional(transport.open.await?, target)
-                .await
+            let tls_stream = self
+                .handshake(
+                    transport.open.await?,
+                    TlsReadMode::PreserveRecords,
+                    transport.reopen,
+                )
+                .await?;
+            self.finish_udp(tls_stream, target).await
         }
     }
 
@@ -168,22 +341,7 @@ impl TcpClientHandler for TlsClientHandler {
     ) -> std::io::Result<TcpClientSetupResult> {
         let tls_stream = self.setup_client_stream_common(client_stream).await?;
 
-        match &self.handler {
-            TlsInnerClientHandler::Default(handler) => {
-                handler.validate_alpn(tls_stream.alpn_protocol())?;
-                handler
-                    .setup_client_tcp_stream(Box::new(tls_stream), remote_location)
-                    .await
-            }
-            TlsInnerClientHandler::VisionVless { uuid, .. } => {
-                crate::vless::vless_client_handler::setup_custom_tls_vision_vless_client_stream(
-                    tls_stream,
-                    uuid,
-                    remote_location.location(),
-                )
-                .await
-            }
-        }
+        self.finish_tcp(tls_stream, remote_location).await
     }
 
     fn supports_udp_over_tcp(&self) -> bool {
@@ -200,28 +358,196 @@ impl TcpClientHandler for TlsClientHandler {
     ) -> std::io::Result<Box<dyn AsyncMessageStream>> {
         let tls_stream = self.setup_client_stream_common(client_stream).await?;
 
-        match &self.handler {
-            TlsInnerClientHandler::Default(handler) => {
-                handler
-                    .setup_client_udp_bidirectional(Box::new(tls_stream), target)
-                    .await
-            }
-            TlsInnerClientHandler::VisionVless { uuid, .. } => {
-                crate::vless::vless_client_handler::setup_vision_vless_udp_bidirectional(
-                    tls_stream,
-                    uuid,
-                    target.into_location(),
-                    crate::vless::VisionWriteErrorPolicy::Legacy,
-                )
-                .await
-            }
-        }
+        self.finish_udp(tls_stream, target).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_timeout_cancels_tls_reality_and_pool_transports() {
+        use tokio::io::AsyncReadExt;
+        use tokio::time::{Duration, Instant};
+
+        let config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        );
+        for millis in [0, 40] {
+            let expected = if millis == 0 {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_millis(40)
+            };
+            for path in ["tcp", "udp", "pool", "vision", "reality"] {
+                let (stream, mut peer) = tokio::io::duplex(65536);
+                let handler = TlsClientHandler::new(
+                    config.clone(),
+                    None,
+                    "localhost".try_into().unwrap(),
+                    Box::new(crate::port_forward_handler::PortForwardClientHandler),
+                )
+                .with_handshake_timeout(millis);
+                let target: ResolvedLocation =
+                    crate::address::NetLocation::from_str("example.test:443", None)
+                        .unwrap()
+                        .into();
+                let start = Instant::now();
+                let error = match path {
+                    "tcp" => handler
+                        .setup_client_tcp_stream(Box::new(stream), target)
+                        .await
+                        .err(),
+                    "udp" => handler
+                        .setup_client_udp_bidirectional(Box::new(stream), target)
+                        .await
+                        .err(),
+                    "pool" => handler
+                        .wrap_pooled_transport(Box::new(stream), None)
+                        .await
+                        .err(),
+                    "vision" => TlsClientHandler::new_vision_vless(
+                        config.clone(),
+                        None,
+                        "localhost".try_into().unwrap(),
+                        vec![0; 16].into_boxed_slice(),
+                        true,
+                    )
+                    .with_handshake_timeout(millis)
+                    .setup_client_tcp_stream(Box::new(stream), target)
+                    .await
+                    .err(),
+                    _ => crate::reality::RealityClientHandler::new(
+                        [9; 32],
+                        [0; 8],
+                        "localhost".try_into().unwrap(),
+                        vec![],
+                        Box::new(crate::port_forward_handler::PortForwardClientHandler),
+                    )
+                    .with_handshake_timeout(millis)
+                    .setup_client_tcp_stream(Box::new(stream), target)
+                    .await
+                    .err(),
+                }
+                .expect("silent TLS peer must time out");
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut,
+                    "{path}: {error}"
+                );
+                assert_eq!(start.elapsed(), expected, "{path}");
+                let mut hello = Vec::new();
+                peer.read_to_end(&mut hello).await.unwrap();
+                assert_eq!(
+                    hello.first(),
+                    Some(&22),
+                    "{path} must send ClientHello and close on timeout"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_alpn_is_rejected_before_tcp_udp_or_pooled_protocol_data() {
+        use crate::address::NetLocation;
+        use tokio::io::AsyncReadExt;
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let mut client =
+            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        client.alpn_protocols = vec![b"h2".to_vec()];
+        let mut server =
+            rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
+                        .into(),
+                )
+                .unwrap();
+        server.alpn_protocols = vec![b"h2".to_vec()];
+        // The client closes as soon as ALPN is rejected. Keep the peer from
+        // writing optional tickets after that close; only application bytes
+        // and the client's ALPN error are relevant to this test.
+        server.send_tls13_tickets = 0;
+        let server = Arc::new(server);
+        let handler = TlsClientHandler::new(
+            Arc::new(client),
+            None,
+            "localhost".try_into().unwrap(),
+            Box::new(crate::websocket::WebsocketTcpClientHandler::new(
+                "localhost:443".into(),
+                None,
+                None,
+                Default::default(),
+                Box::new(crate::port_forward_handler::PortForwardClientHandler),
+            )),
+        );
+        for path in ["tcp", "udp", "pool", "handshake"] {
+            let (io, peer) = tokio::io::duplex(65536);
+            let server = server.clone();
+            let task = tokio::spawn(async move {
+                let mut stream = CryptoTlsStream::handshake(
+                    Box::new(peer),
+                    TlsConnection::new(rustls::ServerConnection::new(server).unwrap()),
+                    TlsReadMode::Stream,
+                    &[],
+                )
+                .await
+                .unwrap();
+                let mut byte = [0];
+                // Closing immediately is allowed; sending any HTTP/1.1 data
+                // after negotiating h2 is not.
+                assert!(!matches!(stream.read(&mut byte).await, Ok(1)));
+            });
+            let target: ResolvedLocation = NetLocation::from_str("example.test:443", None)
+                .unwrap()
+                .into();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                match path {
+                    "tcp" => handler
+                        .setup_client_tcp_stream(Box::new(io), target)
+                        .await
+                        .err(),
+                    "udp" => handler
+                        .setup_client_udp_bidirectional(Box::new(io), target)
+                        .await
+                        .err(),
+                    "pool" => handler
+                        .wrap_pooled_transport(Box::new(io), None)
+                        .await
+                        .err(),
+                    _ => handler
+                        .handshake(Box::new(io), TlsReadMode::Stream, None)
+                        .await
+                        .err(),
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{path}: mismatched ALPN must fail before inner setup"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("WebSocket upgrade requires HTTP/1.1"),
+                "{path}: {error}"
+            );
+            task.await.unwrap();
+        }
+    }
 
     enum IdentityPath {
         Tcp,
@@ -500,7 +826,9 @@ mod tests {
     async fn only_default_tls_and_reality_handlers_forward_reuse() {
         use crate::reality::RealityClientHandler;
         let config = Arc::new(
-            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
+            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth(),
         );

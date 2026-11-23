@@ -68,13 +68,27 @@ fn auth_response(response: &http::Response<()>) -> io::Result<bool> {
     ))
 }
 
-fn upload_rate(response: &http::Response<()>, upload_mbps: u32) -> io::Result<Option<u64>> {
-    let rate=response.headers().get("hysteria-cc-rx").map(|v|v.to_str()).transpose().map_err(io::Error::other)?.unwrap_or("0");
-    if rate=="auto" {return Ok(None);}
-    let server=rate.parse::<u64>().map_err(|_|invalid("invalid HY2 receive rate"))?;
-    let requested=u64::from(upload_mbps)*125_000;
-    let actual=if server==0 {requested} else {server.min(requested)};
-    Ok((actual>0).then_some(actual))
+fn upload_rate(response: &http::Response<()>, upload_mbps: f64) -> io::Result<Option<u64>> {
+    let rate = response
+        .headers()
+        .get("hysteria-cc-rx")
+        .map(|v| v.to_str())
+        .transpose()
+        .map_err(io::Error::other)?
+        .unwrap_or("0");
+    if rate == "auto" {
+        return Ok(None);
+    }
+    let server = rate
+        .parse::<u64>()
+        .map_err(|_| invalid("invalid HY2 receive rate"))?;
+    let requested = (upload_mbps * 125_000.0) as u64;
+    let actual = if server == 0 {
+        requested
+    } else {
+        server.min(requested)
+    };
+    Ok((actual > 0).then_some(actual))
 }
 
 pub(super) async fn authenticate(
@@ -93,16 +107,20 @@ pub(super) async fn authenticate(
         let _ = driver.wait_idle().await;
     }));
     let mut request = sender
-        .send_request(auth_request(&config.password.0, u64::from(config.down_mbps)*125_000)?)
+        .send_request(auth_request(
+            &config.password.0,
+            (config.down_mbps * 125_000.0) as u64,
+        )?)
         .await
         .map_err(io::Error::other)?;
     request.finish().await.map_err(io::Error::other)?;
     let response = request.recv_response().await.map_err(io::Error::other)?;
     let enabled = auth_response(&response)?;
-    let controller:Arc<dyn quinn::congestion::ControllerFactory+Send+Sync>=match upload_rate(&response,config.up_mbps)? {
-        Some(rate)=>Arc::new(super::brutal::Config(rate)),
-        None=>Arc::new(quinn::congestion::BbrConfig::default()),
-    };
+    let controller: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> =
+        match upload_rate(&response, config.up_mbps)? {
+            Some(rate) => Arc::new(super::brutal::Config(rate)),
+            None => Arc::new(quinn::congestion::BbrConfig::default()),
+        };
     connection.set_congestion_controller(controller);
     request.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
     Ok((enabled, task))
@@ -335,19 +353,39 @@ mod tests {
 
     #[test]
     fn bandwidth_negotiation_obeys_auto_and_both_peer_limits() {
-        for (peer,upload,expected) in [("auto",100,None),("0",0,None),("0",8,Some(1_000_000)),("2000000",8,Some(1_000_000)),("500000",8,Some(500_000)),("500000",0,None)] {
-            let response=http::Response::builder().status(233).header("hysteria-cc-rx",peer).body(()).unwrap();
-            assert_eq!(upload_rate(&response,upload).unwrap(),expected);
+        for (peer, upload, expected) in [
+            ("auto", 100, None),
+            ("0", 0, None),
+            ("0", 8, Some(1_000_000)),
+            ("2000000", 8, Some(1_000_000)),
+            ("500000", 8, Some(500_000)),
+            ("500000", 0, None),
+        ] {
+            let response = http::Response::builder()
+                .status(233)
+                .header("hysteria-cc-rx", peer)
+                .body(())
+                .unwrap();
+            assert_eq!(upload_rate(&response, f64::from(upload)).unwrap(), expected);
         }
-        let request=auth_request("secret",5_000_000).unwrap();
-        assert_eq!(request.headers()["hysteria-cc-rx"],"5000000");
-        assert!(upload_rate(&http::Response::builder().header("hysteria-cc-rx","-1").body(()).unwrap(),10).is_err());
+        let request = auth_request("secret", 5_000_000).unwrap();
+        assert_eq!(request.headers()["hysteria-cc-rx"], "5000000");
+        assert!(
+            upload_rate(
+                &http::Response::builder()
+                    .header("hysteria-cc-rx", "-1")
+                    .body(())
+                    .unwrap(),
+                10.0
+            )
+            .is_err()
+        );
     }
 
     fn config(password: &str) -> Hysteria2ClientConfig {
         Hysteria2ClientConfig {
-            up_mbps: 0,
-            down_mbps: 0,
+            up_mbps: 0.0,
+            down_mbps: 0.0,
             password: Secret(password.into()),
             udp_enabled: true,
             obfs: None,

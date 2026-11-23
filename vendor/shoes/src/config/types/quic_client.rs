@@ -12,7 +12,9 @@ pub enum CongestionControl {
     NewReno,
 }
 impl CongestionControl {
-    pub(crate) fn factory(self) -> std::sync::Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
+    pub(crate) fn factory(
+        self,
+    ) -> std::sync::Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
         use quinn::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
         match self {
             Self::Cubic => std::sync::Arc::new(CubicConfig::default()),
@@ -37,9 +39,9 @@ impl fmt::Debug for Secret {
 pub struct Hysteria2ClientConfig {
     pub password: Secret,
     #[serde(default)]
-    pub up_mbps: u32,
+    pub up_mbps: f64,
     #[serde(default)]
-    pub down_mbps: u32,
+    pub down_mbps: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obfs: Option<Obfuscation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +52,17 @@ pub struct Hysteria2ClientConfig {
 
 impl Hysteria2ClientConfig {
     pub fn validate(&self) -> io::Result<()> {
+        for rate in [self.up_mbps, self.down_mbps] {
+            if !rate.is_finite()
+                || !(0.0..=f64::from(u32::MAX)).contains(&rate)
+                || (rate > 0.0 && rate * 125_000.0 < 1.0)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "HY2 bandwidth must be zero (automatic) or at least one byte per second, at most 4294967295 Mbps",
+                ));
+            }
+        }
         http::HeaderValue::from_str(&self.password.0)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid HY2 auth header"))?;
         if self
@@ -155,20 +168,24 @@ pub enum TuicUdpMode {
 }
 
 fn default_heartbeat() -> u64 {
-    10
+    10_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TuicClientConfig {
     #[serde(default)]
+    pub zero_rtt_handshake: bool,
+    #[serde(default)]
     pub congestion_control: CongestionControl,
     pub uuid: Secret,
     pub password: Secret,
     #[serde(default)]
     pub udp_relay_mode: TuicUdpMode,
+    #[serde(default)]
+    pub udp_over_stream: bool,
     #[serde(default = "default_heartbeat")]
-    pub heartbeat_interval_secs: u64,
+    pub heartbeat_interval_ms: u64,
     #[serde(default = "super::common::default_true")]
     pub udp_enabled: bool,
 }
@@ -187,10 +204,16 @@ impl TuicClientConfig {
     }
     pub fn validate(&self) -> io::Result<()> {
         self.uuid_bytes()?;
-        if !(1..=30).contains(&self.heartbeat_interval_secs) {
+        if self.udp_over_stream && self.udp_relay_mode != TuicUdpMode::Native {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "TUIC heartbeat_interval_secs must be 1..=30",
+                "TUIC udp_over_stream cannot be combined with udp_relay_mode: quic",
+            ));
+        }
+        if !(1..=30_000).contains(&self.heartbeat_interval_ms) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TUIC heartbeat_interval_ms must be 1..=30000",
             ));
         }
         Ok(())
@@ -212,12 +235,21 @@ mod tests {
         assert!(!format!("{config:?}").contains("secret"));
         assert!(crate::quic_client::validate(&config, true).is_ok());
         assert!(crate::quic_client::validate(&config, false).is_err());
-        for field in ["up_mbps: -1", "zero_rtt: true", "typo: true"] {
+        for field in ["zero_rtt: true", "typo: true"] {
             assert!(
                 serde_yaml::from_str::<ClientConfig>(&format!(
                     "address: '127.0.0.1:443'\nprotocol: {{type: hy2, password: secret, {field}}}"
                 ))
                 .is_err()
+            );
+        }
+        for rate in ["-1", ".nan", ".inf", "4294967296", "0.0000001"] {
+            let config: ClientConfig = serde_yaml::from_str(&format!(
+                "address: '127.0.0.1:443'\nprotocol: {{type: hy2, password: secret, up_mbps: {rate}}}"
+            )).unwrap();
+            assert!(
+                crate::quic_client::validate(&config, true).is_err(),
+                "{rate}"
             );
         }
     }
@@ -232,7 +264,7 @@ mod tests {
         assert!(!format!("{config:?}").contains("01234567"));
         for invalid in [
             base.replace("01234567-89ab-1def-0123-456789abcdef", "named-user"),
-            base.replace("type: tuic", "type: tuic, heartbeat_interval_secs: 0"),
+            base.replace("type: tuic", "type: tuic, heartbeat_interval_ms: 0"),
         ] {
             let config = serde_yaml::from_str(&invalid).unwrap();
             assert!(crate::quic_client::validate(&config, true).is_err());

@@ -1,0 +1,62 @@
+/* Material 3 color roles, adapted to GTK's native font and scale settings. */
+@define-color accent_bg_color #245ea9;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #245ea9;
+@define-color app_primary_container #d8e7ff;
+@define-color app_on_primary_container #12315b;
+@define-color dark_primary_container #294567;
+@define-color dark_on_primary_container #d8e7ff;
+@define-color app_bg #f8faff;
+@define-color app_card_bg #eff3f9;
+@define-color app_sidebar_bg #e9eff7;
+@define-color app_muted #555f6e;
+@define-color app_outline #c3cbd7;
+@define-color dark_app_bg #11141a;
+@define-color dark_card_bg #20252d;
+@define-color dark_sidebar_bg #191e26;
+@define-color dark_muted #bdc6d5;
+@define-color dark_outline #454d5b;
+@define-color latency_good #237a45;
+@define-color latency_medium #8a5a00;
+@define-color latency_bad #b3261e;
+
+.aerobox-window { background: @app_bg; color: #1a202a; }
+.aerobox-window headerbar { background: @app_bg; box-shadow: none; border: none; }
+.aerobox-window .app-sidebar,
+.aerobox-window .sidebar-scroll { background: @app_sidebar_bg; border: none; }
+.aerobox-window.dark { background: @dark_app_bg; color: #e2e7f0; }
+.aerobox-window.dark headerbar { background: @dark_app_bg; box-shadow: none; border: none; }
+.aerobox-window.dark .app-sidebar,
+.aerobox-window.dark .sidebar-scroll { background: @dark_sidebar_bg; border: none; }
+
+.nav-list { background: transparent; }
+.nav-list row { border-radius: 999px; margin: 0.12em 0; padding: 0; color: @app_muted; }
+.nav-list row:hover { background: alpha(@accent_bg_color, .06); }
+.nav-list row:selected { background: @app_primary_container; color: @app_on_primary_container; box-shadow: none; }
+.nav-list row:selected:hover { background: shade(@app_primary_container, .97); }
+.dark .nav-list row { color: @dark_muted; }
+.dark .nav-list row:hover { background: alpha(@dark_on_primary_container, .06); }
+.dark .nav-list row:selected { background: @dark_primary_container; color: @dark_on_primary_container; }
+.dark .nav-list row:selected:hover { background: shade(@dark_primary_container, 1.08); }
+.nav-item { min-height: 3em; font-weight: normal; }
+.nav-list row:selected .nav-item { font-weight: 600; }
+.brand-mark { -gtk-icon-size: 1.5em; }
+.header-brand { margin-left: 0.35em; }
+.header-brand .brand { font-size: 0.95em; font-weight: 600; }
+.nav-icon { -gtk-icon-size: 1.4em; }
+
+/* Title, body and supporting text keep one hierarchy at every font setting. */
+.muted { color: @app_muted; }
+.dark .muted { color: @dark_muted; }
+.brand { font-size: 1.22em; font-weight: 600; }
+.section-title, .resource-name { font-size: 1em; font-weight: 600; }
+.empty-title { font-size: 1.08em; font-weight: 600; }
+.small { font-size: 0.92em; }
+.surface-card { border-radius: 16px; background: @app_card_bg; border: 1px solid transparent; box-shadow: none; }
+.dark .surface-card { background: @dark_card_bg; }
+.primary-action { border-radius: 999px; padding: 0.55em 1.18em; font-weight: 600; }
+.aerobox-window .floating-save { border-radius: 16px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 3px 8px alpha(#1a202a,.16); }
+.dark .floating-save { box-shadow: 0 3px 8px alpha(#000000,.30); }
+.compact-action { border-radius: 999px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
+.row-icon { background: @app_primary_container; color: @app_on_primary_container; border-radius: 12px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
+.dark .row-icon { background: @dark_primary_container; color: @dark_on_primary_container; }

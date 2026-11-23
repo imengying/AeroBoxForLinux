@@ -6,6 +6,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsClientOptions {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kernel_tx: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kernel_rx: bool,
+    /// Zero selects the protocol default (15 seconds).
+    #[serde(skip_serializing_if = "is_zero_timeout")]
+    pub handshake_timeout_ms: u32,
+    #[serde(skip_serializing_if = "crate::tls_fragment::TlsFragmentOptions::is_default")]
+    pub fragmentation: crate::tls_fragment::TlsFragmentOptions,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_fingerprint: Option<TlsClientFingerprint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ech: Option<crate::ech::EchOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub root_certificates: Vec<String>,
     /// Base64 SHA-256 hashes of the leaf certificate's DER SubjectPublicKeyInfo.
@@ -22,6 +36,26 @@ pub struct TlsClientOptions {
     /// still uses sni_hostname (or the destination hostname/IP when omitted).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disable_sni: bool,
+}
+
+fn is_zero_timeout(value: &u32) -> bool {
+    *value == 0
+}
+
+pub(crate) fn handshake_timeout(millis: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(if millis == 0 {
+        15_000
+    } else {
+        u64::from(millis)
+    })
+}
+
+/// Browser ClientHello layout used by the integrated Rust TLS transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsClientFingerprint {
+    Chrome,
+    Firefox,
 }
 
 impl TlsClientOptions {
@@ -45,6 +79,7 @@ pub enum TlsKeyExchangeGroup {
     X25519,
     SecP256r1,
     SecP384r1,
+    SecP521r1,
 }
 
 impl TlsKeyExchangeGroup {
@@ -61,6 +96,7 @@ impl TlsKeyExchangeGroup {
             Self::X25519 => group(NamedGroup::X25519),
             Self::SecP256r1 => group(NamedGroup::secp256r1),
             Self::SecP384r1 => group(NamedGroup::secp384r1),
+            Self::SecP521r1 => group(NamedGroup::secp521r1),
         }
     }
 }

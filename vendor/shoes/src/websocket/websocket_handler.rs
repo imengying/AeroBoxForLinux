@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use aerobox_primitives::digest::{SHA1_FOR_LEGACY_USE_ONLY, digest};
+use async_trait::async_trait;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
@@ -595,6 +595,17 @@ impl ClientHandshake {
 
 #[async_trait]
 impl TcpClientHandler for WebsocketTcpClientHandler {
+    fn validate_alpn(&self, alpn: Option<&[u8]>) -> std::io::Result<()> {
+        if alpn.is_none_or(|protocol| protocol == b"http/1.1") {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WebSocket upgrade requires HTTP/1.1 TLS ALPN",
+            ))
+        }
+    }
+
     fn has_session_pool(&self) -> bool {
         self.handler.has_session_pool()
     }

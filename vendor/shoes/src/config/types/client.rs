@@ -24,6 +24,8 @@ pub enum PacketEncoding {
     Raw,
     #[serde(rename = "xudp")]
     Xudp,
+    #[serde(rename = "packetaddr")]
+    PacketAddr,
 }
 impl PacketEncoding {
     pub fn is_raw(&self) -> bool {
@@ -104,7 +106,7 @@ impl H2MuxConfig {
 /// Custom deserializer for ClientProxyConfig::Shadowsocks
 fn deserialize_shadowsocks_client<'de, D>(
     deserializer: D,
-) -> Result<(ShadowsocksConfig, bool), D::Error>
+) -> Result<(ShadowsocksConfig, bool, Option<crate::ss_plugin::Config>), D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -117,19 +119,22 @@ where
         password: String,
         #[serde(default = "default_true")]
         udp_enabled: bool,
+        #[serde(default)]
+        plugin: Option<crate::ss_plugin::Config>,
     }
 
     let temp = ShadowsocksClientTemp::deserialize(deserializer)?;
     let config = ShadowsocksConfig::from_client_fields(&temp.cipher, &temp.password)
         .map_err(Error::custom)?;
 
-    Ok((config, temp.udp_enabled))
+    Ok((config, temp.udp_enabled, temp.plugin))
 }
 
 /// Custom serializer for ClientProxyConfig::Shadowsocks - flattens config fields
 fn serialize_shadowsocks_client<S>(
     config: &ShadowsocksConfig,
     udp_enabled: &bool,
+    plugin: &Option<crate::ss_plugin::Config>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -138,11 +143,14 @@ where
     use serde::ser::SerializeStruct;
 
     // Only serialize udp_enabled if it's not the default (true)
-    let field_count = if *udp_enabled { 2 } else { 3 };
+    let field_count = (if *udp_enabled { 2 } else { 3 }) + usize::from(plugin.is_some());
     let mut state = serializer.serialize_struct("Shadowsocks", field_count)?;
     config.serialize_fields(&mut state)?;
     if !*udp_enabled {
         state.serialize_field("udp_enabled", udp_enabled)?;
+    }
+    if let Some(plugin) = plugin {
+        state.serialize_field("plugin", plugin)?;
     }
     state.end()
 }
@@ -330,6 +338,11 @@ pub struct ClientRecord<P> {
     /// Total socket dial deadline, including DNS and all address attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_timeout_ms: Option<std::num::NonZeroU32>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::dial_options::DialOptions::is_default"
+    )]
+    pub dial_options: crate::dial_options::DialOptions,
     pub protocol: P,
     #[serde(default, skip_serializing_if = "Transport::is_default")]
     pub transport: Transport,
@@ -361,6 +374,8 @@ impl<'de> Deserialize<'de> for ClientConfig {
             domain_resolver: Option<super::dns::DomainResolverConfig>,
             #[serde(default)]
             connect_timeout_ms: Option<std::num::NonZeroU32>,
+            #[serde(default)]
+            dial_options: crate::dial_options::DialOptions,
             protocol: ClientProxyConfig,
             #[serde(default, deserialize_with = "explicit_transport")]
             transport: Option<Transport>,
@@ -371,7 +386,9 @@ impl<'de> Deserialize<'de> for ClientConfig {
         let transport = fields.transport.unwrap_or_else(|| {
             if fields.protocol.is_wireguard() {
                 Transport::Udp
-            } else if fields.protocol.is_native_quic() {
+            } else if fields.protocol.is_native_quic()
+                || crate::ss_plugin::quic::source(&fields.protocol).is_some()
+            {
                 Transport::Quic
             } else {
                 Transport::Tcp
@@ -384,6 +401,7 @@ impl<'de> Deserialize<'de> for ClientConfig {
             address: fields.address,
             domain_resolver: fields.domain_resolver,
             connect_timeout_ms: fields.connect_timeout_ms,
+            dial_options: fields.dial_options,
             protocol: fields.protocol,
             transport,
             tcp_settings: fields.tcp_settings,
@@ -401,6 +419,7 @@ impl Default for ClientConfig {
             address: unspecified_address(),
             domain_resolver: None,
             connect_timeout_ms: None,
+            dial_options: Default::default(),
             protocol: ClientProxyConfig::Direct,
             transport: Transport::default(),
             tcp_settings: None,
@@ -411,13 +430,27 @@ impl Default for ClientConfig {
 
 impl ClientConfig {
     pub fn validate_quic_key_exchange(&self, initial_hop: bool) -> std::io::Result<()> {
-        self.validate_quic_key_exchange_settings(initial_hop, self.protocol.is_direct())
+        self.validate_quic_key_exchange_settings(initial_hop, self.protocol.is_direct())?;
+        if let Some(quic) = &self.quic_settings
+            && let ClientProxyConfig::Tuic(settings) = &self.protocol
+        {
+            quic.key_exchange_groups
+                .validate_zero_rtt(settings.zero_rtt_handshake)?;
+        }
+        Ok(())
     }
 }
 
 impl crate::config::resolved::ResolvedClientConfig {
     pub fn validate_quic_key_exchange(&self, initial_hop: bool) -> std::io::Result<()> {
-        self.validate_quic_key_exchange_settings(initial_hop, self.protocol.is_direct())
+        self.validate_quic_key_exchange_settings(initial_hop, self.protocol.is_direct())?;
+        if let Some(quic) = &self.quic_settings
+            && let ResolvedClientProxyConfig::Tuic(settings) = &self.protocol
+        {
+            quic.key_exchange_groups
+                .validate_zero_rtt(settings.zero_rtt_handshake)?;
+        }
+        Ok(())
     }
 }
 
@@ -490,6 +523,7 @@ pub enum ClientProxyConfig {
     Shadowsocks {
         config: ShadowsocksConfig,
         udp_enabled: bool,
+        plugin: Option<crate::ss_plugin::Config>,
     },
     #[serde(
         deserialize_with = "deserialize_snell_client",
@@ -534,8 +568,19 @@ pub enum ClientProxyConfig {
         h2mux: Option<H2MuxConfig>,
     },
     Reality {
+        #[serde(
+            default,
+            skip_serializing_if = "crate::tls_fragment::TlsFragmentOptions::is_default"
+        )]
+        fragmentation: crate::tls_fragment::TlsFragmentOptions,
+        #[serde(default)]
+        handshake_timeout_ms: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mldsa65_verify: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_fingerprint: Option<super::tls::TlsClientFingerprint>,
+        #[serde(default, skip_serializing_if = "NoneOrSome::is_unspecified")]
+        alpn_protocols: NoneOrSome<String>,
         public_key: String,
         #[serde(default = "default_reality_client_short_id")]
         short_id: String,
@@ -581,6 +626,10 @@ pub enum ClientProxyConfig {
         user_id: String,
         #[serde(default)]
         alter_id: u16,
+        #[serde(default, skip_serializing_if = "is_false")]
+        global_padding: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        authenticated_length: bool,
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         udp_enabled: bool,
         #[serde(default, skip_serializing_if = "PacketEncoding::is_raw")]
@@ -604,6 +653,8 @@ pub enum ClientProxyConfig {
     Anytls {
         /// Authentication password
         password: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        client_metadata: String,
         /// UDP over TCP support (default: true)
         #[serde(default = "default_true", skip_serializing_if = "is_true")]
         udp_enabled: bool,
@@ -782,6 +833,7 @@ pub enum ResolvedClientProxyConfig {
     Shadowsocks {
         config: ShadowsocksConfig,
         udp_enabled: bool,
+        plugin: Option<crate::ss_plugin::Config>,
     },
     #[serde(serialize_with = "serialize_snell_client")]
     Snell {
@@ -813,8 +865,15 @@ pub enum ResolvedClientProxyConfig {
         h2mux: Option<H2MuxConfig>,
     },
     Reality {
+        #[serde(skip_serializing_if = "crate::tls_fragment::TlsFragmentOptions::is_default")]
+        fragmentation: crate::tls_fragment::TlsFragmentOptions,
+        handshake_timeout_ms: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         mldsa65_verify: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_fingerprint: Option<super::tls::TlsClientFingerprint>,
+        #[serde(skip_serializing_if = "NoneOrSome::is_unspecified")]
+        alpn_protocols: NoneOrSome<String>,
         public_key: String,
         short_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -841,6 +900,10 @@ pub enum ResolvedClientProxyConfig {
         cipher: String,
         user_id: String,
         alter_id: u16,
+        #[serde(skip_serializing_if = "is_false")]
+        global_padding: bool,
+        #[serde(skip_serializing_if = "is_false")]
+        authenticated_length: bool,
         #[serde(skip_serializing_if = "is_true")]
         udp_enabled: bool,
         #[serde(skip_serializing_if = "PacketEncoding::is_raw")]
@@ -858,6 +921,8 @@ pub enum ResolvedClientProxyConfig {
     PortForward,
     Anytls {
         password: String,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        client_metadata: String,
         #[serde(skip_serializing_if = "is_true")]
         udp_enabled: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -965,6 +1030,7 @@ mod tests {
         ClientConfig {
             domain_resolver: None,
             connect_timeout_ms: None,
+            dial_options: Default::default(),
             name: None,
             control: None,
             bind_interface: NoneOrOne::One("eth0".to_string()),

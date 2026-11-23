@@ -89,6 +89,19 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error>;
 
+    /// Authenticate the public ECH name before accepting rejection/retry data.
+    /// Applications which relax inner certificate checks can keep this check strict.
+    fn verify_ech_rejection_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        self.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
     /// Verify a signature allegedly by the given server certificate.
     ///
     /// `message` is not hashed, and needs hashing during the verification.

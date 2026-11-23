@@ -20,13 +20,13 @@ pub mod fake_ip;
 mod guard;
 mod hickory_resolver;
 mod hosts;
-mod message;
+pub(crate) mod message;
 mod network;
 mod parsed;
 mod proxy_runtime;
-pub(crate) mod routing;
 #[cfg(test)]
 mod recovery_tests;
+pub(crate) mod routing;
 mod stream;
 mod system;
 #[allow(

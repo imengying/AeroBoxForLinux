@@ -897,9 +897,19 @@ extension_struct! {
         ExtensionType::SignatureAlgorithms =>
             pub(crate) signature_schemes: Option<Vec<SignatureScheme>>,
 
+        /// Certificate transparency timestamps requested (RFC6962).
+        ExtensionType::SCT =>
+            pub(crate) sct_request: Option<()>,
+
         /// Offered ALPN protocols (RFC6066)
         ExtensionType::ALProtocolNegotiation =>
             pub(crate) protocols: Option<Vec<ProtocolName>>,
+
+        /// ALPS support (browser draft codepoints).
+        ExtensionType::ApplicationSettingsLegacy =>
+            pub(crate) application_settings_legacy: Option<Vec<ProtocolName>>,
+        ExtensionType::ApplicationSettings =>
+            pub(crate) application_settings: Option<Vec<ProtocolName>>,
 
         /// Available client certificate types (RFC7250)
         ExtensionType::ClientCertificateType =>
@@ -973,15 +983,82 @@ extension_struct! {
         ExtensionType::EncryptedClientHelloOuterExtensions =>
             pub(crate) encrypted_client_hello_outer: Option<Vec<ExtensionType>>,
     } + {
+        /// Explicit browser wire order and GREASE, fixed for one handshake.
+        pub(crate) wire_encoding: Option<crate::client::hello_layout::WireEncoding>,
+
         /// Order randomization seed.
         pub(crate) order_seed: u16,
 
         /// Extensions that must appear contiguously.
         pub(crate) contiguous_extensions: Vec<ExtensionType>,
+
+        /// Client-only wire layout. Parsing never enables a profile.
+        pub(crate) hello_profile: Option<crate::client::ClientHelloProfile>,
     }
 }
 
 impl ClientExtensions<'_> {
+    /// Check before serializing a locally configured ALPS offer. Each encoded
+    /// item fits independently, but their combined u16 vector might not.
+    pub(crate) fn check_application_settings_size(&self) -> Result<(), crate::Error> {
+        if self.application_settings.is_none()
+            && self
+                .application_settings_legacy
+                .is_none()
+        {
+            return Ok(());
+        }
+        if let Some(EncryptedClientHello::Outer(ech)) = &self.encrypted_client_hello {
+            // Type, HPKE suite, config_id and two length prefixes total 10.
+            if ech.enc.0.len() + ech.payload.0.len() + 10 > 65535 {
+                return Err(crate::Error::General(
+                    "ALPS makes the ECH extension too large".into(),
+                ));
+            }
+        }
+        let mut encoded = Vec::new();
+        for typ in self.used_extensions_in_encoding_order() {
+            self.encode_wire_one(typ, &mut encoded);
+            if encoded.len() > 65535 {
+                return Err(crate::Error::General(
+                    "ALPS makes ClientHello extensions too large".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_wire_one(&self, typ: ExtensionType, bytes: &mut Vec<u8>) {
+        if let Some(layout) = &self.wire_encoding {
+            let value = u16::from(typ);
+            if value == layout.grease[2] || value == layout.grease[3] {
+                typ.encode(bytes);
+                let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
+                if value == layout.grease[3] {
+                    0u8.encode(body.buf);
+                }
+                return;
+            }
+            if typ == ExtensionType::SupportedVersions {
+                if let Some(versions) = self.supported_versions {
+                    typ.encode(bytes);
+                    let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
+                    let versions_body =
+                        LengthPrefixedBuffer::new(SupportedProtocolVersions::LIST_LENGTH, body.buf);
+                    layout.grease[4].encode(versions_body.buf);
+                    if versions.tls13 {
+                        ProtocolVersion::TLSv1_3.encode(versions_body.buf);
+                    }
+                    if versions.tls12 {
+                        ProtocolVersion::TLSv1_2.encode(versions_body.buf);
+                    }
+                }
+                return;
+            }
+        }
+        self.encode_one(typ, bytes);
+    }
+
     pub(crate) fn into_owned(self) -> ClientExtensions<'static> {
         let Self {
             server_name,
@@ -990,6 +1067,8 @@ impl ClientExtensions<'_> {
             ec_point_formats,
             signature_schemes,
             protocols,
+            application_settings_legacy,
+            application_settings,
             client_certificate_types,
             server_certificate_types,
             extended_master_secret_request,
@@ -1010,6 +1089,9 @@ impl ClientExtensions<'_> {
             encrypted_client_hello_outer,
             order_seed,
             contiguous_extensions,
+            hello_profile,
+            wire_encoding,
+            sct_request,
         } = self;
         ClientExtensions {
             server_name: server_name.map(|x| x.into_owned()),
@@ -1018,6 +1100,8 @@ impl ClientExtensions<'_> {
             ec_point_formats,
             signature_schemes,
             protocols,
+            application_settings_legacy,
+            application_settings,
             client_certificate_types,
             server_certificate_types,
             extended_master_secret_request,
@@ -1038,10 +1122,34 @@ impl ClientExtensions<'_> {
             encrypted_client_hello_outer,
             order_seed,
             contiguous_extensions,
+            hello_profile,
+            wire_encoding,
+            sct_request,
         }
     }
 
     pub(crate) fn used_extensions_in_encoding_order(&self) -> Vec<ExtensionType> {
+        if let Some(layout) = &self.wire_encoding {
+            let used = self.collect_used();
+            let mut order = vec![ExtensionType::from(layout.grease[2])];
+            order.extend(
+                layout
+                    .extensions
+                    .iter()
+                    .copied()
+                    .filter(|t| used.contains(t)),
+            );
+            for typ in [ExtensionType::Cookie, ExtensionType::EarlyData] {
+                if used.contains(&typ) {
+                    order.push(typ);
+                }
+            }
+            order.push(ExtensionType::from(layout.grease[3]));
+            if self.preshared_key_offer.is_some() {
+                order.push(ExtensionType::PreSharedKey);
+            }
+            return order;
+        }
         let mut exts = self.order_insensitive_extensions_in_random_order();
         exts.extend(&self.contiguous_extensions);
 
@@ -1091,6 +1199,10 @@ impl ClientExtensions<'_> {
             low_quality_integer_hash(seed)
         });
 
+        if let Some(profile) = self.hello_profile {
+            profile.order_extensions(&mut order);
+        }
+
         order
     }
 }
@@ -1105,7 +1217,7 @@ impl<'a> Codec<'a> for ClientExtensions<'a> {
 
         let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         for item in order {
-            self.encode_one(item, body.buf);
+            self.encode_wire_one(item, body.buf);
         }
     }
 
@@ -1195,9 +1307,19 @@ extension_struct! {
         ExtensionType::RenegotiationInfo =>
             pub(crate) renegotiation_info: Option<PayloadU8>,
 
+        /// TLS 1.2 certificate transparency timestamps.
+        ExtensionType::SCT =>
+            pub(crate) signed_certificate_timestamps: Option<SignedCertificateTimestamps>,
+
         /// Selected ALPN protocol (RFC7301)
         ExtensionType::ALProtocolNegotiation =>
             pub(crate) selected_protocol: Option<SingleProtocolName>,
+
+        /// ALPS settings (browser draft codepoints).
+        ExtensionType::ApplicationSettingsLegacy =>
+            pub(crate) application_settings_legacy: Option<Payload<'a>>,
+        ExtensionType::ApplicationSettings =>
+            pub(crate) application_settings: Option<Payload<'a>>,
 
         /// Key exchange server share (RFC8446)
         ExtensionType::KeyShare =>
@@ -1259,6 +1381,8 @@ impl ServerExtensions<'_> {
             session_ticket_ack,
             renegotiation_info,
             selected_protocol,
+            application_settings_legacy,
+            application_settings,
             key_share,
             preshared_key,
             client_certificate_type,
@@ -1272,6 +1396,7 @@ impl ServerExtensions<'_> {
             ticket_request,
             encrypted_client_hello_ack,
             unknown_extensions,
+            signed_certificate_timestamps,
         } = self;
         ServerExtensions {
             ec_point_formats,
@@ -1279,6 +1404,8 @@ impl ServerExtensions<'_> {
             session_ticket_ack,
             renegotiation_info,
             selected_protocol,
+            application_settings_legacy: application_settings_legacy.map(|x| x.into_owned()),
+            application_settings: application_settings.map(|x| x.into_owned()),
             key_share,
             preshared_key,
             client_certificate_type,
@@ -1292,6 +1419,7 @@ impl ServerExtensions<'_> {
             ticket_request,
             encrypted_client_hello_ack,
             unknown_extensions,
+            signed_certificate_timestamps,
         }
     }
 }
@@ -1725,8 +1853,36 @@ impl TlsListElement for CertificateDer<'_> {
 /// that is directly controllable by the peer.
 pub(crate) const CERTIFICATE_MAX_SIZE_LIMIT: usize = 0x1_0000;
 
+/// RFC6962 opaque timestamp list; cryptographic CT policy is separate.
+#[derive(Clone, Debug)]
+pub(crate) struct SignedCertificateTimestamps(Vec<PayloadU16<NonEmpty>>);
+impl Codec<'_> for SignedCertificateTimestamps {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
+        for item in &self.0 {
+            item.encode(body.buf);
+        }
+    }
+    fn read(reader: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        let size = usize::from(u16::read(reader)?);
+        let mut body = reader.sub(size)?;
+        if !body.any_left() {
+            return Err(InvalidMessage::IllegalEmptyList(
+                "SignedCertificateTimestamps",
+            ));
+        }
+        let mut timestamps = Vec::new();
+        while body.any_left() {
+            timestamps.push(PayloadU16::<NonEmpty>::read(&mut body)?);
+        }
+        Ok(Self(timestamps))
+    }
+}
+
 extension_struct! {
     pub(crate) struct CertificateExtensions<'a> {
+        ExtensionType::SCT =>
+            pub(crate) signed_certificate_timestamps: Option<SignedCertificateTimestamps>,
         ExtensionType::StatusRequest =>
             pub(crate) status: Option<CertificateStatus<'a>>,
     }
@@ -1736,6 +1892,7 @@ impl CertificateExtensions<'_> {
     fn into_owned(self) -> CertificateExtensions<'static> {
         CertificateExtensions {
             status: self.status.map(|s| s.into_owned()),
+            signed_certificate_timestamps: self.signed_certificate_timestamps,
         }
     }
 }
@@ -1904,8 +2061,13 @@ pub enum KeyExchangeAlgorithm {
     DHE,
     /// Key exchange performed via elliptic curve Diffie-Hellman.
     ECDHE,
+    /// TLS 1.2 static RSA key transport. Supported only by opt-in clients;
+    /// it has no named group and is never available in TLS 1.3.
+    RSA,
 }
 
+// Named-group key agreements (also the complete TLS 1.3 set). Static RSA is
+// deliberately excluded: it is client-only TLS 1.2 and needs no named group.
 pub(crate) static ALL_KEY_EXCHANGE_ALGORITHMS: &[KeyExchangeAlgorithm] =
     &[KeyExchangeAlgorithm::ECDHE, KeyExchangeAlgorithm::DHE];
 
@@ -1950,6 +2112,7 @@ pub(crate) trait KxDecode<'a>: fmt::Debug + Sized {
 pub(crate) enum ClientKeyExchangeParams {
     Ecdh(ClientEcdhParams),
     Dh(ClientDhParams),
+    Rsa(PayloadU16<NonEmpty>),
 }
 
 #[cfg(feature = "tls12")]
@@ -1958,6 +2121,7 @@ impl ClientKeyExchangeParams {
         match self {
             Self::Ecdh(ecdh) => &ecdh.public.0,
             Self::Dh(dh) => &dh.public.0,
+            Self::Rsa(ciphertext) => &ciphertext.0,
         }
     }
 
@@ -1965,6 +2129,7 @@ impl ClientKeyExchangeParams {
         match self {
             Self::Ecdh(ecdh) => ecdh.encode(buf),
             Self::Dh(dh) => dh.encode(buf),
+            Self::Rsa(ciphertext) => ciphertext.encode(buf),
         }
     }
 }
@@ -1976,6 +2141,7 @@ impl KxDecode<'_> for ClientKeyExchangeParams {
         Ok(match algo {
             ECDHE => Self::Ecdh(ClientEcdhParams::read(r)?),
             DHE => Self::Dh(ClientDhParams::read(r)?),
+            RSA => Self::Rsa(PayloadU16::read(r)?),
         })
     }
 }
@@ -2116,6 +2282,7 @@ impl ServerKeyExchangeParams {
         match kx.group().key_exchange_algorithm() {
             KeyExchangeAlgorithm::DHE => Self::Dh(ServerDhParams::new(kx)),
             KeyExchangeAlgorithm::ECDHE => Self::Ecdh(ServerEcdhParams::new(kx)),
+            KeyExchangeAlgorithm::RSA => unreachable!("RSA has no named key exchange group"),
         }
     }
 
@@ -2142,6 +2309,7 @@ impl KxDecode<'_> for ServerKeyExchangeParams {
         Ok(match algo {
             ECDHE => Self::Ecdh(ServerEcdhParams::read(r)?),
             DHE => Self::Dh(ServerDhParams::read(r)?),
+            RSA => return Err(InvalidMessage::MissingKeyExchange),
         })
     }
 }

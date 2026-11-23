@@ -26,6 +26,7 @@ use crate::vless::VlessMessageStream;
 pub struct AnyTlsClientHandler {
     /// Authentication password
     password: String,
+    client_metadata: String,
     /// Padding factory for traffic obfuscation
     padding: SharedPadding,
     pool: Arc<SessionPool>,
@@ -50,10 +51,17 @@ impl AnyTlsClientHandler {
     ) -> Self {
         Self {
             password,
+            client_metadata: String::new(),
             padding: Arc::new(parking_lot::RwLock::new(padding)),
             pool: SessionPool::new(options),
             udp_enabled,
         }
+    }
+
+    pub(crate) fn with_client_metadata(mut self, metadata: String) -> std::io::Result<Self> {
+        super::anytls_client_session::validate_client_metadata(&metadata)?;
+        self.client_metadata = metadata;
+        Ok(self)
     }
 
     async fn open_stream(
@@ -75,7 +83,13 @@ impl AnyTlsClientHandler {
 
     async fn create(&self, transport: Box<dyn AsyncStream>) -> std::io::Result<OpeningSession> {
         Ok(OpeningSession::new(
-            AnyTlsClientSession::new(transport, &self.password, self.padding.clone()).await?,
+            AnyTlsClientSession::with_metadata(
+                transport,
+                &self.password,
+                self.padding.clone(),
+                &self.client_metadata,
+            )
+            .await?,
         ))
     }
 

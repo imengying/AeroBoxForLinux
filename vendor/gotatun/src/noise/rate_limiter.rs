@@ -31,7 +31,6 @@ use std::time::Duration;
 #[cfg(not(feature = "mock_instant"))]
 use crate::sleepyinstant::Instant;
 
-use aead::generic_array::GenericArray;
 use aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305};
 use parking_lot::Mutex;
@@ -168,11 +167,11 @@ impl RateLimiter {
 
         let cipher = XChaCha20Poly1305::new(&self.cookie_key);
 
-        let iv = GenericArray::from_slice(&wg_cookie_reply.nonce);
+        let iv = wg_cookie_reply.nonce.into();
 
         wg_cookie_reply.encrypted_cookie.encrypted = cookie;
         let tag = cipher
-            .encrypt_in_place_detached(iv, mac1, &mut wg_cookie_reply.encrypted_cookie.encrypted)
+            .encrypt_in_place_detached(&iv, mac1, &mut wg_cookie_reply.encrypted_cookie.encrypted)
             .expect("wg_cookie_reply is large enough");
 
         wg_cookie_reply.encrypted_cookie.tag = tag.into();

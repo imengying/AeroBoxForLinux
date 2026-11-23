@@ -76,12 +76,14 @@ fn endpoints() -> (quinn::Endpoint, Arc<Dialer>) {
 
 fn protocol() -> Protocol {
     Protocol::Tuic(TuicClientConfig {
+        zero_rtt_handshake: false,
         congestion_control: Default::default(),
         uuid: Secret("01234567-89ab-4def-8123-456789abcdef".into()),
         password: Secret("password".into()),
         udp_relay_mode: TuicUdpMode::Native,
+        udp_over_stream: false,
         udp_enabled: true,
-        heartbeat_interval_secs: 1,
+        heartbeat_interval_ms: 1000,
     })
 }
 
@@ -272,8 +274,8 @@ async fn abandoned_h3_auth_is_closed_when_its_connector_retires() {
                 .get(
                     dialer,
                     &Protocol::Hysteria2(crate::config::quic_client::Hysteria2ClientConfig {
-            up_mbps: 0,
-            down_mbps: 0,
+                        up_mbps: 0.0,
+                        down_mbps: 0.0,
                         password: Secret("password".into()),
                         udp_enabled: true,
                         obfs: None,

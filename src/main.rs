@@ -73,7 +73,7 @@ fn run() -> Result<gtk::glib::ExitCode> {
     let service = engine::Service::new(store);
     let result = ui::run(service.clone(), smoke);
     if let Err(e) = service.shutdown() {
-        eprintln!("停止内核: {e:#}")
+        eprintln!("停止连接: {e:#}")
     }
     Ok(result)
 }

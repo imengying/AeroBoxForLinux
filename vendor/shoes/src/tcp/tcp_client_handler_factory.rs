@@ -126,27 +126,41 @@ pub(crate) fn create_with_hop_context(
                 settings,
             )?)
         }
-        ResolvedClientProxyConfig::Socks { username, password, .. } => Box::new(
-            SocksTcpClientHandler::new(create_auth_credentials(username, password)),
-        ),
+        ResolvedClientProxyConfig::Socks {
+            username, password, ..
+        } => Box::new(SocksTcpClientHandler::new(create_auth_credentials(
+            username, password,
+        ))),
         ResolvedClientProxyConfig::Shadowsocks {
             config,
             udp_enabled,
-        } => match config {
-            ShadowsocksConfig::Legacy { cipher, password } => Box::new(
-                ShadowsocksTcpHandler::new_client(cipher, &password, udp_enabled),
-            ),
-            ShadowsocksConfig::Aead2022 {
-                cipher,
-                key_bytes,
-                identity_keys,
-            } => Box::new(ShadowsocksTcpHandler::new_aead2022_client(
-                cipher,
-                &key_bytes,
-                identity_keys,
-                udp_enabled,
-            )),
-        },
+            plugin,
+        } => {
+            let handler: Box<dyn TcpClientHandler> = match config {
+                ShadowsocksConfig::Legacy { cipher, password } => Box::new(
+                    ShadowsocksTcpHandler::new_client(cipher, &password, udp_enabled),
+                ),
+                ShadowsocksConfig::Aead2022 {
+                    cipher,
+                    key_bytes,
+                    identity_keys,
+                } => Box::new(ShadowsocksTcpHandler::new_aead2022_client(
+                    cipher,
+                    &key_bytes,
+                    identity_keys,
+                    udp_enabled,
+                )),
+            };
+            if let Some(plugin) = plugin {
+                Box::new(crate::ss_plugin::Handler::new(
+                    plugin,
+                    hop_location,
+                    handler,
+                )?)
+            } else {
+                handler
+            }
+        }
         ResolvedClientProxyConfig::Snell {
             config: ShadowsocksConfig::Legacy { cipher, password },
             udp_enabled,
@@ -183,7 +197,7 @@ pub(crate) fn create_with_hop_context(
             };
             let handler: Box<dyn TcpClientHandler> = Box::new(
                 VlessTcpClientHandler::new(&user_id, udp_enabled, encryption, vision)?
-                    .with_packet_encoding(packet_encoding),
+                    .with_packet_encoding(packet_encoding, Some(resolver.clone()))?,
             );
             if let Some(h2mux_config) = h2mux {
                 h2mux_config.validate()?;
@@ -262,6 +276,11 @@ pub(crate) fn create_with_hop_context(
             )?);
 
             let server_name = tls_verification_name(sni_hostname, hop_location)?;
+            let ech = options
+                .ech
+                .as_ref()
+                .map(|options| crate::ech::Policy::new(options, &server_name))
+                .transpose()?;
 
             if vision {
                 let ResolvedClientProxyConfig::Vless {
@@ -276,28 +295,39 @@ pub(crate) fn create_with_hop_context(
                 let user_id_bytes = parse_uuid(user_id)
                     .expect("Invalid user_id UUID")
                     .into_boxed_slice();
-                Box::new(TlsClientHandler::new_vision_vless(
-                    client_config,
-                    tls_buffer_size,
-                    server_name,
-                    user_id_bytes,
-                    *udp_enabled,
-                ))
+                Box::new(
+                    TlsClientHandler::new_vision_vless(
+                        client_config,
+                        tls_buffer_size,
+                        server_name,
+                        user_id_bytes,
+                        *udp_enabled,
+                    )
+                    .with_handshake_timeout(options.handshake_timeout_ms)
+                    .with_kernel(options.kernel_tx, options.kernel_rx)?
+                    .with_fragmentation(options.fragmentation.clone())
+                    .with_ech(ech.clone(), resolver.clone()),
+                )
             } else {
                 let handler =
                     create_with_hop_context(*protocol, hop_location, None, resolver.clone())?;
 
-                Box::new(TlsClientHandler::new(
-                    client_config,
-                    tls_buffer_size,
-                    server_name,
-                    handler,
-                ))
+                Box::new(
+                    TlsClientHandler::new(client_config, tls_buffer_size, server_name, handler)
+                        .with_handshake_timeout(options.handshake_timeout_ms)
+                        .with_kernel(options.kernel_tx, options.kernel_rx)?
+                        .with_fragmentation(options.fragmentation.clone())
+                        .with_ech(ech.clone(), resolver.clone()),
+                )
             }
         }
         ResolvedClientProxyConfig::Reality {
+            fragmentation,
+            handshake_timeout_ms,
             public_key,
             mldsa65_verify,
+            client_fingerprint,
+            alpn_protocols,
             short_id,
             sni_hostname,
             cipher_suites,
@@ -307,6 +337,7 @@ pub(crate) fn create_with_hop_context(
             crate::config::validate_resolved_client_vision_protocol(vision, &protocol, "REALITY")?;
             let public_key_bytes =
                 crate::reality::decode_public_key(&public_key).map_err(std::io::Error::other)?;
+            fragmentation.validate()?;
             let mldsa65_verify = mldsa65_verify
                 .as_deref()
                 .map(crate::reality::decode_mldsa65_verify)
@@ -344,7 +375,15 @@ pub(crate) fn create_with_hop_context(
                         user_id_bytes,
                         *udp_enabled,
                     )
-                    .with_mldsa65_verify(mldsa65_verify),
+                    .with_mldsa65_verify(mldsa65_verify)
+                    .with_alpn_protocols(if alpn_protocols.is_unspecified() {
+                        None
+                    } else {
+                        Some(alpn_protocols.into_vec())
+                    })
+                    .with_client_fingerprint(client_fingerprint)
+                    .with_fragmentation(fragmentation.clone())
+                    .with_handshake_timeout(handshake_timeout_ms),
                 )
             } else {
                 let inner_handler =
@@ -357,7 +396,15 @@ pub(crate) fn create_with_hop_context(
                         cipher_suites,
                         inner_handler,
                     )
-                    .with_mldsa65_verify(mldsa65_verify),
+                    .with_mldsa65_verify(mldsa65_verify)
+                    .with_alpn_protocols(if alpn_protocols.is_unspecified() {
+                        None
+                    } else {
+                        Some(alpn_protocols.into_vec())
+                    })
+                    .with_client_fingerprint(client_fingerprint)
+                    .with_fragmentation(fragmentation.clone())
+                    .with_handshake_timeout(handshake_timeout_ms),
                 )
             }
         }
@@ -404,14 +451,22 @@ pub(crate) fn create_with_hop_context(
             cipher,
             user_id,
             alter_id,
+            global_padding,
+            authenticated_length,
             udp_enabled,
             packet_encoding,
             h2mux,
         } => {
             let handler: Box<dyn TcpClientHandler> = Box::new(
-                VmessTcpClientHandler::new(&cipher, &user_id, udp_enabled)?
-                    .with_alter_id(alter_id)
-                    .with_packet_encoding(packet_encoding),
+                VmessTcpClientHandler::with_options(
+                    &cipher,
+                    &user_id,
+                    udp_enabled,
+                    global_padding,
+                    authenticated_length,
+                )?
+                .with_alter_id(alter_id)
+                .with_packet_encoding(packet_encoding, Some(resolver.clone())),
             );
             if let Some(h2mux_config) = h2mux {
                 h2mux_config.validate()?;
@@ -425,18 +480,34 @@ pub(crate) fn create_with_hop_context(
         }
         ResolvedClientProxyConfig::Multiplex(config) => {
             config.validate()?;
-            let inner = create_with_hop_context(*config.protocol, hop_location, default_sni_hostname, resolver)?;
-            Box::new(H2MuxClientHandler::new(Arc::from(inner),config.settings.to_options()))
+            let inner = create_with_hop_context(
+                *config.protocol,
+                hop_location,
+                default_sni_hostname,
+                resolver,
+            )?;
+            Box::new(H2MuxClientHandler::new(
+                Arc::from(inner),
+                config.settings.to_options(),
+            ))
         }
         ResolvedClientProxyConfig::Uot(config) => {
             config.validate()?;
-            let inner = create_with_hop_context(*config.protocol, hop_location, default_sni_hostname, resolver)?;
+            let inner = create_with_hop_context(
+                *config.protocol,
+                hop_location,
+                default_sni_hostname,
+                resolver,
+            )?;
             Box::new(crate::uot::client::Handler::new(config.version, inner)?)
         }
         ResolvedClientProxyConfig::StreamTransport(config) => {
             let authority = crate::http2::client::format_authority(hop_location);
-            let handler = create_with_hop_context(*config.protocol.clone(), hop_location, None, resolver)?;
-            Box::new(crate::stream_transport::Handler::new(config, authority, handler)?)
+            let handler =
+                create_with_hop_context(*config.protocol.clone(), hop_location, None, resolver)?;
+            Box::new(crate::stream_transport::Handler::new(
+                config, authority, handler,
+            )?)
         }
         ResolvedClientProxyConfig::Websocket(websocket_client_config) => {
             crate::websocket::validate_early_data(
@@ -472,6 +543,7 @@ pub(crate) fn create_with_hop_context(
         ResolvedClientProxyConfig::PortForward => Box::new(PortForwardClientHandler),
         ResolvedClientProxyConfig::Anytls {
             password,
+            client_metadata,
             udp_enabled,
             padding_scheme,
             idle_session_check_interval_secs,
@@ -486,17 +558,20 @@ pub(crate) fn create_with_hop_context(
                 }
                 None => PaddingFactory::default_factory(),
             };
-            Box::new(AnyTlsClientHandler::with_options(
-                password,
-                padding,
-                udp_enabled,
-                crate::anytls::PoolOptions {
-                    idle_session_check_interval_secs,
-                    idle_session_timeout_secs,
-                    min_idle_session,
-                    disable_reuse,
-                },
-            ))
+            Box::new(
+                AnyTlsClientHandler::with_options(
+                    password,
+                    padding,
+                    udp_enabled,
+                    crate::anytls::PoolOptions {
+                        idle_session_check_interval_secs,
+                        idle_session_timeout_secs,
+                        min_idle_session,
+                        disable_reuse,
+                    },
+                )
+                .with_client_metadata(client_metadata)?,
+            )
         }
         ResolvedClientProxyConfig::Naiveproxy {
             settings,

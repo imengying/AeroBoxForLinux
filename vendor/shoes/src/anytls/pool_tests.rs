@@ -68,6 +68,7 @@ fn transport<D: CarrierDialer + 'static>(dialer: &Arc<D>) -> ClientTransport<'st
     let route = dialer.clone();
     let dialer = dialer.clone();
     ClientTransport {
+        reopen: None,
         route,
         open: Box::pin(async move { dialer.open_stream().await }),
     }
@@ -1170,7 +1171,9 @@ async fn chains_reuse_tls_once_per_selected_prefix_for_tcp_and_udp() {
     };
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let server_config = Arc::new(
-        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
             .with_no_client_auth()
             .with_single_cert(
                 vec![certificate.cert.der().clone()],

@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::common_state::{CommonState, Side};
 use crate::conn::ConnectionRandoms;
@@ -99,6 +99,35 @@ pub(crate) struct ConnectionSecrets {
 }
 
 impl ConnectionSecrets {
+    /// Static RSA has already produced the premaster before ClientKeyExchange.
+    /// Its master secret derivation is otherwise identical to TLS 1.2 DH.
+    pub(crate) fn from_rsa_premaster(
+        premaster: &crypto::SharedSecret,
+        ems_seed: Option<hash::Output>,
+        randoms: ConnectionRandoms,
+        suite: &'static Tls12CipherSuite,
+    ) -> Self {
+        let mut ret = Self {
+            randoms,
+            suite,
+            master_secret: [0; 48],
+        };
+        let (label, seed) = match ems_seed {
+            Some(seed) => ("extended master secret", Seed::Ems(seed)),
+            None => (
+                "master secret",
+                Seed::Randoms(join_randoms(&ret.randoms.client, &ret.randoms.server)),
+            ),
+        };
+        suite.prf_provider.for_secret(
+            &mut ret.master_secret,
+            premaster.secret_bytes(),
+            label.as_bytes(),
+            seed.as_ref(),
+        );
+        ret
+    }
+
     pub(crate) fn from_key_exchange(
         kx: Box<dyn crypto::ActiveKeyExchange>,
         peer_pub_key: &[u8],
@@ -156,46 +185,56 @@ impl ConnectionSecrets {
     /// and the session's `secrets`.
     pub(crate) fn make_cipher_pair(&self, side: Side) -> MessageCipherPair {
         // Make a key block, and chop it up.
-        // Note: we don't implement any ciphersuites with nonzero mac_key_len.
         let key_block = self.make_key_block();
         let shape = self.suite.aead_alg.key_block_shape();
 
+        let mac_len = self.suite.aead_alg.mac_key_len();
+        let (client_mac, key_block) = key_block.split_at(mac_len);
+        let (server_mac, key_block) = key_block.split_at(mac_len);
         let (client_write_key, key_block) = key_block.split_at(shape.enc_key_len);
         let (server_write_key, key_block) = key_block.split_at(shape.enc_key_len);
         let (client_write_iv, key_block) = key_block.split_at(shape.fixed_iv_len);
         let (server_write_iv, extra) = key_block.split_at(shape.fixed_iv_len);
 
-        let (write_key, write_iv, read_key, read_iv) = match side {
+        let (write_key, write_iv, write_mac, read_key, read_iv, read_mac) = match side {
             Side::Client => (
                 client_write_key,
                 client_write_iv,
+                client_mac,
                 server_write_key,
                 server_write_iv,
+                server_mac,
             ),
             Side::Server => (
                 server_write_key,
                 server_write_iv,
+                server_mac,
                 client_write_key,
                 client_write_iv,
+                client_mac,
             ),
         };
 
         (
             self.suite
                 .aead_alg
-                .decrypter(AeadKey::new(read_key), read_iv),
-            self.suite
-                .aead_alg
-                .encrypter(AeadKey::new(write_key), write_iv, extra),
+                .decrypter_with_mac(AeadKey::new(read_key), read_iv, read_mac),
+            self.suite.aead_alg.encrypter_with_mac(
+                AeadKey::new(write_key),
+                write_iv,
+                extra,
+                write_mac,
+            ),
         )
     }
 
-    fn make_key_block(&self) -> Vec<u8> {
+    fn make_key_block(&self) -> Zeroizing<Vec<u8>> {
         let shape = self.suite.aead_alg.key_block_shape();
 
-        let len = (shape.enc_key_len + shape.fixed_iv_len) * 2 + shape.explicit_nonce_len;
+        let len = (self.suite.aead_alg.mac_key_len() + shape.enc_key_len + shape.fixed_iv_len) * 2
+            + shape.explicit_nonce_len;
 
-        let mut out = vec![0u8; len];
+        let mut out = Zeroizing::new(vec![0u8; len]);
 
         // NOTE: opposite order to above for no good reason.
         // Don't design security protocols on drugs, kids.
@@ -260,6 +299,10 @@ impl ConnectionSecrets {
     }
 
     pub(crate) fn extract_secrets(&self, side: Side) -> Result<PartiallyExtractedSecrets, Error> {
+        // Traffic-secret offload has no representation for a separate MAC key.
+        if self.suite.aead_alg.mac_key_len() != 0 {
+            return Err(crypto::cipher::UnsupportedOperationError.into());
+        }
         // Make a key block, and chop it up
         let key_block = self.make_key_block();
         let shape = self.suite.aead_alg.key_block_shape();

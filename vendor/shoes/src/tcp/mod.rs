@@ -1,5 +1,6 @@
 pub mod carrier_dialer;
 pub mod chain_builder;
+mod fast_open;
 pub(crate) mod ingress;
 pub mod proxy_connector;
 pub mod proxy_connector_impl;

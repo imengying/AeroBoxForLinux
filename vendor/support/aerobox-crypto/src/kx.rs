@@ -11,9 +11,60 @@ use subtle::ConstantTimeEq;
 static X25519: CheckedGroup = CheckedGroup(NamedGroup::X25519);
 static P256: CheckedGroup = CheckedGroup(NamedGroup::secp256r1);
 static P384: CheckedGroup = CheckedGroup(NamedGroup::secp384r1);
+static P521: P521Group = P521Group;
 
 pub(super) fn groups() -> Vec<&'static dyn SupportedKxGroup> {
-    vec![&X25519, &P256, &P384]
+    vec![&X25519, &P256, &P384, &P521]
+}
+
+#[derive(Debug)]
+struct P521Group;
+impl SupportedKxGroup for P521Group {
+    fn name(&self) -> NamedGroup {
+        NamedGroup::secp521r1
+    }
+    fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        self.start_with_seed_source(super::signing::fill_seed)
+    }
+    fn ffdhe_group(&self) -> Option<rustls::ffdhe_groups::FfdheGroup<'static>> {
+        None
+    }
+}
+impl P521Group {
+    fn start_with_seed_source(
+        &self,
+        source: impl FnOnce(&mut [u8; 32]) -> Result<(), Error>,
+    ) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        use p521::elliptic_curve::sec1::ToEncodedPoint;
+        let mut rng = super::signing::seeded_rng_with(source)?;
+        let secret = p521::ecdh::EphemeralSecret::random(&mut rng);
+        let public = secret.public_key().to_encoded_point(false);
+        Ok(Box::new(P521Exchange { secret, public }))
+    }
+}
+struct P521Exchange {
+    secret: p521::ecdh::EphemeralSecret,
+    public: p521::EncodedPoint,
+}
+impl ActiveKeyExchange for P521Exchange {
+    fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
+        if peer.len() != 133 || peer[0] != 4 {
+            return Err(PeerMisbehaved::InvalidKeyShare.into());
+        }
+        let public =
+            p521::PublicKey::from_sec1_bytes(peer).map_err(|_| PeerMisbehaved::InvalidKeyShare)?;
+        let secret = self.secret.diffie_hellman(&public);
+        Ok(SharedSecret::from(&secret.raw_secret_bytes()[..]))
+    }
+    fn pub_key(&self) -> &[u8] {
+        self.public.as_bytes()
+    }
+    fn group(&self) -> NamedGroup {
+        NamedGroup::secp521r1
+    }
+    fn ffdhe_group(&self) -> Option<rustls::ffdhe_groups::FfdheGroup<'static>> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -79,5 +130,38 @@ impl ActiveKeyExchange for CheckedExchange {
 
     fn ffdhe_group(&self) -> Option<rustls::ffdhe_groups::FfdheGroup<'static>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p521_key_exchange_returns_entropy_failure_and_uses_one_seed() {
+        let failed = P521.start_with_seed_source(|seed| {
+            seed[..16].fill(0x66);
+            Err(Error::FailedToGetRandomBytes)
+        });
+        assert!(matches!(failed, Err(Error::FailedToGetRandomBytes)));
+
+        let calls = std::cell::Cell::new(0);
+        let local = P521
+            .start_with_seed_source(|seed| {
+                calls.set(calls.get() + 1);
+                seed.fill(0x25);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(local.pub_key().len(), 133);
+        assert_eq!(local.pub_key()[0], 4);
+        let peer = P521.start().unwrap();
+        let peer_public = peer.pub_key().to_vec();
+        let peer_secret = peer.complete(local.pub_key()).unwrap();
+        assert_eq!(
+            local.complete(&peer_public).unwrap().secret_bytes(),
+            peer_secret.secret_bytes()
+        );
     }
 }

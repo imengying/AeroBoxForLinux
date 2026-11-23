@@ -169,6 +169,21 @@ impl QuicEndpoint {
         self.connect_with_memory(address, name, memory)
     }
 
+    pub(crate) fn connect_with(
+        &self,
+        config: quinn::ClientConfig,
+        address: SocketAddr,
+        name: &str,
+    ) -> io::Result<quinn::Connecting> {
+        let memory = crate::resources::try_quic_memory(self.memory_bytes)
+            .ok_or_else(|| crate::resources::quic_memory_exhausted(self.memory_bytes))?;
+        CONNECTION_MEMORY.sync_scope(RefCell::new(Some(memory)), || {
+            self.inner
+                .connect_with(config, address, name)
+                .map_err(io::Error::other)
+        })
+    }
+
     fn connect_with_memory(
         &self,
         address: SocketAddr,

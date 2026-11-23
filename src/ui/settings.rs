@@ -236,6 +236,46 @@ impl SettingsPanel {
 }
 
 impl Ui {
+    fn diagnostics_row(self: &Rc<Self>, group: &adw::PreferencesGroup) {
+        let row = adw::ActionRow::builder().title("连接诊断").build();
+        let button = gtk::Button::with_label("检测");
+        button.set_valign(gtk::Align::Center);
+        button.set_widget_name("connection-diagnostics");
+        row.add_suffix(&button);
+        row.set_activatable_widget(Some(&button));
+        group.add(&row);
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |button| {
+            if let Some(ui) = weak.upgrade() {
+                ui.button_task(
+                    button,
+                    "检测中…",
+                    |service| service.diagnose_connection(),
+                    |ui, result| {
+                        let report = match result {
+                            Ok(report) => report,
+                            Err(error) => format!("{error:#}"),
+                        };
+                        let text = format!(
+                            "AeroBox {}\n\n{report}",
+                            option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+                        );
+                        let dialog = alert_dialog("连接诊断", &text);
+                        dialog.add_response("copy", "复制结果");
+                        dialog.add_response("close", "关闭");
+                        dialog.set_default_response(Some("close"));
+                        dialog.set_close_response("close");
+                        let clipboard = ui.window.clipboard();
+                        dialog.connect_response(Some("copy"), move |_, _| {
+                            clipboard.set_text(&text);
+                        });
+                        dialog.present(Some(&ui.window));
+                    },
+                );
+            }
+        });
+    }
+
     pub(super) fn settings(self: &Rc<Self>, _heading: &gtk::Box) {
         self.body.add_css_class("settings-page");
         let settings = self.service.snapshot().settings;
@@ -265,11 +305,9 @@ impl Ui {
         let general_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
         let network_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
         let tun_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
-        let core_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
         stack.add_titled(&general_page, Some("general"), "常规");
         stack.add_titled(&network_page, Some("network"), "网络");
         stack.add_titled(&tun_page, Some("tun"), "虚拟网卡");
-        stack.add_titled(&core_page, Some("core"), "内核");
         let appearance = group("外观与启动");
         let theme = combo(
             "外观",
@@ -467,8 +505,7 @@ impl Ui {
             }
         });
 
-        self.core_panel(&core_page);
-        let core = group("日志");
+        let logging = group("日志与诊断");
         let levels = ["trace", "debug", "info", "warn", "error"];
         let log = combo(
             "日志级别",
@@ -478,8 +515,9 @@ impl Ui {
                 .position(|l| *l == settings.log_level)
                 .unwrap_or(4) as u32,
         );
-        core.add(&log);
-        core_page.append(&core);
+        logging.add(&log);
+        self.diagnostics_row(&logging);
+        general_page.append(&logging);
 
         let testing = group("测速");
         let test_url = LabeledEntry::new("测试地址", &settings.test_url);
@@ -536,10 +574,7 @@ impl Ui {
                 return;
             }
             let ready = Rc::new(move |ui: &Rc<Ui>, login: bool| {
-                let dialog = alert_dialog(
-                    "恢复默认设置？",
-                    "仅重置外观、网络、虚拟网卡和内核设置，不删除任何订阅或规则。",
-                );
+                let dialog = alert_dialog("恢复默认设置？", "恢复默认设置，保留订阅、节点和规则。");
                 dialog.add_response("cancel", "取消");
                 dialog.add_response("reset", "恢复默认");
                 dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
@@ -844,6 +879,28 @@ impl Ui {
         });
     }
 }
+pub(super) fn smoke_general(ui: &Rc<Ui>) -> Result<()> {
+    let panel = ui.settings_panel.borrow().clone().context("缺少设置页")?;
+    let pages = panel.stack.pages();
+    anyhow::ensure!(pages.n_items() == 3, "设置分类应为常规、网络和虚拟网卡");
+    anyhow::ensure!(
+        panel.stack.visible_child_name().as_deref() == Some("general"),
+        "常规设置未显示"
+    );
+    let page = panel.stack.visible_child().context("缺少常规设置内容")?;
+    let content = descendants(&page);
+    anyhow::ensure!(
+        content.iter().any(|widget| widget
+            .downcast_ref::<adw::ComboRow>()
+            .is_some_and(|row| row.title() == "日志级别"))
+            && content
+                .iter()
+                .any(|widget| widget.widget_name() == "connection-diagnostics"),
+        "常规设置缺少日志级别或连接诊断"
+    );
+    Ok(())
+}
+
 fn group(title: &str) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title(title);
@@ -1114,7 +1171,7 @@ pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
     ensure!(row.is_visible(), "网络权限行不可见");
     ensure!(
         !ui.service.status().running,
-        "权限自检不能更改正在运行的内核"
+        "权限自检不能更改正在运行的连接"
     );
     let panel = ui
         .settings_panel
@@ -1385,7 +1442,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.remote_dns == "tls://one.one.one.one",
             "设置控件没有持久化"
         );
-        ensure!(!ui.service.status().running, "设置测试意外启动了内核");
+        ensure!(!ui.service.status().running, "设置测试意外启动了连接");
         ensure!(
             !save.is_visible() && !save.is_sensitive(),
             "保存完成后仍显示悬浮保存按钮"
@@ -1414,7 +1471,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         !body.iter().any(|widget| widget
             .downcast_ref::<adw::ComboRow>()
             .is_some_and(|row| row.title() == "协议栈")),
-        "设置仍显示外部内核协议栈选项"
+        "设置包含不适用的协议栈选项"
     );
     let mtu = body
         .iter()

@@ -9,10 +9,14 @@ use std::sync::{Arc, OnceLock};
 
 use rustls::{SupportedCipherSuite, Tls12CipherSuite, Tls13CipherSuite, crypto::CryptoProvider};
 
+pub mod hpke;
 mod kx;
+pub mod legacy_cbc;
+pub mod legacy_rsa;
 mod quic;
 mod record;
 mod signing;
+mod verify;
 
 /// Construct a provider without ring, AWS-LC, OpenSSL or native TLS backends.
 ///
@@ -22,6 +26,7 @@ pub fn provider() -> CryptoProvider {
     let mut provider = rustls_rustcrypto::provider();
     provider.kx_groups = kx::groups();
     provider.key_provider = &signing::Provider;
+    provider.signature_verification_algorithms = verify::algorithms();
     // Prefer TLS 1.3. All TLS 1.3 suites include QUIC support; rustls omits TLS
     // 1.2 automatically for QUIC connections.
     provider.cipher_suites = vec![
@@ -114,7 +119,16 @@ const fn tls12_adapt(
         },
         prf_provider: suite.prf_provider,
         kx: suite.kx,
-        sign: suite.sign,
+        sign: match suite.common.suite {
+            rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+            | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+            | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => &[
+                rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            ],
+            _ => suite.sign,
+        },
         aead_alg: aead,
     }
 }

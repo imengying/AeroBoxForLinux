@@ -1,10 +1,10 @@
 # AeroBox
 
-面向 **Linux / Wayland** 的代理客户端，使用 Rust、GTK4、libadwaita 和 GtkSourceView 5。网络引擎在应用进程内运行，随 AeroBox 静态编译，无需安装、下载或指定外部内核。协议实现基于仓库内的第三方 [shoes](vendor/shoes) 代码，最终只生成一个 `AeroBox` 应用。
+面向 **Linux / Wayland** 的代理客户端，使用 Rust、GTK4、libadwaita 和 GtkSourceView 5。所有连接、分流、DNS 和虚拟网卡功能直接集成在 AeroBox 中，统一构建和发布。
 
 ## 安装
 
-从 [Releases](https://github.com/imengying/AeroBoxForLinux/releases) 下载：Intel / AMD 电脑选择 `AeroBoxForLinux-linux-amd64.tar.gz`，ARM64 设备选择 `AeroBoxForLinux-linux-arm64.tar.gz`。
+从 [Releases](https://github.com/imengying/AeroBoxForLinux/releases) 下载 `AeroBoxForLinux-linux-amd64.tar.gz`，适用于 Intel / AMD 的 x86_64 电脑。目前仅构建和发布此架构的安装包。
 
 Arch Linux：
 
@@ -24,25 +24,11 @@ cd AeroBoxForLinux-linux-amd64
 1. 导入订阅链接、文件或节点内容。支持常见 Clash YAML、sing-box JSON、Base64 和节点分享链接，导入成功后自动选用该订阅。
 2. 点击订阅卡片切换订阅，点击节点卡片选择节点。每个订阅分别记住所选节点；运行中切换失败会恢复原连接。
 3. 在首页选择「规则」「全局」或「直连」，点击右下角「启动」。全局使用所选节点；规则按启用的规则分流，未匹配的连接使用所选节点；直连绕过节点。模式切换会断开旧连接。
-4. 节点卡片下方可单独测速，右下角悬浮按钮测试当前订阅。连接页可查看和断开连接，设置中的内核页可检查配置、重启和诊断连接。
+4. 节点卡片下方可单独测速，右下角悬浮按钮测试当前订阅。连接页可查看和断开连接，设置 → 常规提供日志级别与连接诊断。
 
 首页显示单个出口 IP、上传下载、连接数、运行时间及 AeroBox 整体内存。优先显示 IPv4，点击 IP 卡片重新检测。IPv6 开关位于设置中；字体大小支持 9–18 pt，布局随字体和 Wayland 缩放调整。日志级别默认 `error`。
 
-### 协议与限制
-
-支持 Shadowsocks（含 SS2022）、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP。受支持的传输和安全参数按实际实现转换；未知字段、浏览器 TLS 指纹模拟、Shadowsocks 插件及其他未实现参数会明确拒绝并报告位置，避免导入后静默丢失设置。不提供 ShadowTLS、Snell 或旧版内核参数兼容。
-
-协议名称相同不代表所有参数组合都已完成互通验证。节点导入、运行配置校验和本地协议测试覆盖各自的边界；具体服务端仍须用实际连接验证。
-
-VMess 同时支持 AEAD（`alter_id: 0`）与仍在使用的旧认证协议（`alter_id: 1–65535`），载荷加密支持 `auto`、`aes-128-gcm`、`chacha20-poly1305` 和 `none`，支持 TCP、UDP、TLS 及已有传输组合。Clash 的 `alterId` 和分享链接的 `aid` 会保留并校验；协议支持不涉及旧版应用数据迁移。
-
-VLESS 的 `xtls-rprx-vision` 使用 TLS 或 REALITY，不与 WebSocket、gRPC 等额外传输或多路复用叠加。节点声明 `network: "tcp"` 时禁止该节点转发 UDP，开启 UoT 或多路复用也不会覆盖此限制。
-
-VMess / VLESS 支持普通 UDP 与 XUDP 编码；VLESS 默认 XUDP，VMess 默认普通 UDP，`packet_encoding` 可设为 `"xudp"` 或空字符串。暂不支持 `packetaddr`。导入时检查 UUID、密钥、TLS 参数和内联证书，订阅更新保留有效节点并报告无效项；证书文件在启动时读取检查。
-
-节点支持 `connect_timeout`，例如 `250ms`、`1.5s`、`1m30s`，统一限制节点 DNS 解析和连接尝试的耗时。TCP 节点还支持 `disable_tcp_keep_alive`、`tcp_keep_alive` 和 `tcp_keep_alive_interval`，保活时间使用 1–32767 秒的整数时长；这些 TCP 设置不适用于 QUIC。
-
-gRPC / HTTP2 传输支持 `idle_timeout` 和 `ping_timeout`；gRPC 还支持 `permit_without_stream`。空闲达到设定时间后发送 PING，有接收活动时推迟检查，未在期限内收到确认则关闭失效连接。`idle_timeout` 缺省或为零时关闭检查，`ping_timeout` 缺省或为零时使用 15 秒。
+支持 Shadowsocks、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP。具体传输和字段见[协议与订阅](docs/protocols.md)。
 
 ### 系统代理与虚拟网卡
 
@@ -70,49 +56,14 @@ TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络�
 
 数据位于 `$XDG_CONFIG_HOME/AeroBoxForLinux/`，未设置时使用 `~/.config/AeroBoxForLinux/`。`state.json` 保存设置、订阅和规则信息，规则缓存也位于此目录。订阅及备份包含连接凭据，请妥善保管。
 
-当前数据要求 `schema_version: 2`，备份要求 `aerobox-linux-backup`、`version: 2`。旧版数据和 v1 备份直接拒绝，不做迁移或兼容；遇到旧数据时可在恢复界面备份原文件并重新初始化。
+当前数据要求 `schema_version: 2`，备份要求 `aerobox-linux-backup`、`version: 2`。仅接受字段完整的当前数据格式，不做旧版迁移；缺失字段或失效的节点选择会报错，不会自动补齐或改选节点。
 
 设置中的备份功能导出订阅、凭据、规则及设置；恢复时合并资源，重名资源生成副本，不覆盖现有资源。窗口尺寸和登录启动保留本机值。缺少规则数据或校验失败时不写入半份状态。恢复默认设置保留订阅、节点、规则、当前选择及窗口尺寸。
 
 ## 开发
 
-```sh
-sudo pacman -S --needed rust gcc make cmake pkgconf gtk4 libadwaita gtksourceview5 librsvg
-git clone https://github.com/imengying/AeroBoxForLinux.git
-cd AeroBoxForLinux
-cargo build --release --locked
-./target/release/AeroBox
-```
-
-Rust 工具链固定为 1.100.0，见 `rust-toolchain.toml`；依赖由 `Cargo.lock` 锁定。桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.5、GtkSourceView ≥ 5.6。Ubuntu 24.04 开发包为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config cmake`。
-
-```sh
-make test     # 格式、Clippy、单元与集成测试
-make wayland  # headless Wayland 界面测试
-make package  # 生成 target/packages/*.tar.gz
-make clean
-```
-
-普通集成测试使用临时目录、回环地址和临时端口，验证实际流量、节点与模式切换、回滚、下载、测速和启停，不依赖外部内核，不启动特权 TUN。慢规则下载测试同时持续查询状态，验证在线更新不会被首页轮询打断；传输测试检查分享链接缺省路径、Host 和免认证 SOCKS 的实际请求。
-
-额外测试按需显式运行，测试服务端不属于应用运行依赖：
-
-```sh
-# 隔离命名空间内验证 TUN TCP/UDP/DNS、断网与崩溃恢复、停止清理
-cargo test --test tun managed_tun_routes_traffic_and_restores_network_in_namespace -- --ignored
-# 与独立 sing-box 测试服务端验证协议及 WS/gRPC/HTTP/Vision/REALITY 传输互通
-AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
-# Naive HTTP/2、HTTP/3 的独立 Go 回显服务端
-(cd vendor/shoes/tests/fixtures/naive-peer && go build -o /tmp/aerobox-naive-peer .)
-AEROBOX_NAIVE_PEER=/tmp/aerobox-naive-peer cargo test --test naive_interop -- --ignored
-```
-
-TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使用独立 SOCKS 测试服务端，覆盖 IPv4/IPv6 数据报、UDP/TCP DNS 接管、切换网关、断网恢复与停止，以及强制结束进程后的恢复；所有路由更改均限制在测试命名空间内。
-
-界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放；截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
-
-`src/runtime.rs` 组装原生运行配置，`engine.rs` 管理连接生命周期和事务回滚，`protocol/` 严格转换节点参数，`model.rs` 管理数据与原子存储，`ui/` 为 GTK 界面。`vendor/` 包含静态编译的第三方实现，`tests/` 包含集成测试。GitHub Actions 在 amd64 / arm64 构建，推送 `v*` 标签后发布安装包。
+使用 Rust 1.100、GTK ≥ 4.10、libadwaita ≥ 1.5 和 GtkSourceView ≥ 5.6。执行 `make test` 检查代码，`make package` 生成安装包。依赖安装、文件布局和验证方式见[开发说明](docs/development.md)。
 
 ## 来源与许可
 
-项目源于 GUI-for-Cores / GUI.for.SingBox，遵循 [GPL-3.0](LICENSE)。界面参考 [FlClash](https://github.com/chen08209/FlClash)，订阅流程参考 [Hiddify](https://github.com/hiddify/hiddify-app)。协议引擎及其他第三方代码见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 `licenses/`；相关许可随安装包分发。
+项目源于 GUI-for-Cores / GUI.for.SingBox，遵循 [GPL-3.0](LICENSE)。界面参考 [Material 3](https://m3.material.io) 和 [FlClash](https://github.com/chen08209/FlClash)，订阅流程参考 [Hiddify](https://github.com/hiddify/hiddify-app)。第三方代码来源见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 `licenses/`；相关许可随安装包分发。

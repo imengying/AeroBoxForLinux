@@ -342,9 +342,20 @@ async fn omitted_servers_keeps_default_cache_and_retired_pools_freeze_on_shutdow
     assert!(configs.dns_groups[0].use_default_resolver);
     let name = configs.dns_groups[0].name.clone();
     let mut registry = build_dns_registry(configs.dns_groups).await.unwrap();
+    let cached_default = registry.default_resolver.clone().unwrap();
+    let group = registry.get_by_name(&name).unwrap();
+    let default = registry.get_or_create_default();
+    // Public handles have their own named-DNS scopes; the cached system
+    // resolver itself must remain shared and must not acquire a fake pool.
     assert!(Arc::ptr_eq(
-        &registry.get_by_name(&name).unwrap(),
-        &registry.get_or_create_default()
+        &cached_default,
+        registry.default_resolver.as_ref().unwrap()
+    ));
+    assert!(group.fake_dns_context().is_none());
+    assert!(default.fake_dns_context().is_none());
+    assert!(Arc::ptr_eq(
+        &group.named(&name).unwrap(),
+        &default.named(&name).unwrap()
     ));
 
     let initial = build_dns_registry(fake_groups(true)).await.unwrap();

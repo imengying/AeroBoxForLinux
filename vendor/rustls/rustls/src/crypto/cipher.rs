@@ -59,6 +59,34 @@ pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
     /// The length of `iv` is set by [`KeyBlockShape::fixed_iv_len`].
     fn decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn MessageDecrypter>;
 
+    /// Separate RFC 5246 MAC key length, preceding the encryption keys in the
+    /// key block. AEAD algorithms use zero and keep their original wire format.
+    fn mac_key_len(&self) -> usize {
+        0
+    }
+
+    /// Record factory for MAC-then-encrypt algorithms. The default preserves
+    /// the AEAD interface and rejects unexpected independent MAC material.
+    fn encrypter_with_mac(
+        &self,
+        key: AeadKey,
+        iv: &[u8],
+        extra: &[u8],
+        mac: &[u8],
+    ) -> Box<dyn MessageEncrypter> {
+        if !mac.is_empty() {
+            return <dyn MessageEncrypter>::invalid();
+        }
+        self.encrypter(key, iv, extra)
+    }
+    /// Record decrypter with an independent MAC key; AEAD rejects nonempty MAC keys.
+    fn decrypter_with_mac(&self, key: AeadKey, iv: &[u8], mac: &[u8]) -> Box<dyn MessageDecrypter> {
+        if !mac.is_empty() {
+            return <dyn MessageDecrypter>::invalid();
+        }
+        self.decrypter(key, iv)
+    }
+
     /// Return a `KeyBlockShape` that defines how large the `key_block` is and how it
     /// is split up prior to calling `encrypter()`, `decrypter()` and/or `extract_keys()`.
     fn key_block_shape(&self) -> KeyBlockShape;
@@ -107,7 +135,7 @@ impl std::error::Error for UnsupportedOperationError {}
 
 /// How a TLS1.2 `key_block` is partitioned.
 ///
-/// Note: ciphersuites with non-zero `mac_key_length` are  not currently supported.
+/// Separate MAC keys are described by [`Tls12AeadAlgorithm::mac_key_len`].
 pub struct KeyBlockShape {
     /// How long keys are.
     ///

@@ -77,10 +77,14 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
     ensure!(value["format"] == FORMAT, "不是 AeroBox Linux 备份文件");
     ensure!(value["version"] == VERSION, "不支持的备份版本");
     let backup: Backup = serde_json::from_value(value).context("备份字段不完整或类型错误")?;
+    ensure!(
+        backup.active_subscription == backup.settings.active_subscription,
+        "备份中的当前订阅不一致"
+    );
     ensure!(backup.subscriptions.len() <= 5000, "备份中的订阅过多");
     ensure!(backup.rulesets.len() <= 5000, "备份中的规则集过多");
     let mut files = HashMap::new();
-    let mut state = State {
+    let state = State {
         schema_version: 2,
         settings: backup.settings,
         subscriptions: backup.subscriptions,
@@ -100,8 +104,6 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
             .collect::<Result<Vec<_>>>()?,
     };
     // Validate the backup in its own namespace before changing any live state.
-    state.settings.active_subscription = backup.active_subscription;
-    state.normalize_selection();
     state.validate().context("备份内容未通过校验")?;
     for rule in &state.rulesets {
         if rule.binary {
@@ -123,6 +125,7 @@ pub fn merge(
     imported: State,
     files: HashMap<String, Vec<u8>>,
 ) -> Result<(State, HashMap<String, Vec<u8>>)> {
+    imported.validate().context("备份内容未通过校验")?;
     let mut next = current.clone();
     let mut ids = HashMap::new();
     let mut used_ids: std::collections::HashSet<_> = current
@@ -186,23 +189,17 @@ pub fn merge(
         }
         next.rulesets.push(rule);
     }
-    let active_subscription = imported.settings.active_subscription.clone();
     let mut settings = imported.settings;
-    settings.active_subscription = ids
-        .get(&active_subscription)
-        .cloned()
-        .or_else(|| {
-            next.subscriptions
-                .iter()
-                .find(|s| s.selected_node.is_some())
-                .map(|s| s.id.clone())
-        })
-        .unwrap_or_default();
+    if !settings.active_subscription.is_empty() {
+        settings.active_subscription = ids
+            .get(&settings.active_subscription)
+            .context("备份中的当前订阅不存在")?
+            .clone();
+    }
     // Window geometry describes this desktop; a backup must not resize it.
     settings.width = current.settings.width;
     settings.height = current.settings.height;
     next.settings = settings;
-    next.normalize_selection();
     next.validate()?;
     Ok((next, binary_files))
 }

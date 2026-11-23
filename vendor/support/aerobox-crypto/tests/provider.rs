@@ -17,14 +17,181 @@ use rustls::{
 #[derive(Debug)]
 struct FixtureTime;
 
+#[path = "provider/rsa8192.rs"]
+mod rsa8192;
+
+#[test]
+fn p521_go_signatures_verify_and_reject_modified_inputs() {
+    use rustls::pki_types::alg_id;
+    let crypto = provider();
+    let public = include_bytes!("fixtures/p521-public.sec1");
+    let message = b"AeroBox independent Go P-521 fixture";
+    for (algorithm, signature) in [
+        (
+            alg_id::ECDSA_SHA256,
+            include_bytes!("fixtures/p521-signature-sha256.der").as_slice(),
+        ),
+        (
+            alg_id::ECDSA_SHA384,
+            include_bytes!("fixtures/p521-signature-sha384.der").as_slice(),
+        ),
+        (
+            alg_id::ECDSA_SHA512,
+            include_bytes!("fixtures/p521-signature-sha512.der").as_slice(),
+        ),
+    ] {
+        let verifier = crypto
+            .signature_verification_algorithms
+            .all
+            .iter()
+            .find(|v| {
+                v.public_key_alg_id() == alg_id::ECDSA_P521 && v.signature_alg_id() == algorithm
+            })
+            .unwrap();
+        verifier
+            .verify_signature(public, message, signature)
+            .unwrap();
+        assert!(
+            verifier
+                .verify_signature(public, b"modified message", signature)
+                .is_err()
+        );
+        assert!(
+            verifier
+                .verify_signature(public, message, &signature[..signature.len() - 1])
+                .is_err()
+        );
+        let mut bad_key = *public;
+        bad_key[1] ^= 0x80;
+        assert!(
+            verifier
+                .verify_signature(&bad_key, message, signature)
+                .is_err()
+        );
+        let mut bad_signature = signature.to_vec();
+        *bad_signature.last_mut().unwrap() ^= 1;
+        assert!(
+            verifier
+                .verify_signature(public, message, &bad_signature)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn p521_certificate_chains_mutual_authentication_and_key_exchange_work_in_tls12_and_tls13() {
+    use rustls::{NamedGroup, pki_types::PrivateSec1KeyDer, server::WebPkiClientVerifier};
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for leaf in [
+            include_bytes!("fixtures/p521-cert-sha256.der").as_slice(),
+            include_bytes!("fixtures/p521-cert-sha384.der").as_slice(),
+            include_bytes!("fixtures/p521-cert.der").as_slice(),
+        ] {
+            for sec1 in [false, true] {
+                let mut crypto = provider();
+                crypto
+                    .kx_groups
+                    .retain(|group| group.name() == NamedGroup::secp521r1);
+                let crypto = Arc::new(crypto);
+                let mut roots = RootCertStore::empty();
+                roots
+                    .add(CertificateDer::from(
+                        include_bytes!("fixtures/p521-ca.der").to_vec(),
+                    ))
+                    .unwrap();
+                let roots = Arc::new(roots);
+                let key = || {
+                    if sec1 {
+                        PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(
+                            include_bytes!("fixtures/p521-key-sec1.der").to_vec(),
+                        ))
+                    } else {
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                            include_bytes!("fixtures/p521-key.der").to_vec(),
+                        ))
+                    }
+                };
+                let cert = || vec![CertificateDer::from(leaf.to_vec())];
+                let mut client = ClientConfig::builder_with_provider(crypto.clone())
+                    .with_protocol_versions(&[version])
+                    .unwrap()
+                    .with_root_certificates(roots.clone())
+                    .with_client_auth_cert(cert(), key())
+                    .unwrap();
+                client.time_provider = Arc::new(FixtureTime);
+                let verifier = WebPkiClientVerifier::builder_with_provider(roots, crypto.clone())
+                    .build()
+                    .unwrap();
+                let mut server = ServerConfig::builder_with_provider(crypto)
+                    .with_protocol_versions(&[version])
+                    .unwrap()
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(cert(), key())
+                    .unwrap();
+                server.time_provider = Arc::new(FixtureTime);
+                let mut client = Connection::Client(
+                    ClientConnection::new(
+                        Arc::new(client),
+                        ServerName::try_from("localhost").unwrap(),
+                    )
+                    .unwrap(),
+                );
+                let mut server =
+                    Connection::Server(ServerConnection::new(Arc::new(server)).unwrap());
+                handshake(&mut client, &mut server).unwrap();
+                assert!(client.peer_certificates().is_some());
+                assert!(server.peer_certificates().is_some());
+                assert_eq!(
+                    client.negotiated_key_exchange_group().unwrap().name(),
+                    NamedGroup::secp521r1
+                );
+                client.writer().write_all(b"P-521 mutual TLS").unwrap();
+                transfer(&mut client, &mut server).unwrap();
+                let mut output = [0; 16];
+                server.reader().read_exact(&mut output).unwrap();
+                assert_eq!(&output, b"P-521 mutual TLS");
+            }
+        }
+    }
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        include_bytes!("fixtures/p521-key.der").to_vec(),
+    ));
+    let certificate = CertificateDer::from(include_bytes!("fixtures/ecdsa-cert.der").to_vec());
+    assert!(
+        ServerConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], key)
+            .is_err()
+    );
+}
+
+#[test]
+fn p521_ecdh_matches_independent_go_vector() {
+    use p521::pkcs8::DecodePrivateKey;
+    let local = p521::SecretKey::from_pkcs8_der(include_bytes!("fixtures/p521-key.der")).unwrap();
+    let peer =
+        p521::PublicKey::from_sec1_bytes(include_bytes!("fixtures/p521-ecdh-peer.sec1")).unwrap();
+    let shared = p521::ecdh::diffie_hellman(local.to_nonzero_scalar(), peer.as_affine());
+    assert_eq!(
+        &shared.raw_secret_bytes()[..],
+        include_bytes!("fixtures/p521-ecdh-secret.bin")
+    );
+}
+
 #[test]
 fn mismatched_certificate_and_private_key_are_rejected() {
-    let cert=CertificateDer::from(include_bytes!("fixtures/ecdsa-cert.der").to_vec());
-    let key=PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(include_bytes!("fixtures/rsa-key.der").to_vec()));
-    let result=ServerConfig::builder_with_provider(Arc::new(provider()))
-        .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
-        .with_single_cert(vec![cert],key);
-    assert!(matches!(result,Err(rustls::Error::InconsistentKeys(_))));
+    let cert = CertificateDer::from(include_bytes!("fixtures/ecdsa-cert.der").to_vec());
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        include_bytes!("fixtures/rsa-key.der").to_vec(),
+    ));
+    let result = ServerConfig::builder_with_provider(Arc::new(provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key);
+    assert!(matches!(result, Err(rustls::Error::InconsistentKeys(_))));
 }
 
 impl TimeProvider for FixtureTime {

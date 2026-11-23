@@ -78,6 +78,8 @@ pub struct Tls13ClientSessionValue {
     max_early_data_size: u32,
     pub(crate) common: ClientSessionCommon,
     quic_params: PayloadU16,
+    pub(crate) alpn: Option<Vec<u8>>,
+    pub(crate) application_settings: Option<crate::client::alps::NegotiatedApplicationSettings>,
 }
 
 impl Tls13ClientSessionValue {
@@ -107,6 +109,8 @@ impl Tls13ClientSessionValue {
                 client_creds,
             ),
             quic_params: PayloadU16::new(Vec::new()),
+            alpn: None,
+            application_settings: None,
         }
     }
 
@@ -155,6 +159,8 @@ impl fmt::Debug for Tls13ClientSessionValue {
             max_early_data_size,
             common,
             quic_params,
+            alpn,
+            application_settings,
         } = self;
 
         f.debug_struct("Tls13ClientSessionValue")
@@ -163,6 +169,8 @@ impl fmt::Debug for Tls13ClientSessionValue {
             .field("max_early_data_size", max_early_data_size)
             .field("common", common)
             .field("quic_params", quic_params)
+            .field("alpn", alpn)
+            .field("application_settings", application_settings)
             .finish()
     }
 }

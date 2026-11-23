@@ -32,7 +32,7 @@ pub const UPDATE_INTERVAL_DEFAULT_MINUTES: u32 = 1440;
 pub const UPDATE_INTERVAL_MAX_MINUTES: u32 = 10_080;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub theme: String,
     /// Base UI font size in points. Row heights and paddings derive from it,
@@ -100,6 +100,10 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.theme.as_str(), "system" | "light" | "dark"),
+            "无效的主题"
+        );
         ensure!(self.mixed_port > 0, "本地代理端口须为非零端口");
         ensure!(
             (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
@@ -145,7 +149,7 @@ pub struct NodeSelection {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Subscription {
     pub id: String,
     pub name: String,
@@ -153,6 +157,9 @@ pub struct Subscription {
     pub auto_update: bool,
     pub update_interval_minutes: u32,
     pub nodes: Vec<Value>,
+    /// Reasons for nodes rejected by the latest successful import or refresh.
+    /// Values are redacted at the import boundary before they are persisted.
+    pub import_issues: Vec<String>,
     pub selected_node: Option<String>,
     pub updated: u64,
     pub upload: u64,
@@ -169,6 +176,7 @@ impl Default for Subscription {
             auto_update: true,
             update_interval_minutes: UPDATE_INTERVAL_DEFAULT_MINUTES,
             nodes: vec![],
+            import_issues: vec![],
             selected_node: None,
             updated: 0,
             upload: 0,
@@ -180,7 +188,7 @@ impl Default for Subscription {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct RuleSet {
     pub id: String,
     pub name: String,
@@ -405,9 +413,7 @@ pub fn is_connection_node(node: &Value) -> bool {
     node["server"]
         .as_str()
         .is_some_and(|s| !s.trim().is_empty())
-        && node["server_port"]
-            .as_u64()
-            .is_some_and(|p| (1..=65535).contains(&p))
+        && crate::protocol::server_port(node).is_some()
         && [
             "shadowsocks",
             "vmess",
@@ -565,8 +571,13 @@ mod tests {
         assert!(value.get("profiles").is_none());
         assert!(value["settings"].get("active_profile").is_none());
         for level in ["info", "debug", "warn", "error"] {
+            let settings = Settings {
+                log_level: level.into(),
+                system_proxy: false,
+                ..Settings::default()
+            };
             let saved: Settings =
-                serde_json::from_value(json!({"log_level":level,"system_proxy":false})).unwrap();
+                serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
             assert_eq!(saved.log_level, level);
             assert!(!saved.system_proxy);
         }

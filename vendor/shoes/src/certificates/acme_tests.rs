@@ -33,7 +33,7 @@ fn prebuilt_acme_tls_configs_track_clock_publication() {
     let providers = [
         client_tls(None).unwrap().time_provider.clone(),
         client_tls(Some(ca.path())).unwrap().time_provider.clone(),
-        challenge::tls_config("localhost", &[0; 32])
+        tls_config("localhost", &[0; 32])
             .unwrap()
             .time_provider
             .clone(),
@@ -742,15 +742,17 @@ impl rustls::client::danger::ServerCertVerifier for ChallengeVerifier {
 }
 
 async fn validate_tls_challenge(address: SocketAddr, authorization: &str) {
-    let digest = aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, authorization.as_bytes());
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        aerobox_crypto::provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(ChallengeVerifier(digest.as_ref().to_vec())))
-    .with_no_client_auth();
+    let digest = aerobox_primitives::digest::digest(
+        &aerobox_primitives::digest::SHA256,
+        authorization.as_bytes(),
+    );
+    let mut config =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aerobox_crypto::provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(ChallengeVerifier(digest.as_ref().to_vec())))
+            .with_no_client_auth();
     config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let mut stream = connector
@@ -1973,27 +1975,28 @@ async fn tls_challenge_selection_never_dispatches_or_changes_normal_certificate(
         };
         let source = Source::new("selection".into(), super::super::Spec::Acme(config)).unwrap();
         let authorization = "configured-token.account-thumbprint";
-        let digest =
-            aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, authorization.as_bytes());
+        let digest = aerobox_primitives::digest::digest(
+            &aerobox_primitives::digest::SHA256,
+            authorization.as_bytes(),
+        );
         source.challenges.write().push(challenge::Pending {
             domain: "proxy.test".into(),
             token: "configured-token".into(),
             authorization: authorization.into(),
             expires: Instant::now() + Duration::from_secs(60),
-            tls: Some(challenge::tls_config("proxy.test", digest.as_ref()).unwrap()),
+            tls: Some(tls_config("proxy.test", digest.as_ref()).unwrap()),
         });
         let count = Arc::new(AtomicUsize::new(0));
         let mut serving = serve_challenges(listener, source.clone(), true, count.clone());
         let normal = rcgen::generate_simple_self_signed(vec!["proxy.test".into()]).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(normal.cert.der().clone()).unwrap();
-        let mut normal_client = rustls::ClientConfig::builder_with_provider(Arc::new(
-            aerobox_crypto::provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        let mut normal_client =
+            rustls::ClientConfig::builder_with_provider(Arc::new(aerobox_crypto::provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         normal_client.alpn_protocols = vec![b"normal".to_vec()];
         let connector = tokio_rustls::TlsConnector::from(Arc::new(normal_client.clone()));
         assert!(
@@ -2034,14 +2037,15 @@ async fn tls_challenge_selection_never_dispatches_or_changes_normal_certificate(
             ("other.test", true, vec![b"acme-tls/1".to_vec()]),
             ("proxy.test", false, vec![b"acme-tls/1".to_vec()]),
         ] {
-            let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-                aerobox_crypto::provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(ChallengeVerifier(digest.as_ref().to_vec())))
-            .with_no_client_auth();
+            let mut config =
+                rustls::ClientConfig::builder_with_provider(Arc::new(aerobox_crypto::provider()))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(ChallengeVerifier(
+                        digest.as_ref().to_vec(),
+                    )))
+                    .with_no_client_auth();
             config.alpn_protocols = alpn;
             config.enable_sni = enable_sni;
             assert!(

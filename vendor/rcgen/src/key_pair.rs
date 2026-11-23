@@ -9,7 +9,7 @@ use pem::Pem;
 use pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use yasna::{DERWriter, DERWriterSeq};
 
-#[cfg(any(feature = "crypto", feature = "pem"))]
+#[cfg(any(feature = "pem", all(feature = "crypto", not(feature = "rustcrypto"))))]
 use crate::error::ExternalError;
 #[cfg(all(feature = "crypto", feature = "aws_lc_rs"))]
 use crate::ring_like::ecdsa_from_private_key_der;

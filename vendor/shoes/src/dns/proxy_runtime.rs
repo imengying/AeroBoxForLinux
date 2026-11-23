@@ -1,4 +1,4 @@
-//! Custom RuntimeProvider that routes TCP connections through proxy chains.
+//! RuntimeProvider for TCP, UDP and QUIC DNS over direct or proxy chains.
 
 use std::future::Future;
 use std::io;
@@ -21,8 +21,9 @@ static NEXT_TRANSPORT_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 const TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// RuntimeProvider that routes TCP connections through a proxy chain.
-/// For direct-only chains, UDP and QUIC use the configured bind_interface.
+/// Routes DNS transports through a compatible proxy chain.
+/// Direct UDP and QUIC use the configured bind_interface; proxy chains carry
+/// their datagrams through the same selected outbound.
 #[derive(Clone)]
 pub struct ProxyRuntimeProvider {
     id: u64,
@@ -30,7 +31,7 @@ pub struct ProxyRuntimeProvider {
     /// Resolver for proxy server hostnames (not the DNS queries themselves).
     /// Uses the explicit bootstrap route, or native DNS when none was configured.
     bootstrap_resolver: Arc<dyn Resolver>,
-    /// QUIC socket binder that selects from the same direct-only chain.
+    /// QUIC socket binder that selects from the same UDP-capable chain.
     quic_binder: ProxyQuicBinder,
     /// Timeout for establishing connections to DNS upstreams.
     connect_timeout: Duration,
@@ -309,6 +310,7 @@ pub enum DnsUdpSocket {
         writable: parking_lot::Mutex<super::datagram::Writable>,
     },
 }
+#[cfg(test)]
 impl DnsUdpSocket {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {

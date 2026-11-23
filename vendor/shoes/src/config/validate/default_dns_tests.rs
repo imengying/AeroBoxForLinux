@@ -87,8 +87,17 @@ async fn default_dns_inline_fake_pool_is_shared_and_system_never_inherits_itself
             .unwrap();
         let first = registry.get_for_server(dns(&result.configs[0]));
         let second = registry.get_for_server(dns(&result.configs[1]));
+        // Each listener has a named-resolver scope, while the FakeIP context
+        // and mappings must belong to their shared DNS group.
+        let first = first.fake_dns_context().unwrap();
+        let second = second.fake_dns_context().unwrap();
         assert!(std::sync::Arc::ptr_eq(&first, &second));
-        assert!(first.fake_dns_context().is_some());
+        let address = first.allocate("shared.test", false).unwrap();
+        assert_eq!(second.allocate("shared.test", false).unwrap(), address);
+        assert_eq!(
+            second.restore(address).unwrap().as_deref(),
+            Some("shared.test")
+        );
         assert!(
             registry
                 .get_or_create_default()

@@ -841,6 +841,26 @@ impl CarrierDialer for PrefixDialer {
             .connect_quic(&resolver, &self.target)
             .await
     }
+    async fn open_quic_early(
+        &self,
+    ) -> std::io::Result<crate::tcp::carrier_dialer::PendingQuicCarrier> {
+        if self.route.last_proxy().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "native QUIC requires a first-hop QUIC carrier",
+            ));
+        }
+        let resolver = self
+            .domain_resolver
+            .as_ref()
+            .map(|config| crate::dns::routing::endpoint_resolver(&self.route.resolver, config))
+            .transpose()?
+            .unwrap_or_else(|| self.route.resolver.clone());
+        self.route
+            .socket()
+            .connect_quic_early(&resolver, &self.target)
+            .await
+    }
 }
 
 /// A group of proxy chains for round-robin selection.

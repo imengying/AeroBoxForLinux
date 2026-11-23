@@ -212,14 +212,15 @@ impl DeframerVecBuffer {
 
     /// Resize the internal `buf` if necessary for reading more bytes.
     fn prepare_read(&mut self, is_joining_hs: bool) -> Result<(), &'static str> {
-        /// TLS allows for handshake messages of up to 16MB.  We
-        /// restrict that to 64KB to limit potential for denial-of-
-        /// service.
-        const MAX_HANDSHAKE_SIZE: u32 = 0xffff;
+        // TLS allows handshake messages of up to 16MB. Keep a small, fixed
+        // bound for a maximum supported message and its enclosing record.
+        // Include the EE vector prefix, handshake header, and one containing
+        // TLS record. The deframer separately enforces each message's limit.
+        const MAX_HANDSHAKE_SIZE: usize = 0xffff + 2 + 4 + MAX_WIRE_SIZE;
 
         const READ_SIZE: usize = 4096;
 
-        // We allow a maximum of 64k of buffered data for handshake messages only. Enforce this
+        // We allow a maximum handshake plus one record of buffered data. Enforce this
         // by varying the maximum allowed buffer size here based on whether a prefix of a
         // handshake payload is currently being buffered. Given that the first read of such a
         // payload will only ever be 4k bytes, the next time we come around here we allow a
@@ -227,7 +228,7 @@ impl DeframerVecBuffer {
         // the same flight have been consumed, `pop()` will call `discard()` to reset `used`.
         // At this point, the buffer resizing logic below should reduce the buffer size.
         let allow_max = match is_joining_hs {
-            true => MAX_HANDSHAKE_SIZE as usize,
+            true => MAX_HANDSHAKE_SIZE,
             false => MAX_WIRE_SIZE,
         };
 

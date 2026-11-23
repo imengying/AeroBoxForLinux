@@ -73,6 +73,7 @@ pub fn parse_dns_server(value: &str) -> Result<DnsServerSpec> {
             )
         }
     };
+    ensure!(port > 0, "DNS 端口须在 1 到 65535 之间");
     let server = server.trim_matches(['[', ']']);
     ensure!(
         server.parse::<IpAddr>().is_ok()

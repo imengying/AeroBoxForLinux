@@ -293,12 +293,14 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
         "anytls",
         "hysteria2",
         "tuic",
+        "tuic-quic",
+        "tuic-uot",
         "socks",
         "http",
     ] {
         let case = dir.path().join(kind);
         fs::create_dir(&case).unwrap();
-        let quic = matches!(kind, "hysteria2" | "tuic");
+        let quic = matches!(kind, "hysteria2" | "tuic" | "tuic-quic" | "tuic-uot");
         let port = if quic {
             UdpSocket::bind("127.0.0.1:0")
                 .unwrap()
@@ -318,6 +320,7 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
             "ss2022" => "shadowsocks",
             "vmess-xudp" => "vmess",
             "vless-raw" => "vless",
+            "tuic-quic" | "tuic-uot" => "tuic",
             _ => kind,
         };
         let mut inbound = json!({"type":protocol,"tag":"tested-protocol","listen":"127.0.0.1","listen_port":port});
@@ -355,11 +358,16 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
                 inbound["users"] = json!([{"name":"fixture","password":"interop-password"}]);
                 node["password"] = "interop-password".into();
             }
-            "tuic" => {
+            "tuic" | "tuic-quic" | "tuic-uot" => {
                 inbound["users"] =
                     json!([{"name":"fixture","uuid":UUID,"password":"interop-password"}]);
                 node["uuid"] = UUID.into();
                 node["password"] = "interop-password".into();
+                if kind == "tuic-quic" {
+                    node["udp_relay_mode"] = "quic".into();
+                } else if kind == "tuic-uot" {
+                    node["udp_over_stream"] = true.into();
+                }
             }
             "socks" | "http" => {
                 inbound["users"] = json!([{"username":"fixture","password":"interop-password"}]);
@@ -368,7 +376,7 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
             }
             _ => unreachable!(),
         }
-        if matches!(kind, "trojan" | "anytls" | "hysteria2" | "tuic") {
+        if matches!(protocol, "trojan" | "anytls" | "hysteria2" | "tuic") {
             inbound["tls"] = json!({"enabled":true,"server_name":"localhost","certificate_path":certificate_path,"key_path":key_path});
             node["tls"] =
                 json!({"enabled":true,"server_name":"localhost","certificate":certificate});
@@ -473,13 +481,13 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
     for kind in ["vmess", "vless", "trojan"] {
         for (name, transport) in &transports {
             if kind != "trojan" || *name != "http1" {
-                cases.push((kind, *name, Some(transport.clone())));
+                cases.push((kind, *name, Some(transport.clone()), None));
             }
         }
     }
-    cases.push(("vless", "vision", None));
-    cases.push(("vless", "reality", None));
-    cases.push(("vless", "reality-vision", None));
+    cases.push(("vless", "vision", None, None));
+    cases.push(("vless", "reality", None, None));
+    cases.push(("vless", "reality-vision", None, None));
     for name in [
         "smux",
         "smux-tcp-only",
@@ -488,7 +496,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
         "h2mux",
         "h2mux-tcp-only",
     ] {
-        cases.push(("trojan", name, None));
+        cases.push(("trojan", name, None, None));
     }
     let keys = Command::new(&executable)
         .args(["generate", "reality-keypair"])
@@ -508,8 +516,30 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
     };
     let private_key = key("PrivateKey:");
     let public_key = key("PublicKey:");
-    for (kind, transport_name, transport) in cases {
-        let name = format!("{kind}-{transport_name}");
+    for fingerprint in ["chrome", "firefox"] {
+        for (kind, transport_name, transport) in [
+            ("vless", "ws", Some(transports[0].1.clone())),
+            ("vless", "ws-early-data", Some(transports[1].1.clone())),
+            ("vless", "grpc", Some(transports[2].1.clone())),
+            ("vless", "httpupgrade", Some(transports[3].1.clone())),
+            ("vless", "http2", Some(transports[4].1.clone())),
+            ("vless", "vision", None),
+            ("vless", "reality-vision", None),
+            ("vless", "reality-vision-alpn", None),
+            ("vless", "reality-vision-empty-id", None),
+            ("anytls", "tls", None),
+            ("http", "tls", None),
+        ] {
+            cases.push((kind, transport_name, transport, Some(fingerprint)));
+        }
+    }
+    for (kind, transport_name, transport, fingerprint) in cases {
+        let name = format!(
+            "{kind}-{transport_name}{}",
+            fingerprint
+                .map(|name| format!("-{name}"))
+                .unwrap_or_default()
+        );
         let case = dir.path().join(&name);
         fs::create_dir(&case).unwrap();
         let port = support::free_port();
@@ -522,7 +552,11 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
         let mut inbound =
             json!({"type":kind,"tag":"tested-protocol","listen":"127.0.0.1","listen_port":port});
         let mut node = json!({"type":kind,"tag":&name,"server":"127.0.0.1","server_port":port});
-        if kind == "trojan" {
+        if kind == "http" {
+            inbound["users"] = json!([{"username":"fixture","password":"transport-password"}]);
+            node["username"] = "fixture".into();
+            node["password"] = "transport-password".into();
+        } else if matches!(kind, "trojan" | "anytls") {
             inbound["users"] = json!([{"name":"fixture","password":"transport-password"}]);
             node["password"] = "transport-password".into();
         } else {
@@ -549,7 +583,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             if transport_name.ends_with("-tcp-only") {
                 node["network"] = "tcp".into();
             }
-        } else if transport_name != "reality" {
+        } else if kind == "vless" && transport_name != "reality" {
             inbound["users"][0]["flow"] = "xtls-rprx-vision".into();
             node["flow"] = "xtls-rprx-vision".into();
         }
@@ -578,6 +612,26 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
                 "enabled":true,"server_name":"localhost",
                 "reality":{"enabled":true,"public_key":public_key,"short_id":"0123456789abcdef"}
             });
+            if transport_name.ends_with("-alpn") {
+                // Exercise an explicit ALPN/cipher policy against a template
+                // that permits only HTTP/1.1 and requires TLS 1.3.
+                config["inbounds"][2]["tls"]["alpn"] = json!(["http/1.1"]);
+                node["tls"]["alpn"] = json!(["http/1.1"]);
+                if fingerprint != Some("chrome") {
+                    node["tls"]["cipher_suites"] = json!(["TLS_AES_128_GCM_SHA256"]);
+                    node["tls"]["min_version"] = "1.3".into();
+                }
+            }
+            if transport_name.ends_with("-empty-id") {
+                config["inbounds"][0]["tls"]["reality"]["short_id"] = json!([""]);
+                node["tls"]["reality"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("short_id");
+            }
+        }
+        if let Some(fingerprint) = fingerprint {
+            node["tls"]["utls"] = json!({"enabled":true,"fingerprint":fingerprint});
         }
         // Cross flow-control and framing boundaries instead of testing only
         // whether a successful HTTP status can fit in the first packet.
@@ -652,7 +706,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             upload,
             "{name} upload/echo changed the payload"
         );
-        let udp_result = if transport_name.ends_with("-tcp-only") {
+        let udp_result = if kind == "http" || transport_name.ends_with("-tcp-only") {
             udp_policy::assert_udp_blocked(app.service.snapshot().settings.mixed_port)
         } else {
             support::udp_roundtrip(app.service.snapshot().settings.mixed_port)

@@ -42,6 +42,8 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
         "vmess-xudp",
         "vless",
         "vless-raw",
+        "vless-encryption",
+        "vless-encryption-vision",
         "trojan",
         "anytls",
         "hysteria2",
@@ -84,7 +86,12 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
                 node["password"] = password.into();
                 json!({"type":"shadowsocks","cipher":cipher,"password":password})
             }
-            "vmess" | "vless" | "vmess-xudp" | "vless-raw" => {
+            "vmess"
+            | "vless"
+            | "vmess-xudp"
+            | "vless-raw"
+            | "vless-encryption"
+            | "vless-encryption-vision" => {
                 node["uuid"] = UUID.into();
                 let protocol_name = if kind.starts_with("vmess") {
                     "vmess"
@@ -101,6 +108,15 @@ fn android_protocols_carry_tcp_and_udp_payloads_and_release_listeners() {
                     node["packet_encoding"] = "xudp".into();
                 } else if kind == "vless-raw" {
                     node["packet_encoding"] = "".into();
+                }
+                if kind.starts_with("vless-encryption") {
+                    // X25519 public key derived from the test private key [1; 32].
+                    node["encryption"] = "mlkem768x25519plus.native.0rtt.pOCSkrZRwni5dyxWn1-puxPZBrRqtoyd-dwrRAn4ogk".into();
+                    protocol["decryption"] = "mlkem768x25519plus.native.600s.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".into();
+                    if kind.ends_with("vision") {
+                        node["flow"] = "xtls-rprx-vision".into();
+                        protocol["vision"] = true.into();
+                    }
                 }
                 protocol
             }

@@ -137,13 +137,36 @@ impl Drop for AnyTlsClientSession {
     }
 }
 
+pub(crate) fn validate_client_metadata(metadata: &str) -> io::Result<()> {
+    // Settings are newline-separated key=value pairs in one u16-sized frame.
+    const FIXED_LENGTH: usize = b"v=2\nclient=\npadding-md5=".len() + 32;
+    if metadata.contains(['\n', '\r']) || metadata.len() > u16::MAX as usize - FIXED_LENGTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AnyTLS client_metadata must fit a settings frame and contain no line breaks",
+        ));
+    }
+    Ok(())
+}
+
 impl AnyTlsClientSession {
+    #[cfg(test)]
     pub async fn new(
         transport: Box<dyn AsyncStream>,
         password: &str,
         padding: SharedPadding,
     ) -> io::Result<Arc<Self>> {
-        let (state, tasks) = ClientSessionState::new(transport, password, padding).await?;
+        Self::with_metadata(transport, password, padding, "").await
+    }
+
+    pub(crate) async fn with_metadata(
+        transport: Box<dyn AsyncStream>,
+        password: &str,
+        padding: SharedPadding,
+        client_metadata: &str,
+    ) -> io::Result<Arc<Self>> {
+        let (state, tasks) =
+            ClientSessionState::new(transport, password, padding, client_metadata).await?;
         Ok(Arc::new(Self { state, tasks }))
     }
 
@@ -204,7 +227,9 @@ impl ClientSessionState {
         mut transport: Box<dyn AsyncStream>,
         password: &str,
         padding: SharedPadding,
+        client_metadata: &str,
     ) -> io::Result<(Arc<Self>, Vec<tokio::task::AbortHandle>)> {
+        validate_client_metadata(client_metadata)?;
         let hash_result = digest(&SHA256, password.as_bytes());
         let mut password_hash = [0u8; 32];
         password_hash.copy_from_slice(hash_result.as_ref());
@@ -218,7 +243,7 @@ impl ClientSessionState {
 
         // Pre-encode Settings frame into initial buffer
         // This will be sent together with first SYN + destination as one TLS record
-        let initial_buffer = Self::create_initial_buffer(&initial_padding);
+        let initial_buffer = Self::create_initial_buffer(&initial_padding, client_metadata)?;
 
         let session = Arc::new(Self {
             streams: Mutex::new(HashMap::new()),
@@ -246,10 +271,13 @@ impl ClientSessionState {
     }
 
     /// Create initial buffer with Settings frame pre-encoded
-    fn create_initial_buffer(padding: &PaddingFactory) -> BytesMut {
+    fn create_initial_buffer(
+        padding: &PaddingFactory,
+        client_metadata: &str,
+    ) -> io::Result<BytesMut> {
         let mut settings = StringMap::new();
         settings.insert("v", "2");
-        settings.insert("client", "shoes-anytls/1.0");
+        settings.insert("client", client_metadata);
         settings.insert("padding-md5", padding.md5());
 
         let settings_frame =
@@ -257,10 +285,8 @@ impl ClientSessionState {
 
         // Allocate buffer with room for Settings + SYN + typical destination
         let mut buffer = BytesMut::with_capacity(256);
-        settings_frame
-            .encode_into(&mut buffer)
-            .expect("fixed settings fit a control frame");
-        buffer
+        settings_frame.encode_into(&mut buffer)?;
+        Ok(buffer)
     }
 
     /// Send authentication frame
@@ -1173,9 +1199,14 @@ mod tests {
         assert!(frames > 1);
 
         let (transport, mut peer) = tokio::io::duplex(1024);
-        let session = AnyTlsClientSession::new(Box::new(transport), "test", state.padding.clone())
-            .await
-            .unwrap();
+        let session = AnyTlsClientSession::with_metadata(
+            Box::new(transport),
+            "test",
+            state.padding.clone(),
+            "AeroBox/test=2",
+        )
+        .await
+        .unwrap();
         let mut auth = [0; 43];
         peer.read_exact(&mut auth).await.unwrap();
         assert_eq!(&auth[32..34], &[0, 9]);
@@ -1187,6 +1218,10 @@ mod tests {
             .clone()
             .unwrap();
         let settings = FrameCodec::decode(&mut settings).unwrap().unwrap();
+        assert_eq!(
+            StringMap::from_bytes(&settings.data).get("client").unwrap(),
+            "AeroBox/test=2"
+        );
         assert_eq!(
             StringMap::from_bytes(&settings.data)
                 .get("padding-md5")

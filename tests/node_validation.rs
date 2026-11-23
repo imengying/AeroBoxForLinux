@@ -82,7 +82,7 @@ fn invalid_nodes() -> Vec<(Value, &'static str)> {
     invalid["server_ports"] = json!(["100:90"]);
     cases.push((invalid, "hopping ports"));
     let mut invalid = node("tuic");
-    invalid["heartbeat"] = "0s".into();
+    invalid["heartbeat"] = "31s".into();
     cases.push((invalid, "heartbeat"));
     let mut invalid = node("naive");
     invalid["insecure_concurrency"] = 0.into();

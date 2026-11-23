@@ -52,7 +52,9 @@ impl KeyPair {
     /// Read a PKCS#8 PEM private key.
     #[cfg(feature = "pem")]
     pub fn from_pem(pem: &str) -> Result<Self, Error> {
-        let pem = pem::parse(pem).map_err(|e| Error::PemError(e.to_string()))?;
+        use crate::error::ExternalError;
+
+        let pem = pem::parse(pem)._err()?;
         Self::try_from(pem.contents())
     }
     /// Read a PKCS#8 key using an explicitly requested signing algorithm.

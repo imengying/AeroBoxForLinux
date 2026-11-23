@@ -6,7 +6,7 @@ use super::buffers::{BufferProgress, Coalescer, Delocator, Locator};
 use crate::error::InvalidMessage;
 use crate::msgs::codec::{Codec, u24};
 use crate::msgs::message::InboundPlainMessage;
-use crate::{ContentType, ProtocolVersion};
+use crate::{ContentType, HandshakeType, ProtocolVersion};
 
 #[derive(Debug)]
 pub(crate) struct HandshakeDeframer {
@@ -170,11 +170,20 @@ impl HandshakeDeframer {
         }
 
         // check resulting spans pass our imposed length limit
-        match self
-            .spans
-            .iter()
-            .any(|span| span.size.unwrap_or_default() > MAX_HANDSHAKE_SIZE)
-        {
+        match self.spans.iter().any(|span| {
+            // EncryptedExtensions has a u16-sized extension vector and
+            // the two-byte vector prefix. ALPS can use that full range.
+            let limit = if containing_buffer
+                .get(span.bounds.start)
+                .copied()
+                == Some(u8::from(HandshakeType::EncryptedExtensions))
+            {
+                MAX_HANDSHAKE_SIZE + 2
+            } else {
+                MAX_HANDSHAKE_SIZE
+            };
+            span.size.unwrap_or_default() > limit
+        }) {
             true => Err(InvalidMessage::HandshakePayloadTooLarge),
             false => Ok(()),
         }

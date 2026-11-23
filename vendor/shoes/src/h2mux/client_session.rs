@@ -32,7 +32,7 @@ impl AsyncRead for ResponseStream {
             self.status.push(byte[0]);
             match self.status[0] {
                 0=>{self.ready=true;self.status.clear();},
-                1=>{if let Some((length,used))=decode_error_length(&self.status[1..])? {if self.status.len()==1+used+length {return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionRefused,format!("mux upstream: {}",String::from_utf8_lossy(&self.status[1+used..])))));}}},
+                1=>{if let Some((length,used))=decode_error_length(&self.status[1..])? && self.status.len()==1+used+length {return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionRefused,format!("mux upstream: {}",String::from_utf8_lossy(&self.status[1+used..])))));}},
                 _=>return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData,"invalid mux response status"))),
             }
         }

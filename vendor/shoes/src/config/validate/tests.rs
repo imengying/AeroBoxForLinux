@@ -285,7 +285,12 @@ fn sudoku_mask_preserves_sni_and_existing_immediate_child_constraints() {
     let mut reality: ClientProxyConfig = serde_json::from_value(mask(json!({"type":"reality",
         "public_key":"CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","protocol":{"type":"socks"}})))
     .unwrap();
-    validate_client_proxy_config(&mut reality, ClientPems::Prepared(&HashMap::new()), Some("origin.example")).unwrap();
+    validate_client_proxy_config(
+        &mut reality,
+        ClientPems::Prepared(&HashMap::new()),
+        Some("origin.example"),
+    )
+    .unwrap();
     let resolver = std::sync::Arc::new(crate::resolver::NativeResolver::new());
     crate::tcp::tcp_client_handler_factory::create_tcp_client_handler(
         crate::config::test_support::Inline::inline(reality),
@@ -555,7 +560,12 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         "decryption": format!("mlkem768x25519plus.native.600s.{KEY}"), "vision": true,
     });
     let mut client_config = serde_json::from_value(client.clone()).unwrap();
-    validate_client_proxy_config(&mut client_config, ClientPems::Prepared(&HashMap::new()), None).unwrap();
+    validate_client_proxy_config(
+        &mut client_config,
+        ClientPems::Prepared(&HashMap::new()),
+        None,
+    )
+    .unwrap();
     for outer in ["TLS", "REALITY"] {
         let error = validate_client_vision_protocol(true, &client_config, outer).unwrap_err();
         assert!(
@@ -594,7 +604,9 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         let mut value_config = client.clone();
         value_config[key] = value;
         let mut config = serde_json::from_value(value_config).unwrap();
-        let error = validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None).unwrap_err();
+        let error =
+            validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None)
+                .unwrap_err();
         assert!(!error.to_string().contains("do-not-log"));
         assert!(!format!("{config:?}").contains("do-not-log"));
     }
@@ -614,7 +626,8 @@ fn native_vless_configuration_rejects_ambiguous_vision_and_secrets() {
         config["encryption"] = json!(disabled);
         config["vision"] = json!(false);
         let mut config = serde_json::from_value(config).unwrap();
-        validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None).unwrap();
+        validate_client_proxy_config(&mut config, ClientPems::Prepared(&HashMap::new()), None)
+            .unwrap();
         validate_client_vision_protocol(true, &config, "TLS").unwrap();
         let mut config = server.clone();
         config["decryption"] = json!(disabled);
@@ -705,9 +718,15 @@ fn shadowsocks_identity_keys_validate_programmatic_clients_and_reject_servers() 
             let mut client = ClientProxyConfig::Shadowsocks {
                 config: config.clone(),
                 udp_enabled: true,
+                plugin: None,
             };
             assert_eq!(
-                validate_client_proxy_config(&mut client, ClientPems::Prepared(&HashMap::new()), None).is_ok(),
+                validate_client_proxy_config(
+                    &mut client,
+                    ClientPems::Prepared(&HashMap::new()),
+                    None
+                )
+                .is_ok(),
                 user_len == required
                     && identity_len == required
                     && matches!(cipher.name(), "aes-128-gcm" | "aes-256-gcm")
@@ -868,8 +887,12 @@ fn tls_sni_distinguishes_inheritance_disable_and_override() {
         };
         tls.sni_hostname = sni;
         assert_eq!(
-            validate_client_proxy_config(&mut protocol, ClientPems::Prepared(&HashMap::new()), Some("invalid name"))
-                .is_ok(),
+            validate_client_proxy_config(
+                &mut protocol,
+                ClientPems::Prepared(&HashMap::new()),
+                Some("invalid name")
+            )
+            .is_ok(),
             valid,
         );
     }
@@ -1944,57 +1967,54 @@ fn test_dns_tuning_example_validates() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn test_dns_udp_with_proxy_chain_rejected() {
-    use crate::config::types::{ClientConfigGroup, ClientProxyConfig};
+#[test]
+fn datagram_dns_proxy_chains_require_udp_capability() {
+    use serde_json::json;
 
-    // Create a non-direct (socks5) chain - should be rejected for UDP.
-    let socks_config = ClientConfig {
-        protocol: ClientProxyConfig::Socks {
-            username: None,
-            password: None,
-            udp_enabled: true,
-        },
-        ..Default::default()
-    };
-
-    let configs = vec![
-        Config::ClientConfigGroup(ClientConfigGroup {
-            group_type: Default::default(),
-            default: None,
-            client_group: "test-proxy".to_string(),
-            client_chains: OneOrSome::One(ConfigSelection::Config(socks_config).into()),
-        }),
-        Config::DnsConfigGroup(DnsConfigGroup {
-            routing: None,
-            hosts: Default::default(),
-            fake_ip: None,
-            dns_group: "test-dns".to_string(),
-            dns_servers: NoneOrSome::One(DnsServerSpec::WithOptions {
-                url: "udp://8.8.8.8".to_string(),
-                client_chain: NoneOrSome::One(ClientChain {
-                    hops: OneOrSome::One(ClientChainHop::Single(ConfigSelection::GroupName(
-                        "test-proxy".to_string(),
-                    ))),
-                }),
-                bootstrap_url: None,
-                server_name: None,
-                ip_strategy: IpStrategy::default(),
-                timeout_secs: 10,
-                connect_timeout_secs: 5,
-                attempts: 1,
-                native_cache_secs: None,
-            }),
-        }),
-    ];
-
-    let result = validate_configs_test(configs).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("UDP DNS only supports direct client_chain"),
-        "Expected UDP DNS client_chain error, got: {err}"
-    );
+    for url in [
+        "udp://192.0.2.53",
+        "quic://192.0.2.53",
+        "h3://192.0.2.53/dns-query",
+    ] {
+        for udp_enabled in [true, false] {
+            let configs = serde_json::from_value(json!([
+                {"client_group": "test-proxy", "client_chain": {
+                    "address": "127.0.0.1:1080",
+                    "protocol": {"type": "socks", "udp_enabled": udp_enabled}
+                }},
+                {"dns_group": "test-dns", "dns_servers": {
+                    "url": url, "client_chain": "test-proxy"
+                }}
+            ]))
+            .unwrap();
+            let result = create_server_configs(configs);
+            if udp_enabled {
+                let validated = result.unwrap();
+                let spec = &validated.dns_groups[0].specs[0];
+                assert_eq!(spec.url, url);
+                assert_eq!(spec.client_chains.len(), 1);
+                let clients = spec.client_chains[0]
+                    .hops
+                    .iter()
+                    .flat_map(composition::clients)
+                    .collect::<Vec<_>>();
+                assert_eq!(clients.len(), 1);
+                assert!(matches!(
+                    clients[0].protocol,
+                    ResolvedClientProxyConfig::Socks {
+                        udp_enabled: true,
+                        ..
+                    }
+                ));
+            } else {
+                let error = result.err().expect("UDP-disabled chain must fail");
+                assert!(
+                    error.to_string().contains("UDP-capable client chain"),
+                    "{url}: {error}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -2033,59 +2053,6 @@ async fn test_dns_udp_with_direct_chain_allowed() {
     ];
 
     assert!(validate_configs_test(configs).await.is_ok());
-}
-
-#[tokio::test]
-async fn test_dns_h3_with_proxy_chain_rejected() {
-    use crate::config::types::{ClientConfigGroup, ClientProxyConfig};
-
-    // Create a non-direct (socks5) chain - should be rejected for H3.
-    let socks_config = ClientConfig {
-        protocol: ClientProxyConfig::Socks {
-            username: None,
-            password: None,
-            udp_enabled: true,
-        },
-        ..Default::default()
-    };
-
-    let configs = vec![
-        Config::ClientConfigGroup(ClientConfigGroup {
-            group_type: Default::default(),
-            default: None,
-            client_group: "test-proxy".to_string(),
-            client_chains: OneOrSome::One(ConfigSelection::Config(socks_config).into()),
-        }),
-        Config::DnsConfigGroup(DnsConfigGroup {
-            routing: None,
-            hosts: Default::default(),
-            fake_ip: None,
-            dns_group: "test-dns".to_string(),
-            dns_servers: NoneOrSome::One(DnsServerSpec::WithOptions {
-                url: "h3://1.1.1.1/dns-query".to_string(),
-                client_chain: NoneOrSome::One(ClientChain {
-                    hops: OneOrSome::One(ClientChainHop::Single(ConfigSelection::GroupName(
-                        "test-proxy".to_string(),
-                    ))),
-                }),
-                bootstrap_url: None,
-                server_name: None,
-                ip_strategy: IpStrategy::default(),
-                timeout_secs: 10,
-                connect_timeout_secs: 5,
-                attempts: 1,
-                native_cache_secs: None,
-            }),
-        }),
-    ];
-
-    let result = validate_configs_test(configs).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("H3 DNS only supports direct client_chain"),
-        "Expected H3 DNS client_chain error, got: {err}"
-    );
 }
 
 #[tokio::test]

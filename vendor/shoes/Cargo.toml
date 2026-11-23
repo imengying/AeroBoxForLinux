@@ -8,7 +8,6 @@ autotests = false
 autobenches = false
 license = "MIT"
 description = "A multi-protocol proxy server."
-homepage = "https://github.com/cfal/shoes/"
 repository = "https://github.com/cfal/shoes/"
 readme = "README.md"
 keywords = ["proxy", "proxy-server", "shadowsocks", "v2ray", "vmess"]
@@ -176,7 +175,7 @@ rust-argon2 = "*"
 rustc-hash = "*"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "meta", "perf"] }
-rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12", "brotli"] }
 serde = { version = "*", features = ["derive", "std"] }
 serde_json = { version = "*", features = ["preserve_order"] }
 serde_yaml = "*"

@@ -9,6 +9,8 @@ use crate::crypto::{TlsConnection, tls_error};
 
 #[derive(Clone)]
 pub struct RealityClientConfig {
+    pub client_fingerprint: Option<crate::config::tls::TlsClientFingerprint>,
+    pub alpn_protocols: Option<Vec<String>>,
     pub mldsa65_verify: Option<super::reality_mldsa::VerifyKey>,
     pub public_key: [u8; 32],
     pub short_id: [u8; 8],
@@ -18,7 +20,20 @@ pub struct RealityClientConfig {
 
 impl RealityClientConfig {
     pub fn create_connection(self) -> io::Result<TlsConnection> {
-        let crypto = provider(&self.cipher_suites);
+        let mut crypto =
+            if self.client_fingerprint == Some(crate::config::tls::TlsClientFingerprint::Chrome) {
+                crate::rustls_config_util::browser::validate_reality_suites(&self.cipher_suites)?;
+                crate::rustls_config_util::browser::provider()
+            } else {
+                provider(&self.cipher_suites)
+            };
+        if self.client_fingerprint.is_some() {
+            // sing-box removes ML-KEM from its REALITY browser handshake:
+            // authentication and the target TLS exchange must use X25519.
+            crypto
+                .kx_groups
+                .retain(|group| group.name() != rustls::NamedGroup::X25519MLKEM768);
+        }
         let schemes = crypto.signature_verification_algorithms.supported_schemes();
         self.create_connection_with_options(crypto, schemes, Arc::new(rustls::NoKeyLog {}))
     }
@@ -39,9 +54,25 @@ impl RealityClientConfig {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
-        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        tls.cert_decompressors.clear();
+        tls.alpn_protocols = self
+            .alpn_protocols
+            .unwrap_or_else(|| vec!["h2".into(), "http/1.1".into()])
+            .into_iter()
+            .map(String::into_bytes)
+            .collect();
+        if self.client_fingerprint != Some(crate::config::tls::TlsClientFingerprint::Chrome) {
+            tls.cert_decompressors.clear();
+        }
         tls.key_log = key_log;
+        match self.client_fingerprint {
+            Some(crate::config::tls::TlsClientFingerprint::Chrome) => {
+                crate::rustls_config_util::browser::configure(&mut tls, true)?;
+            }
+            Some(crate::config::tls::TlsClientFingerprint::Firefox) => {
+                tls.client_hello_profile = Some(rustls::client::ClientHelloProfile::Firefox);
+            }
+            None => {}
+        }
         let connection =
             rustls::ClientConnection::new_reality(Arc::new(tls), self.server_name, Box::new(hooks))
                 .map_err(tls_error)?;

@@ -166,8 +166,13 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
         let require_ems = self.provider.fips();
 
         ClientConfig {
+            client_hello_profile: None,
             provider: self.provider,
             alpn_protocols: Vec::new(),
+            application_settings: None,
+            initial_key_share_groups: Vec::new(),
+            client_hello_layout: None,
+            enable_tls12_renegotiation: false,
             check_selected_alpn: true,
             resumption: Resumption::default(),
             max_fragment_size: None,
@@ -185,6 +190,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             ech_mode: self.state.client_ech_mode,
+            ech_rejection_handler: None,
             send_ticket_request: None,
         }
     }

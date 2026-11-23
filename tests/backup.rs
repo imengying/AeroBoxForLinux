@@ -196,6 +196,74 @@ fn malformed_and_incomplete_backups_are_rejected_before_merging() {
 }
 
 #[test]
+fn incomplete_backups_and_invalid_selections_cannot_change_saved_data() {
+    let (_dir, service) = service();
+    let mut original = state();
+    original.rulesets.push(RuleSet::default());
+    let path = service.dir().join("backup.json");
+    backup::export(&path, &original, |_| None).unwrap();
+    let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let saved = fs::read(service.dir().join("state.json")).unwrap();
+    let before = json_eq(&service.snapshot());
+    let mut invalid = vec![];
+    for (path, field) in [
+        ("/settings", "direct_dns"),
+        ("/subscriptions/0", "id"),
+        ("/subscriptions/0", "nodes"),
+        ("/rulesets/0", "enabled"),
+    ] {
+        let mut incomplete = value.clone();
+        incomplete
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        invalid.push(incomplete);
+    }
+    let mut mismatched = value.clone();
+    mismatched["active_subscription"] = json!("");
+    invalid.push(mismatched);
+    let mut missing_subscription = value.clone();
+    let missing_id = aerobox_for_linux::model::id();
+    missing_subscription["active_subscription"] = json!(missing_id);
+    missing_subscription["settings"]["active_subscription"] = json!(missing_id);
+    invalid.push(missing_subscription);
+    let mut missing_node = value;
+    missing_node["subscriptions"][0]["selected_node"] = json!("missing");
+    invalid.push(missing_node);
+    for invalid in invalid {
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(service.restore_backup(&path).is_err());
+        assert_eq!(json_eq(&service.snapshot()), before);
+        assert_eq!(fs::read(service.dir().join("state.json")).unwrap(), saved);
+    }
+}
+
+#[test]
+fn restoring_an_unselected_backup_does_not_choose_an_existing_subscription() {
+    let (_dir, service) = service();
+    service
+        .import_subscription(state().subscriptions.remove(0))
+        .unwrap();
+    assert!(!service.snapshot().settings.active_subscription.is_empty());
+    let mut imported = state();
+    imported.settings.active_subscription.clear();
+    let path = service.dir().join("unselected.json");
+    backup::export(&path, &imported, |_| None).unwrap();
+    service.restore_backup(&path).unwrap();
+    let restored = Store::open(Some(service.dir())).unwrap().state;
+    assert_eq!(restored.subscriptions.len(), 2);
+    assert!(restored.settings.active_subscription.is_empty());
+    assert!(
+        restored
+            .subscriptions
+            .iter()
+            .all(|sub| { sub.selected_node.as_deref() == Some("fixture") && sub.nodes.len() == 1 })
+    );
+}
+
+#[test]
 fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() {
     let (_source_dir, source) = service();
     let mut sub = Subscription {

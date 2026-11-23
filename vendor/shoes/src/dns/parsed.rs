@@ -662,12 +662,32 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_scheme() {
-        let result = ParsedDnsUrl::parse("quic://8.8.8.8");
+        let result = ParsedDnsUrl::parse("unknown://192.0.2.53");
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             DnsConfigError::UnsupportedScheme(_)
         ));
+    }
+
+    #[test]
+    fn test_parse_quic_uses_doq_port_and_server_name_override() {
+        for (url, expected_port) in [("quic://192.0.2.53", 853), ("quic://192.0.2.53:8853", 8853)] {
+            let parsed = ParsedDnsUrl::parse_with_server_name(url, Some("resolver.test")).unwrap();
+            let ParsedDnsUrl::Quic {
+                host,
+                port,
+                server_name,
+            } = parsed
+            else {
+                panic!("expected DNS-over-QUIC upstream");
+            };
+            assert!(
+                matches!(host, DnsHost::Ip(ip) if ip == "192.0.2.53".parse::<IpAddr>().unwrap())
+            );
+            assert_eq!(port, expected_port);
+            assert_eq!(server_name, "resolver.test");
+        }
     }
 
     #[test]

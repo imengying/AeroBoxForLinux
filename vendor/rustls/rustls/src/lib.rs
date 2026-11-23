@@ -581,11 +581,17 @@ pub use crate::webpki::RootCertStore;
 
 /// Items for use in a client.
 pub mod client {
+    pub(crate) mod alps;
+    pub use alps::{ApplicationSettings, ApplicationSettingsCodepoint};
     pub(super) mod builder;
     mod client_conn;
+    pub(crate) mod hello_layout;
+    mod key_shares;
+    pub use hello_layout::ClientHelloLayout;
     mod common;
     mod ech;
     pub(super) mod handy;
+    pub(crate) mod hello_profile;
     mod hs;
     #[cfg(test)]
     mod test;
@@ -600,10 +606,11 @@ pub mod client {
     };
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};
-    pub use ech::{EchConfig, EchGreaseConfig, EchMode, EchStatus};
+    pub use ech::{EchConfig, EchGreaseConfig, EchMode, EchRejectionHandler, EchStatus};
     pub use handy::AlwaysResolvesClientRawPublicKeys;
     #[cfg(any(feature = "std", feature = "hashbrown"))]
     pub use handy::ClientSessionMemoryCache;
+    pub use hello_profile::ClientHelloProfile;
 
     /// Dangerous configuration that should be audited and used with extreme care.
     pub mod danger {

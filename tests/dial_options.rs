@@ -72,7 +72,7 @@ fn subscription_dial_options_keep_units_and_reject_invalid_values() {
         ("tcp_keep_alive", json!("1500ms")),
         ("tcp_keep_alive_interval", json!("32768s")),
         ("disable_tcp_keep_alive", json!("true")),
-        ("tcp_fast_open", json!(true)),
+        ("tcp_fast_open", json!("true")),
     ] {
         let mut invalid = node.clone();
         invalid[field] = value;

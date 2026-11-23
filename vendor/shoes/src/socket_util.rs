@@ -194,11 +194,16 @@ pub fn new_tcp_socket(
     bind_interface: Option<String>,
     is_ipv6: bool,
 ) -> std::io::Result<tokio::net::TcpSocket> {
-    let tcp_socket = if is_ipv6 {
-        tokio::net::TcpSocket::new_v6()?
-    } else {
-        tokio::net::TcpSocket::new_v4()?
-    };
+    new_tcp_socket_with_options(bind_interface, is_ipv6, &Default::default())
+}
+
+pub(crate) fn new_tcp_socket_with_options(
+    bind_interface: Option<String>,
+    is_ipv6: bool,
+    options: &crate::dial_options::DialOptions,
+) -> std::io::Result<tokio::net::TcpSocket> {
+    let socket: std::net::TcpStream = options.tcp_socket(is_ipv6)?.into();
+    let tcp_socket = tokio::net::TcpSocket::from_std_stream(socket);
     crate::socket_policy::apply(
         socket2::SockRef::from(&tcp_socket),
         bind_interface.as_deref(),

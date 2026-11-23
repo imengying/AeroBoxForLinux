@@ -36,10 +36,12 @@ pub struct CommonState {
     pub(crate) suite: Option<SupportedCipherSuite>,
     pub(crate) kx_state: KxState,
     pub(crate) alpn_protocol: Option<ProtocolName>,
+    pub(crate) application_settings: Option<crate::client::alps::NegotiatedApplicationSettings>,
     pub(crate) aligned_handshake: bool,
     pub(crate) may_send_application_data: bool,
     pub(crate) may_receive_application_data: bool,
     pub(crate) early_traffic: bool,
+    pub(crate) tls12_renegotiating: bool,
     sent_fatal_alert: bool,
     /// If we signaled end of stream.
     pub(crate) has_sent_close_notify: bool,
@@ -73,10 +75,12 @@ impl CommonState {
             suite: None,
             kx_state: KxState::default(),
             alpn_protocol: None,
+            application_settings: None,
             aligned_handshake: true,
             may_send_application_data: false,
             may_receive_application_data: false,
             early_traffic: false,
+            tls12_renegotiating: false,
             sent_fatal_alert: false,
             has_sent_close_notify: false,
             has_received_close_notify: false,
@@ -140,11 +144,18 @@ impl CommonState {
         self.peer_certificates.as_deref()
     }
 
+    /// Authenticated peer ALPS settings, or settings associated with the PSK
+    /// while sending early data. An empty value differs from no ALPS negotiation.
+    pub fn peer_application_settings(&self) -> Option<&[u8]> {
+        self.application_settings
+            .as_ref()
+            .map(|settings| settings.peer.as_slice())
+    }
+
     /// Retrieves the protocol agreed with the peer via ALPN.
     ///
-    /// A return value of `None` after handshake completion
-    /// means no protocol was agreed (because no protocols
-    /// were offered or accepted by the peer).
+    /// A return value of `None` after handshake completion means no protocol
+    /// was agreed (because no protocols were offered or accepted by the peer).
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         self.get_alpn_protocol()
     }
@@ -208,13 +219,27 @@ impl CommonState {
                 Side::Server => HandshakeType::ClientHello,
             };
             if msg.is_handshake_type(reject_ty) {
-                self.temper_counters
-                    .received_renegotiation_request()?;
-                self.send_warning_alert(AlertDescription::NoRenegotiation);
-                return Ok(state);
+                if !state.can_handle_renegotiation()
+                    || self.has_sent_close_notify
+                    || self.has_received_close_notify
+                {
+                    self.temper_counters
+                        .received_renegotiation_request()?;
+                    self.send_warning_alert(AlertDescription::NoRenegotiation);
+                    return Ok(state);
+                }
             }
         }
 
+        // In-flight application records from the preceding TLS 1.2 epoch
+        // remain valid until the peer changes keys. They do not enter the new
+        // handshake transcript; the normal bounded receive buffer still applies.
+        if self.tls12_renegotiating && self.may_receive_application_data {
+            if let MessagePayload::ApplicationData(payload) = msg.payload {
+                self.take_received_plaintext(payload);
+                return Ok(state);
+            }
+        }
         let mut cx = Context {
             common: self,
             data,
@@ -965,6 +990,10 @@ pub(crate) trait State<Data>: Send + Sync {
 
     fn send_key_update_request(&mut self, _common: &mut CommonState) -> Result<(), Error> {
         Err(Error::HandshakeNotComplete)
+    }
+
+    fn can_handle_renegotiation(&self) -> bool {
+        false
     }
 
     fn handle_decrypt_error(&self) {}

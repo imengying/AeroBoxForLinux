@@ -1164,7 +1164,7 @@ fn validate_dns_group_ref(
 ///
 /// Expands client chains (resolves group refs to configs) and validates:
 /// - Inline client configs (PEMs, etc.)
-/// - Protocol compatibility (system doesn't support chains, UDP/H3 only direct chains)
+/// - Protocol compatibility (system has no chains, UDP/QUIC require UDP-capable chains)
 /// - System-only use of native_cache_secs
 /// - Bootstrap URL validity (must be a known group or valid IP-only URL)
 fn expand_dns_specs(
@@ -1718,6 +1718,17 @@ fn validate_client_proxy_structure(config: &ClientProxyConfig) -> std::io::Resul
         _ => None,
     };
     if let Some(inner) = inner {
+        if crate::ss_plugin::quic::source(inner).is_some()
+            && !matches!(
+                config,
+                ClientProxyConfig::Multiplex(_) | ClientProxyConfig::Uot(_)
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "v2ray-plugin QUIC can only be wrapped by multiplex or UDP-over-TCP",
+            ));
+        }
         if inner.is_direct() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1839,6 +1850,14 @@ fn validate_client_parameters(
             "TCP transport is not selected but TCP settings specified",
         ));
     }
+    if client_config.transport != Transport::Tcp
+        && (client_config.dial_options.tcp_fast_open || client_config.dial_options.tcp_multi_path)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP Fast Open and MPTCP require a TCP transport",
+        ));
+    }
 
     if let Some(ref mut quic_config) = client_config.quic_settings {
         if client_config.transport != Transport::Quic {
@@ -1856,6 +1875,41 @@ fn validate_client_parameters(
             validate_sni(sni)?;
         }
 
+        if quic_config.options.ech.is_some()
+            && sni.and_then(crate::dns::canonical_hostname).is_none()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ECH requires a QUIC TLS DNS server name and enabled SNI",
+            ));
+        }
+        if let Some(ech) = &mut quic_config.options.ech {
+            if let ClientPems::Prepared(_) = pems {
+                ech.embed()?;
+            }
+            ech.static_config()?;
+        }
+        if quic_config.options.client_fingerprint == Some(super::tls::TlsClientFingerprint::Chrome)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Chrome133 describes TCP TLS; it cannot be applied to a QUIC handshake",
+            ));
+        }
+        if quic_config.options.fragmentation.enabled()
+            || quic_config.options.kernel_tx
+            || quic_config.options.kernel_rx
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "QUIC cannot use TCP TLS fragmentation or kTLS",
+            ));
+        }
+        if let ClientProxyConfig::Tuic(settings) = &client_config.protocol {
+            quic_config
+                .key_exchange_groups
+                .validate_zero_rtt(settings.zero_rtt_handshake)?;
+        }
         pems.prepare_credentials(&mut quic_config.cert, &mut quic_config.key);
         let options = pems.tls_options(&mut quic_config.options);
         crate::rustls_config_util::try_create_client_config_with_options(
@@ -1963,7 +2017,22 @@ fn validate_client_proxy_config(
             config.prepare()?;
             validate_client_proxy_config(&mut config.protocol, pems, default_sni)?;
         }
-        ClientProxyConfig::Shadowsocks { config, .. } => config.validate_keys()?,
+        ClientProxyConfig::Shadowsocks { config, plugin, .. } => {
+            config.validate_keys()?;
+            if let Some(plugin) = plugin {
+                let mut checked = plugin.clone();
+                if let Some(roots) = plugin.roots_mut() {
+                    let mut options = super::tls::TlsClientOptions {
+                        root_certificates: std::mem::take(roots),
+                        ..Default::default()
+                    };
+                    let inline = pems.tls_options(&mut options);
+                    *roots = options.root_certificates;
+                    *checked.roots_mut().unwrap() = inline.root_certificates;
+                }
+                checked.validate()?;
+            }
+        }
         ClientProxyConfig::Vmess {
             user_id, cipher, ..
         } => {
@@ -1982,7 +2051,7 @@ fn validate_client_proxy_config(
                 if *vision {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "VLESS-level vision: true requires native encryption; for legacy Vision move vision: true to TLS/REALITY (older versions ignored it on VLESS)",
+                        "VLESS-level Vision requires native encryption; TLS/REALITY Vision belongs to the TLS/REALITY transport",
                     ));
                 }
             } else {
@@ -2010,6 +2079,8 @@ fn validate_client_proxy_config(
             short_id,
             sni_hostname,
             protocol,
+            client_fingerprint,
+            cipher_suites,
             ..
         } => {
             crate::reality::decode_public_key(public_key).map_err(std::io::Error::other)?;
@@ -2024,6 +2095,11 @@ fn validate_client_proxy_config(
             })?;
             crate::reality::parse_server_name(sni)?;
             validate_reality_client_short_id(short_id)?;
+            if *client_fingerprint == Some(super::tls::TlsClientFingerprint::Chrome) {
+                crate::rustls_config_util::browser::validate_reality_suites(
+                    &cipher_suites.iter().copied().collect::<Vec<_>>(),
+                )?;
+            }
 
             if short_id == DEFAULT_REALITY_SHORT_ID {
                 log::warn!(
@@ -2043,6 +2119,26 @@ fn validate_client_proxy_config(
             };
             if let Some(sni) = sni {
                 validate_sni(sni)?;
+            }
+            if tls_config.options.ech.is_some()
+                && sni.and_then(crate::dns::canonical_hostname).is_none()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "ECH requires a TLS DNS server name and enabled SNI",
+                ));
+            }
+            if tls_config.vision && (tls_config.options.kernel_tx || tls_config.options.kernel_rx) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "kTLS cannot switch to Vision raw TLS passthrough",
+                ));
+            }
+            if let Some(ech) = &mut tls_config.options.ech {
+                if let ClientPems::Prepared(_) = pems {
+                    ech.embed()?;
+                }
+                ech.static_config()?;
             }
             pems.prepare_credentials(&mut tls_config.cert, &mut tls_config.key);
             let options = pems.tls_options(&mut tls_config.options);
@@ -2119,11 +2215,15 @@ fn validate_client_proxy_config(
         }
 
         ClientProxyConfig::Anytls {
-            padding_scheme: Some(lines),
+            client_metadata,
+            padding_scheme,
             ..
         } => {
-            crate::anytls::PaddingFactory::new(lines.join("\n").as_bytes())
-                .map_err(std::io::Error::other)?;
+            crate::anytls::validate_client_metadata(client_metadata)?;
+            if let Some(lines) = padding_scheme {
+                crate::anytls::PaddingFactory::new(lines.join("\n").as_bytes())
+                    .map_err(std::io::Error::other)?;
+            }
         }
 
         _ => {}

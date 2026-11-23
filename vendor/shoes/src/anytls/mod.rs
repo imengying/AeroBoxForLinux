@@ -11,6 +11,7 @@
 mod anytls_client_handler;
 mod anytls_client_pool;
 mod anytls_client_session;
+pub(crate) use anytls_client_session::validate_client_metadata;
 mod anytls_padding;
 mod anytls_server_handler;
 mod anytls_server_session;

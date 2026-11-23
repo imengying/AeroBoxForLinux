@@ -142,6 +142,8 @@ enum_builder! {
         TransportParameters => 0x0039,
         TicketRequest => 0x003a,
         NextProtocolNegotiation => 0x3374,
+        ApplicationSettingsLegacy => 17513,
+        ApplicationSettings => 17613,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,
         TransportParametersDraft => 0xffa5,

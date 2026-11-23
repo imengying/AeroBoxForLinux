@@ -134,7 +134,7 @@ pub fn encrypt_session_id(
     // aws-lc-rs requires in-place encryption
     let mut in_out = zeroize::Zeroizing::new(plaintext.to_vec());
     sealing_key
-        .seal_in_place_append_tag(nonce_obj, aad_obj, &mut *in_out)
+        .seal_in_place_append_tag(nonce_obj, aad_obj, &mut in_out)
         .map_err(|_| CryptoError::EncryptionFailed)?;
 
     if in_out.len() != 32 {

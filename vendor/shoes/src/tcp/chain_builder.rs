@@ -32,14 +32,13 @@ pub(crate) fn supports_udp_offline(
                             input |= 2;
                         } else if let Some(proxy) =
                             create_proxy_connector(config.clone(), resolver.clone())?
+                            && proxy.supports_udp()
                         {
-                            if proxy.supports_udp() {
-                                input |= if proxy.requires_datagram_carrier() {
-                                    2
-                                } else {
-                                    1
-                                };
-                            }
+                            input |= if proxy.requires_datagram_carrier() {
+                                2
+                            } else {
+                                1
+                            };
                         }
                     }
                     input

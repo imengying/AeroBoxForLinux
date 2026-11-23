@@ -10,3 +10,6 @@ mod vmess_handler;
 mod vmess_stream;
 pub(crate) use vmess_handler::DataCipher;
 pub use vmess_handler::{VmessTcpClientHandler, VmessTcpServerHandler};
+
+#[cfg(test)]
+mod interop_tests;

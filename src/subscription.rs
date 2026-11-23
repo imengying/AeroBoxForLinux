@@ -5,10 +5,19 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use serde_json::{Value, json};
-use std::{cell::RefCell, collections::HashSet};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashSet},
+};
 use url::Url;
+mod quic;
+mod ss_plugin;
+mod tls;
 
-const DIAL_FIELDS: [&str; 5] = [
+const DIAL_FIELDS: [&str; 8] = [
+    "tcp_fast_open",
+    "tcp_multi_path",
+    "udp_fragment",
     "bind_interface",
     "connect_timeout",
     "disable_tcp_keep_alive",
@@ -105,20 +114,97 @@ fn alter_id(value: Option<&Value>, field: &str) -> Result<u16> {
 }
 
 fn node_error(node: &Value, error: anyhow::Error) -> String {
+    let message = redact_node_error(node, &format!("{error:#}"));
     if let Some(name) = node
         .get("name")
         .or_else(|| node.get("tag"))
         .and_then(Value::as_str)
     {
-        let message = format!("{error:#}");
         if message.starts_with("节点「") {
             message
         } else {
             format!("节点「{name}」：{message}")
         }
     } else {
-        format!("{error:#}")
+        message
     }
+}
+
+fn redact_node_error(node: &Value, message: &str) -> String {
+    fn secrets(value: &Value, sensitive: bool, output: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    let key = key.to_ascii_lowercase();
+                    secrets(
+                        value,
+                        sensitive
+                            || key.contains("password")
+                            || key.contains("secret")
+                            || key.contains("key")
+                            || key.contains("certificate")
+                            || matches!(key.as_str(), "uuid" | "id" | "server" | "add" | "source"),
+                        output,
+                    );
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    secrets(value, sensitive, output);
+                }
+            }
+            Value::String(value) if sensitive && !value.is_empty() => output.push(value.clone()),
+            _ => {}
+        }
+    }
+    let mut values = Vec::new();
+    secrets(node, false, &mut values);
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    let mut message = message.to_owned();
+    for value in values {
+        if value.len() >= 4 {
+            message = message.replace(&value, "[已隐藏]");
+        } else {
+            for quoted in [
+                format!("\"{value}\""),
+                format!("'{value}'"),
+                format!("`{value}`"),
+            ] {
+                message = message.replace(&quoted, "[已隐藏]");
+            }
+        }
+    }
+    message
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(500)
+        .collect()
+}
+
+pub fn protocol_summary(nodes: &[Value]) -> String {
+    let mut counts = BTreeMap::new();
+    for node in nodes {
+        let kind = node["type"].as_str().unwrap_or("unknown");
+        let label = match kind {
+            "shadowsocks" => "SS",
+            "vmess" => "VMess",
+            "vless" => "VLESS",
+            "trojan" => "Trojan",
+            "anytls" => "AnyTLS",
+            "hysteria2" => "Hysteria2",
+            "tuic" => "TUIC",
+            "naive" => "Naive",
+            "socks" => "SOCKS",
+            "http" => "HTTP",
+            _ => kind,
+        };
+        *counts.entry(label).or_insert(0usize) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{kind} {count}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn known_fields(value: &Value, allowed: &[&str], context: &str) -> Result<()> {
@@ -163,7 +249,7 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
             .or_else(|| value["proxies"].as_array())
     {
         let mut nodes = vec![];
-        for v in items {
+        for (index, v) in items.iter().enumerate() {
             if matches!(
                 v["type"].as_str(),
                 Some("selector" | "urltest" | "direct" | "block" | "dns" | "reject")
@@ -181,8 +267,13 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
             });
             match result {
                 Ok(node) => nodes.push(node),
-                Err(error) if tolerant => skipped.push(node_error(v, error)),
-                Err(error) => return Err(error),
+                Err(error) if tolerant => skipped.push(format!(
+                    "第 {} 项（{}）：{}",
+                    index + 1,
+                    protocol_label(v["type"].as_str().unwrap_or("未知")),
+                    node_error(v, error)
+                )),
+                Err(error) => bail!("{}", node_error(v, error)),
             }
         }
         ensure!(
@@ -210,8 +301,22 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
             Ok(node)
         }) {
             Ok(node) => nodes.push(node),
-            Err(error) if tolerant => skipped.push(format!("{error:#}")),
-            Err(error) => return Err(error.context(format!("第 {} 个节点", index + 1))),
+            Err(error) => {
+                let error = uri_error(line, error);
+                if tolerant {
+                    skipped.push(format!(
+                        "第 {} 项（{}）：{error}",
+                        index + 1,
+                        protocol_label(
+                            line.split_once("://")
+                                .map(|(kind, _)| kind)
+                                .unwrap_or("未知")
+                        )
+                    ));
+                } else {
+                    bail!("第 {} 个节点：{error}", index + 1);
+                }
+            }
         }
     }
     ensure!(
@@ -221,6 +326,32 @@ fn parse_inner(body: &str, tolerant: bool) -> Result<(Vec<Value>, Vec<String>)> 
     );
     validate_nodes(&nodes)?;
     Ok((nodes, skipped))
+}
+
+fn protocol_label(kind: &str) -> String {
+    kind.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+'))
+        .take(24)
+        .collect()
+}
+
+fn uri_error(line: &str, error: anyhow::Error) -> String {
+    let mut message = format!("{error:#}");
+    if let Some(body) = line.strip_prefix("vmess://") {
+        if let Ok(body) = decode(body)
+            && let Ok(node) = serde_json::from_str::<Value>(&body)
+        {
+            message = redact_node_error(&node, &message);
+        }
+    } else if let Ok(url) = Url::parse(line) {
+        let node = json!({"username_secret":unescape(url.username()), "password":url.password().map(unescape), "server":url.host_str(), "source":line, "query_secret":url.query_pairs().map(|(_,value)|value.into_owned()).collect::<Vec<_>>()});
+        message = redact_node_error(&node, &message);
+    }
+    message
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(500)
+        .collect()
 }
 
 fn skip_hint(skipped: &[String]) -> String {
@@ -310,7 +441,7 @@ pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
         })
     } else {
         ensure!(source == input, "导入链接须指向 HTTP 或 HTTPS 订阅");
-        let nodes = parse(input)?;
+        let (nodes, import_issues) = parse_with_skips(input)?;
         let name = if nodes.len() == 1 {
             nodes[0]["tag"].as_str().unwrap_or("本地订阅").to_owned()
         } else {
@@ -319,6 +450,7 @@ pub fn import_input(input: &str) -> Result<crate::model::Subscription> {
         Ok(crate::model::Subscription {
             name,
             nodes,
+            import_issues,
             auto_update: false,
             updated: crate::model::now(),
             ..Default::default()
@@ -348,8 +480,11 @@ pub fn uri(input: &str) -> Result<Value> {
             "packetEncoding",
             "packet_encoding",
             "packet-encoding",
+            "global_padding",
+            "authenticated_length",
         ];
         fields.extend(DIAL_FIELDS);
+        fields.extend(tls::link_fields());
         fields.extend(TRANSPORT_KEEPALIVE_FIELDS.iter().map(|(alias, _)| *alias));
         known_fields(&v, &fields, "VMess 链接")?;
         for field in [
@@ -376,6 +511,12 @@ pub fn uri(input: &str) -> Result<Value> {
         );
         let aid = alter_id(v.get("aid"), "VMess aid")?;
         let mut node = json!({"type":"vmess","tag":v["ps"].as_str().unwrap_or("VMess"),"server":v["add"],"server_port":number(&v["port"]),"uuid":v["id"],"security":v["scy"].as_str().filter(|value| !value.is_empty()).unwrap_or("auto"),"alter_id":aid});
+        for field in ["global_padding", "authenticated_length"] {
+            if let Some(value) = v.get(field) {
+                ensure!(value.is_boolean(), "VMess {field} 须为开关");
+                node[field] = value.clone();
+            }
+        }
         for field in DIAL_FIELDS {
             if let Some(value) = v.get(field) {
                 node[field] = value.clone();
@@ -395,16 +536,19 @@ pub fn uri(input: &str) -> Result<Value> {
             if let Some(alpn) = v["alpn"].as_str().filter(|v| !v.is_empty()) {
                 node["tls"]["alpn"] = json!(alpn.split(',').collect::<Vec<_>>());
             }
-            ensure!(
-                v["fp"].as_str().is_none_or(str::is_empty),
-                "不支持浏览器 TLS fingerprint 参数 fp"
-            );
+            if let Some(fingerprint) = v["fp"].as_str().filter(|value| !value.is_empty()) {
+                node["tls"]["utls"] = json!({"enabled":true,"fingerprint":fingerprint});
+            }
+            tls::link(&v, &mut node["tls"], false)?;
         } else {
             for field in ["sni", "alpn", "fp"] {
                 ensure!(
                     v[field].as_str().is_none_or(str::is_empty),
                     "未启用 TLS 时不支持参数 {field}"
                 );
+            }
+            for field in tls::link_fields() {
+                ensure!(v.get(field).is_none(), "未启用 TLS 时不支持参数 {field}");
             }
         }
         match v["net"].as_str().unwrap_or("tcp") {
@@ -452,8 +596,17 @@ pub fn uri(input: &str) -> Result<Value> {
     let mut raw = input.to_string();
     if let Some(ss) = input.strip_prefix("ss://") {
         let (authority, tag) = ss.split_once('#').unwrap_or((ss, ""));
+        let (authority, query) = authority
+            .split_once('?')
+            .map_or((authority, String::new()), |(authority, query)| {
+                (authority, format!("?{query}"))
+            });
         if !authority.contains('@') {
-            raw = format!("ss://{}#{}", decode(authority.trim_end_matches('/'))?, tag)
+            raw = format!(
+                "ss://{}{query}#{}",
+                decode(authority.trim_end_matches('/'))?,
+                tag
+            )
         }
     }
     let u = Url::parse(&raw)?;
@@ -492,10 +645,6 @@ pub fn uri(input: &str) -> Result<Value> {
     let mut node = json!({"type":typ,"tag":tag,"server":server,"server_port":port});
     let mut query_keys = HashSet::new();
     for (key, _) in u.query_pairs() {
-        ensure!(
-            !matches!(key.as_ref(), "plugin" | "plugin_opts" | "plugin-opts"),
-            "不支持 Shadowsocks plugin 参数"
-        );
         ensure!(query_keys.insert(key.into_owned()), "节点链接包含重复参数");
     }
     let consumed = RefCell::new(HashSet::new());
@@ -520,6 +669,9 @@ pub fn uri(input: &str) -> Result<Value> {
                 .context("无效 Shadowsocks 凭据")?;
             node["method"] = json!(method);
             node["password"] = json!(password);
+            if query_keys.contains("plugin") {
+                ss_plugin::link(&q("plugin"), &mut node)?;
+            }
         }
         "vless" => {
             node["uuid"] = json!(user);
@@ -532,10 +684,9 @@ pub fn uri(input: &str) -> Result<Value> {
                     node["packet_encoding"] = q(field).into();
                 }
             }
-            ensure!(
-                matches!(q("encryption").as_str(), "" | "none"),
-                "不支持的 VLESS encryption 参数"
-            );
+            if query_keys.contains("encryption") {
+                node["encryption"] = q("encryption").into();
+            }
             if !q("flow").is_empty() {
                 node["flow"] = json!(q("flow"))
             }
@@ -549,6 +700,9 @@ pub fn uri(input: &str) -> Result<Value> {
             if !q("obfs").is_empty() {
                 node["obfs"] = json!({"type":q("obfs"),"password":q("obfs-password")})
             }
+            if typ == "hysteria2" && query_keys.contains("mport") {
+                node["server_ports"] = quic::ports(&q("mport"))?;
+            }
         }
         "tuic" => {
             node["uuid"] = json!(user);
@@ -556,13 +710,34 @@ pub fn uri(input: &str) -> Result<Value> {
             if !q("congestion_control").is_empty() {
                 node["congestion_control"] = json!(q("congestion_control"))
             }
+            for field in ["udp_relay_mode", "heartbeat"] {
+                if query_keys.contains(field) {
+                    node[field] = q(field).into();
+                }
+            }
+            if query_keys.contains("udp_over_stream") {
+                node["udp_over_stream"] =
+                    query_bool(&q("udp_over_stream"), "udp_over_stream")?.into();
+            }
+            for field in ["zero_rtt_handshake", "zero-rtt-handshake", "0rtt"] {
+                if query_keys.contains(field) {
+                    ensure!(
+                        node.get("zero_rtt_handshake").is_none(),
+                        "节点链接重复设置 zero_rtt_handshake"
+                    );
+                    node["zero_rtt_handshake"] = query_bool(&q(field), field)?.into();
+                }
+            }
         }
         "anytls" => {
             node["password"] = json!(if pass.is_empty() {
                 user
             } else {
                 format!("{user}:{pass}")
-            })
+            });
+            if query_keys.contains("client_metadata") {
+                node["client_metadata"] = q("client_metadata").into();
+            }
         }
         "naive" => {
             if !user.is_empty() {
@@ -595,6 +770,9 @@ pub fn uri(input: &str) -> Result<Value> {
         || ["tls", "reality"].contains(&security.as_str())
     {
         let mut tls = json!({"enabled":true});
+        if query_keys.contains("handshake_timeout") {
+            tls["handshake_timeout"] = q("handshake_timeout").into();
+        }
         if !q("sni").is_empty() {
             tls["server_name"] = json!(q("sni"))
         };
@@ -612,6 +790,13 @@ pub fn uri(input: &str) -> Result<Value> {
         if q("security") == "reality" {
             tls["reality"] = json!({"enabled":true,"public_key":q("pbk"),"short_id":q("sid")})
         };
+        let mut optional = json!({});
+        for field in tls::link_fields() {
+            if query_keys.contains(field) {
+                optional[field] = q(field).into();
+            }
+        }
+        tls::link(&optional, &mut tls, true)?;
         node["tls"] = tls;
     }
     match q("type").as_str() {
@@ -624,7 +809,10 @@ pub fn uri(input: &str) -> Result<Value> {
     }
     for key in DIAL_FIELDS {
         if query_keys.contains(key) {
-            node[key] = if key == "disable_tcp_keep_alive" {
+            node[key] = if matches!(
+                key,
+                "disable_tcp_keep_alive" | "tcp_fast_open" | "tcp_multi_path" | "udp_fragment"
+            ) {
                 query_bool(&q(key), key)?.into()
             } else {
                 q(key).into()
@@ -658,20 +846,11 @@ fn validate_server(node: &Value) -> Result<()> {
         node["server"].as_str().is_some_and(|s| !s.is_empty()),
         "节点服务器为空"
     );
-    ensure!(
-        (1..=65535).contains(&number(&node["server_port"])),
-        "节点端口无效"
-    );
+    ensure!(crate::protocol::server_port(node).is_some(), "节点端口无效");
     Ok(())
 }
 
 fn clash(v: &Value) -> Result<Value> {
-    for field in ["plugin", "plugin-opts", "plugin_opts"] {
-        ensure!(
-            v.get(field).is_none(),
-            "不支持 Shadowsocks plugin 参数: {field}"
-        );
-    }
     let typ = match v["type"].as_str().unwrap_or("") {
         "ss" | "shadowsocks" => "shadowsocks",
         "socks5" => "socks",
@@ -719,7 +898,8 @@ fn clash(v: &Value) -> Result<Value> {
         "tfo",
         "mptcp",
     ];
-    const DIAL_ALIASES: [(&str, &str); 5] = [
+    const DIAL_ALIASES: [(&str, &str); 6] = [
+        ("udp-fragment", "udp_fragment"),
         ("interface-name", "bind_interface"),
         ("connect-timeout", "connect_timeout"),
         ("disable-tcp-keep-alive", "disable_tcp_keep_alive"),
@@ -731,11 +911,36 @@ fn clash(v: &Value) -> Result<Value> {
     if matches!(typ, "shadowsocks" | "vmess") {
         fields.push("cipher");
     }
+    if typ == "shadowsocks" {
+        fields.extend(["plugin", "plugin-opts", "plugin_opts"]);
+    }
     if typ == "vmess" {
         fields.push("alterId");
     }
-    if typ == "shadowsocks" {
+    if typ == "vless" {
+        fields.push("encryption");
+    }
+    if matches!(typ, "shadowsocks" | "anytls") {
         fields.extend(["udp-over-tcp", "udp_over_tcp", "udp-over-tcp-version"]);
+    }
+    if typ == "anytls" {
+        fields.extend([
+            "idle-session-check-interval",
+            "idle-session-timeout",
+            "min-idle-session",
+            "client-metadata",
+        ]);
+    }
+    if typ == "hysteria2" {
+        fields.extend(["ports", "hop-interval", "up", "down"]);
+    }
+    if typ == "tuic" {
+        fields.extend([
+            "heartbeat-interval",
+            "disable-sni",
+            "reduce-rtt",
+            "udp-over-stream",
+        ]);
     }
     if typ == "naive" {
         fields.extend([
@@ -785,6 +990,9 @@ fn clash(v: &Value) -> Result<Value> {
     }
     if tls_enabled {
         fields.push("reality-opts");
+        fields.push("handshake-timeout");
+        fields.push("ech-opts");
+        fields.extend(tls::OPTIONAL_FIELDS.iter().map(|(alias, _, _)| *alias));
     } else {
         ensure!(
             v["skip-cert-verify"] != true,
@@ -815,16 +1023,50 @@ fn clash(v: &Value) -> Result<Value> {
     }
     known_fields(v, &fields, "Clash 节点")?;
     let mut n = json!({"type":typ,"tag":v["name"]});
+    if typ == "shadowsocks" {
+        ss_plugin::clash(v, &mut n)?;
+    }
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
+    quic::clash(v, typ, &mut n)?;
     for (alias, field) in [("tfo", "tcp_fast_open"), ("mptcp", "tcp_multi_path")] {
-        if let Some(value) = v.get(alias) {
+        ensure!(
+            v.get(alias).is_none() || v.get(field).is_none(),
+            "Clash 节点重复设置 {field}"
+        );
+        if let Some(value) = v.get(alias).or_else(|| v.get(field)) {
             ensure!(value.is_boolean(), "Clash {alias} 须为开关");
             n[field] = value.clone();
         }
     }
     if typ == "vmess" {
         n["alter_id"] = alter_id(v.get("alterId"), "Clash alterId")?.into();
+    }
+    if typ == "vless"
+        && let Some(encryption) = v.get("encryption")
+    {
+        n["encryption"] = encryption.clone();
+    }
+    if typ == "anytls" {
+        if let Some(metadata) = v.get("client-metadata") {
+            n["client_metadata"] = metadata.clone();
+        }
+        for (source, target) in [
+            ("idle-session-check-interval", "idle_session_check_interval"),
+            ("idle-session-timeout", "idle_session_timeout"),
+            ("min-idle-session", "min_idle_session"),
+        ] {
+            if let Some(value) = v.get(source) {
+                n[target] = if target == "min_idle_session" {
+                    value.clone()
+                } else {
+                    let seconds = value
+                        .as_u64()
+                        .with_context(|| format!("Clash {source} 须为非负整数秒"))?;
+                    format!("{seconds}s").into()
+                };
+            }
+        }
     }
     for (alias, field) in DIAL_ALIASES {
         ensure!(
@@ -873,6 +1115,8 @@ fn clash(v: &Value) -> Result<Value> {
     }
     if typ == "shadowsocks" {
         n["method"] = v["cipher"].clone();
+    }
+    if matches!(typ, "shadowsocks" | "anytls") {
         ensure!(
             v.get("udp-over-tcp").is_none() || v.get("udp_over_tcp").is_none(),
             "Clash 节点重复设置 udp-over-tcp"
@@ -913,6 +1157,19 @@ fn clash(v: &Value) -> Result<Value> {
     }
     if tls_enabled {
         let mut tls = json!({"enabled":true});
+        if let Some(value) = v.get("handshake-timeout") {
+            tls["handshake_timeout"] = if let Some(seconds) = value.as_u64() {
+                format!("{seconds}s").into()
+            } else {
+                value.clone()
+            };
+        }
+        if typ == "tuic"
+            && let Some(value) = v.get("disable-sni")
+        {
+            ensure!(value.is_boolean(), "Clash disable-sni 须为开关");
+            tls["disable_sni"] = value.clone();
+        }
         for (from, to) in [
             ("servername", "server_name"),
             ("sni", "server_name"),
@@ -932,13 +1189,41 @@ fn clash(v: &Value) -> Result<Value> {
                 tls[to] = value.clone()
             }
         }
+        tls::copy_optional(v, &mut tls, false, "Clash 节点")?;
+        if let Some(ech) = v.get("ech-opts") {
+            known_fields(
+                ech,
+                &["enable", "config", "config-path", "query-server-name"],
+                "Clash ech-opts",
+            )?;
+            let mut options = json!({"enabled":ech.get("enable").cloned().unwrap_or(json!(false))});
+            for (from, to) in [
+                ("config", "config"),
+                ("config-path", "config_path"),
+                ("query-server-name", "query_server_name"),
+            ] {
+                if let Some(value) = ech.get(from) {
+                    options[to] = if from == "config" {
+                        let text = value
+                            .as_str()
+                            .context("Clash ech-opts.config 须为 Base64 文本")?;
+                        tls::config_pem(text, "Clash ech-opts.config")?.into()
+                    } else {
+                        value.clone()
+                    };
+                }
+            }
+            tls["ech"] = options;
+        }
         if let Some(fp) = v.get("client-fingerprint").filter(|value| *value != "") {
             tls["utls"] = json!({"enabled":true,"fingerprint":fp})
         };
         if let Some(r) = v.get("reality-opts") {
             known_fields(r, &["public-key", "short-id"], "Clash reality-opts")?;
-            tls["reality"] =
-                json!({"enabled":true,"public_key":r["public-key"],"short_id":r["short-id"]})
+            tls["reality"] = json!({"enabled":true,"public_key":r["public-key"]});
+            if let Some(short_id) = r.get("short-id") {
+                tls["reality"]["short_id"] = short_id.clone();
+            }
         };
         n["tls"] = tls
     }
@@ -1145,7 +1430,7 @@ proxies:
     #[test]
     fn unsupported_plugins_are_rejected_without_losing_other_nodes() {
         let source = json!({"proxies":[
-            {"name":"plugin","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret","plugin":"obfs","plugin-opts":{"mode":"http"}},
+            {"name":"plugin","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret","plugin":"unknown-plugin","plugin-opts":{"mode":"http"}},
             {"name":"plain","type":"ss","server":"127.0.0.1","port":443,"cipher":"aes-128-gcm","password":"fixture-secret"}
         ]});
         assert!(parse(&source.to_string()).is_err());
@@ -1316,7 +1601,7 @@ mod native_validation_tests {
     use super::*;
     #[test]
     fn rejects_raw_json_unsupported_options_too() {
-        let source = json!({"outbounds":[{"type":"vless","tag":"unsupported-fingerprint","server":"example.com","server_port":443,"uuid":"00000000-0000-4000-8000-000000000001","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}},{"type":"socks","tag":"local","server":"127.0.0.1","server_port":1080}]});
+        let source = json!({"outbounds":[{"type":"vless","tag":"unsupported-fingerprint","server":"example.com","server_port":443,"uuid":"00000000-0000-4000-8000-000000000001","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"unknown-browser"}}},{"type":"socks","tag":"local","server":"127.0.0.1","server_port":1080}]});
         assert!(parse(&source.to_string()).is_err());
         let (nodes, skipped) = parse_with_skips(&source.to_string()).unwrap();
         assert_eq!(nodes.len(), 1);
@@ -1330,7 +1615,7 @@ mod import_boundary_tests {
     use super::*;
 
     #[test]
-    fn shadowsocks_plugins_are_rejected_in_links_and_clash_without_expansion() {
+    fn unsupported_plugin_options_are_reported_without_silent_expansion() {
         let plain = "ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:8388#plain";
         for plugin in ["shadow-tls", "obfs-local", "v2ray-plugin", "unknown-plugin"] {
             let link = format!(

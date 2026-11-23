@@ -3,6 +3,10 @@
 //! Handles TCP and QUIC transports with bind_interface support.
 //! Created from the socket-related fields of any ResolvedClientConfig.
 
+mod early;
+#[cfg(test)]
+mod early_tests;
+
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,8 +15,7 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
-use log::{debug, error};
-use quinn::Runtime;
+use log::debug;
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 
@@ -27,7 +30,7 @@ use crate::resolver::{Resolver, resolve_addresses, resolve_location};
 #[cfg(test)]
 use crate::rustls_config_util::try_create_client_config;
 use crate::rustls_config_util::try_create_client_config_with_options;
-use crate::socket_util::{new_tcp_socket, new_udp_socket, set_tcp_keepalive};
+use crate::socket_util::{new_tcp_socket_with_options, new_udp_socket, set_tcp_keepalive};
 use crate::thread_util::get_num_threads;
 
 use super::socket_connector::SocketConnector;
@@ -35,7 +38,6 @@ use super::socket_connector::SocketConnector;
 const MAX_QUIC_ENDPOINTS: usize = 32;
 const TCP_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 const TCP_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const NATIVE_QUIC_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_TCP_ATTEMPTS: usize = 2;
 
 fn interleave_tcp_addresses(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
@@ -149,8 +151,33 @@ enum TransportConfig {
         endpoints: Vec<Arc<QuicEndpoint>>,
         next_endpoint_index: AtomicU8,
         hopping: Option<Box<HoppingEndpoint>>,
-        native: bool,
+        handshake_timeout: std::time::Duration,
+        ech: Option<QuicEch>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct QuicEch {
+    policy: Arc<crate::ech::Policy>,
+    base: Arc<rustls::ClientConfig>,
+    transport: Arc<quinn::TransportConfig>,
+}
+impl QuicEch {
+    fn client_config(
+        &self,
+        prepared: &crate::ech::Prepared,
+    ) -> std::io::Result<quinn::ClientConfig> {
+        let crypto = quinn::crypto::rustls::QuicClientConfig::with_initial(
+            prepared.config.clone(),
+            aerobox_crypto::TLS13_AES_128_GCM_SHA256
+                .quic_suite()
+                .unwrap(),
+        )
+        .map_err(std::io::Error::other)?;
+        let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+        config.transport_config(self.transport.clone());
+        Ok(config)
+    }
 }
 
 #[derive(Debug)]
@@ -160,6 +187,7 @@ struct HoppingEndpoint {
     config: quinn::ClientConfig,
     memory_bytes: usize,
     socket_buffer: usize,
+    dial_options: crate::dial_options::DialOptions,
 }
 
 impl HoppingEndpoint {
@@ -170,9 +198,10 @@ impl HoppingEndpoint {
     ) -> std::io::Result<Arc<QuicEndpoint>> {
         let obfs = self.obfs.clone();
         let socket_buffer = self.socket_buffer;
+        let dial_options = self.dial_options.clone();
         let factory = Arc::new(move || {
             let socket = new_udp_socket(address.is_ipv6(), bind_interface.clone())?.into_std()?;
-            wrap_quic_socket(socket, socket_buffer, obfs.as_ref())
+            wrap_quic_socket(socket, socket_buffer, obfs.as_ref(), &dial_options)
         });
         let socket = crate::quic_client::hop::HoppingSocket::new(factory, address, &self.settings)?;
         let mut endpoint =
@@ -186,9 +215,10 @@ fn wrap_quic_socket(
     socket: std::net::UdpSocket,
     buffer_size: usize,
     obfs: Option<&Obfuscation>,
+    dial_options: &crate::dial_options::DialOptions,
 ) -> std::io::Result<Arc<dyn quinn::AsyncUdpSocket>> {
     crate::socket_util::set_udp_socket_buffers(socket2::SockRef::from(&socket), buffer_size);
-    let socket = quinn::TokioRuntime.wrap_udp_socket(socket)?;
+    let socket = dial_options.wrap_quic_socket(socket)?;
     Ok(match obfs {
         Some(obfs) => {
             crate::quic_client::salamander::Salamander::wrap(socket, obfs.password().clone())
@@ -208,6 +238,7 @@ fn wrap_quic_socket(
 pub struct SocketConnectorImpl {
     bind_interface: Option<String>,
     connect_timeout: Option<std::time::Duration>,
+    dial_options: crate::dial_options::DialOptions,
     transport: TransportConfig,
 }
 
@@ -235,6 +266,8 @@ impl SocketConnectorImpl {
         limits: crate::config::GlobalLimits,
     ) -> std::io::Result<Self> {
         config.validate_quic_key_exchange(true)?;
+        config.dial_options.validate()?;
+        crate::ss_plugin::quic::validate_resolved(config, true)?;
         let bind_interface = config.bind_interface.clone().into_option();
 
         let default_sni_hostname =
@@ -271,7 +304,10 @@ impl SocketConnectorImpl {
                     sni_hostname,
                     key,
                     cert,
-                } = config.quic_settings.clone().unwrap_or_default();
+                } = match crate::ss_plugin::quic::resolved(&config.protocol) {
+                    Some(plugin) => crate::ss_plugin::quic::settings(plugin)?,
+                    None => config.quic_settings.clone().unwrap_or_default(),
+                };
 
                 let sni_hostname = if sni_hostname.is_unspecified() {
                     if let Some(ref hostname) = default_sni_hostname {
@@ -310,7 +346,7 @@ impl SocketConnectorImpl {
                 } else {
                     alpn_protocols.into_vec()
                 };
-                let rustls_client_config = try_create_client_config_with_options(
+                let mut rustls_client_config = try_create_client_config_with_options(
                     verify,
                     server_fingerprints.into_vec(),
                     alpn_protocols,
@@ -321,8 +357,24 @@ impl SocketConnectorImpl {
                     &options,
                 )?;
 
+                if let crate::config::ResolvedClientProxyConfig::Tuic(settings) = &config.protocol {
+                    key_exchange_groups.validate_zero_rtt(settings.zero_rtt_handshake)?;
+                    rustls_client_config.enable_early_data = settings.zero_rtt_handshake;
+                }
+                let rustls_client_config = Arc::new(rustls_client_config);
+                let ech_policy = options
+                    .ech
+                    .as_ref()
+                    .map(|options| {
+                        let name = super::tcp_client_handler_factory::tls_verification_name(
+                            sni_hostname.clone(),
+                            target_address,
+                        )?;
+                        crate::ech::Policy::new(options, &name)
+                    })
+                    .transpose()?;
                 let quic_client_config = quinn::crypto::rustls::QuicClientConfig::with_initial(
-                    Arc::new(rustls_client_config),
+                    rustls_client_config.clone(),
                     tls13_suite.quic_suite().unwrap(),
                 )
                 .map_err(std::io::Error::other)?;
@@ -381,7 +433,13 @@ impl SocketConnectorImpl {
                     transport_config.mtu_discovery_config(Some(mtu));
                 }
 
-                quinn_client_config.transport_config(Arc::new(transport_config));
+                let transport_config = Arc::new(transport_config);
+                quinn_client_config.transport_config(transport_config.clone());
+                let ech = ech_policy.map(|policy| QuicEch {
+                    policy,
+                    base: rustls_client_config,
+                    transport: transport_config,
+                });
 
                 let endpoints_len = if hopping.is_some() {
                     0
@@ -402,6 +460,7 @@ impl SocketConnectorImpl {
                         udp_socket.into_std()?,
                         limits.quic_socket_buffer,
                         obfs.as_ref(),
+                        &config.dial_options,
                     )?;
                     let mut endpoint =
                         QuicEndpoint::with_abstract_socket(None, socket, memory_bytes, None)?;
@@ -410,6 +469,7 @@ impl SocketConnectorImpl {
                 }
 
                 TransportConfig::Quic {
+                    ech,
                     sni_hostname,
                     endpoints,
                     next_endpoint_index: AtomicU8::new(0),
@@ -420,15 +480,19 @@ impl SocketConnectorImpl {
                             config: quinn_client_config,
                             memory_bytes,
                             socket_buffer: limits.quic_socket_buffer,
+                            dial_options: config.dial_options.clone(),
                         })
                     }),
-                    native: is_native,
+                    handshake_timeout: crate::config::tls::handshake_timeout(
+                        options.handshake_timeout_ms,
+                    ),
                 }
             }
         };
 
         Ok(Self {
             bind_interface,
+            dial_options: config.dial_options.clone(),
             connect_timeout: config
                 .connect_timeout_ms
                 .map(|value| std::time::Duration::from_millis(u64::from(value.get()))),
@@ -444,6 +508,7 @@ impl SocketConnectorImpl {
         Self {
             bind_interface,
             connect_timeout: None,
+            dial_options: Default::default(),
             transport: TransportConfig::Tcp {
                 settings: TcpConfig {
                     no_delay,
@@ -474,11 +539,10 @@ impl SocketConnectorImpl {
         open: impl AsyncFn(super::carrier_dialer::QuicCarrier) -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         let TransportConfig::Quic {
-            endpoints,
-            next_endpoint_index,
             sni_hostname,
-            hopping,
-            native,
+            handshake_timeout,
+            ech,
+            ..
         } = &self.transport
         else {
             return Err(std::io::Error::new(
@@ -497,29 +561,55 @@ impl SocketConnectorImpl {
         let domain = sni_hostname.as_deref().unwrap_or(&verification_name);
         let mut last_error = std::io::Error::other("no resolved addresses succeeded");
         for address in addresses {
-            let endpoint = if let Some(hopping) = hopping {
-                match hopping.open(address, self.bind_interface.clone()) {
-                    Ok(endpoint) => endpoint,
-                    Err(error) => {
-                        debug!("QUIC socket creation for {address} failed: {error}");
-                        last_error = error;
-                        continue;
-                    }
+            let endpoint = match self.quic_endpoint(address) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    debug!("QUIC socket creation for {address} failed: {error}");
+                    last_error = error;
+                    continue;
                 }
-            } else {
-                let index =
-                    next_endpoint_index.fetch_add(1, Ordering::Relaxed) as usize % endpoints.len();
-                endpoints[index].clone()
             };
-            let result = match endpoint.connect(address, domain) {
-                Ok(connecting) if *native => {
-                    tokio::time::timeout(NATIVE_QUIC_ATTEMPT_TIMEOUT, connecting)
+            let deadline = tokio::time::Instant::now() + *handshake_timeout;
+            let mut prepared = match ech {
+                Some(ech) => Some(
+                    tokio::time::timeout_at(deadline, ech.policy.prepare(&ech.base, resolver))
+                        .await
+                        .map_err(std::io::Error::from)??,
+                ),
+                None => None,
+            };
+            let original = prepared.as_ref().map(|prepared| prepared.mode.clone());
+            let mut attempt = 0;
+            let result = loop {
+                let connecting = match (ech, &prepared) {
+                    (Some(ech), Some(prepared)) => {
+                        endpoint.connect_with(ech.client_config(prepared)?, address, domain)
+                    }
+                    _ => endpoint.connect(address, domain),
+                };
+                let result = match connecting {
+                    Ok(connecting) => tokio::time::timeout_at(deadline, connecting)
                         .await
                         .map_err(std::io::Error::from)
-                        .and_then(|result| result.map_err(std::io::Error::other))
+                        .and_then(|r| r.map_err(std::io::Error::other)),
+                    Err(error) => Err(error),
+                };
+                if result.is_err()
+                    && attempt == 0
+                    && let (Some(ech), Some(previous)) = (ech, &prepared)
+                    && let Some(mode) = previous.retry.take()?
+                {
+                    prepared = Some(crate::ech::Prepared::new(&ech.base, Arc::new(mode))?);
+                    attempt += 1;
+                    continue;
                 }
-                Ok(connecting) => connecting.await.map_err(std::io::Error::other),
-                Err(error) => Err(std::io::Error::other(error)),
+                if result.is_ok()
+                    && attempt == 1
+                    && let (Some(ech), Some(previous), Some(prepared)) = (ech, &original, &prepared)
+                {
+                    ech.policy.accepted_retry(previous, prepared.mode.clone());
+                }
+                break result;
             };
             let result = match result {
                 Ok(connection) => {
@@ -556,11 +646,30 @@ impl SocketConnector for SocketConnectorImpl {
         .await
     }
 
+    async fn connect_quic_early(
+        &self,
+        resolver: &Arc<dyn Resolver>,
+        address: &ResolvedLocation,
+    ) -> std::io::Result<super::carrier_dialer::PendingQuicCarrier> {
+        let deadline = tokio::time::Instant::now()
+            + self
+                .connect_timeout
+                .unwrap_or(std::time::Duration::from_secs(15));
+        tokio::time::timeout_at(
+            deadline,
+            self.connect_quic_early_candidates(resolver, address, deadline),
+        )
+        .await
+        .map_err(std::io::Error::from)?
+    }
+
     async fn connect(
         &self,
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncStream>> {
+        let deadline =
+            tokio::time::Instant::now() + self.connect_timeout.unwrap_or(TCP_ATTEMPT_TIMEOUT);
         self.with_timeout(async {
             match &self.transport {
                 TransportConfig::Tcp { settings } => {
@@ -569,20 +678,32 @@ impl SocketConnector for SocketConnectorImpl {
                         None => resolve_addresses(resolver, address.location()).await?,
                     };
 
-                    let stream = connect_tcp_candidates(target_addrs, |address| {
-                        let socket =
-                            new_tcp_socket(self.bind_interface.clone(), address.is_ipv6())?;
-                        Ok(socket.connect(address))
+                    let single = target_addrs.len() == 1;
+                    connect_tcp_candidates(target_addrs, |address| {
+                        let socket = new_tcp_socket_with_options(
+                            self.bind_interface.clone(),
+                            address.is_ipv6(),
+                            &self.dial_options,
+                        )?;
+                        Ok(async move {
+                            let stream = socket.connect(address).await?;
+                            let (idle, interval) = settings.keepalive_durations(120, 30);
+                            set_tcp_keepalive(&stream, idle, interval)?;
+                            stream.set_nodelay(settings.no_delay)?;
+                            if self.dial_options.tcp_fast_open {
+                                let mut stream =
+                                    super::fast_open::FastOpenStream::new(stream, deadline)?;
+                                // A deferred SYN cannot win a race against an established socket.
+                                if !single {
+                                    stream.establish_without_data().await?;
+                                }
+                                Ok(Box::new(stream) as Box<dyn AsyncStream>)
+                            } else {
+                                Ok(Box::new(stream) as Box<dyn AsyncStream>)
+                            }
+                        })
                     })
-                    .await?;
-                    let (idle, interval) = settings.keepalive_durations(120, 30);
-                    set_tcp_keepalive(&stream, idle, interval)?;
-                    if settings.no_delay
-                        && let Err(e) = stream.set_nodelay(true)
-                    {
-                        error!("Failed to set TCP no-delay: {e}");
-                    }
-                    Ok(Box::new(stream) as Box<dyn AsyncStream>)
+                    .await
                 }
                 TransportConfig::Quic { .. } => {
                     self.connect_quic_candidates(resolver, address, async |carrier| {
@@ -614,6 +735,11 @@ impl SocketConnector for SocketConnectorImpl {
             let remote_addr = resolve_location(&mut target, resolver).await?;
             let client_socket = new_udp_socket(remote_addr.is_ipv6(), self.bind_interface.clone())?;
 
+            self.dial_options.apply_udp(
+                socket2::SockRef::from(&client_socket),
+                remote_addr.is_ipv6(),
+            )?;
+
             // Don't use connect() - wrap in UnconnectedUdpSocket instead.
             // A connected UDP socket filters incoming packets by source address,
             // which breaks when bind_interface causes packets to arrive from
@@ -638,6 +764,8 @@ impl SocketConnector for SocketConnectorImpl {
         self.with_timeout(async {
             let address = resolve_location(&mut target, resolver).await?;
             let socket = new_udp_socket(address.is_ipv6(), self.bind_interface.clone())?;
+            self.dial_options
+                .apply_udp(socket2::SockRef::from(&socket), address.is_ipv6())?;
             socket.connect(address).await?;
             Ok(Box::new(socket) as Box<dyn crate::async_stream::AsyncMessageStream>)
         })
@@ -750,6 +878,30 @@ mod tests {
             let addresses = self.0.clone();
             Box::pin(async move { Ok(addresses) })
         }
+    }
+
+    #[tokio::test]
+    async fn configured_quic_handshake_timeout_closes_a_silent_peer_attempt() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = peer.local_addr().unwrap().port();
+        let config: ResolvedClientConfig = crate::config::test_support::from_yaml(&format!(
+            "address: '127.0.0.1:{port}'\ntransport: quic\nquic_settings: {{verify: false, options: {{handshake_timeout_ms: 40}}}}\nprotocol: {{type: socks}}\n"
+        )).unwrap();
+        let connector = SocketConnectorImpl::from_config(&config, Some(&config.address)).unwrap();
+        let resolver: Arc<dyn Resolver> = Arc::new(FixedResolver(vec![peer.local_addr().unwrap()]));
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            connector.connect_quic(&resolver, &config.address.clone().into()),
+        )
+        .await
+        .unwrap();
+        let error = result.err().expect("silent QUIC peer must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        let mut packet = [0; 2048];
+        let size = peer.try_recv(&mut packet).unwrap();
+        assert!(size >= 1200, "a QUIC Initial must actually reach the peer");
     }
 
     #[tokio::test]

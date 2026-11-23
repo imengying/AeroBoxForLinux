@@ -129,7 +129,7 @@ impl Tunnel {
         Self{receive,pending:Bytes::new(),send:PollSender::new(sender),ack:None,finished:false,failure,_task:AbortOnDropHandle::new(task),_session:session}
     }
     fn poll_ack(&mut self,cx:&mut Context<'_>)->Poll<io::Result<()>> {
-        if let Some((finish,ack))=&mut self.ack {ready!(Pin::new(ack).poll(cx)).map_err(|_|self.failure.get())?;self.finished=*finish;self.ack=None;}
+        if let Some((finish,ack))=&mut self.ack {ready!(Pin::new(ack).poll(cx)).map_err(|_|self.failure.get())?;self.finished = *finish;self.ack=None;}
         Poll::Ready(Ok(()))
     }
     fn flush(&mut self,cx:&mut Context<'_>,finish:bool)->Poll<io::Result<()>> {

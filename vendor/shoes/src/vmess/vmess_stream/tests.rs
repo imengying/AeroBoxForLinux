@@ -4,94 +4,330 @@ use crate::prepend_stream::PrependStream;
 use aerobox_primitives::aead::{Algorithm, CHACHA20_POLY1305, UnboundKey};
 use shake::Shake128;
 use shake::digest::{ExtendableOutput, Update};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
-fn client_header_stream(stream: Box<dyn AsyncStream>, legacy: bool, udp: bool) -> VmessStream {
-    VmessStream::new(stream, udp, None, None, None, false, None, Some(ReadHeaderInfo {
-        legacy,
-        response_header_key: [42; 16],
-        response_header_iv: [23; 16],
-        response_authentication_v: 0x65,
-    }))
-}
-
-fn legacy_response(auth: u8, command_len: u8) -> Vec<u8> {
-    use aes::cipher::{AsyncStreamCipher, KeyIvInit};
-    let mut response = vec![auth, 0, u8::from(command_len != 0), command_len];
-    response.extend(vec![0x17; command_len as usize]);
-    cfb_mode::Encryptor::<aes::Aes128>::new(&[42; 16].into(), &[23; 16].into())
-        .encrypt(&mut response);
-    response
+#[tokio::test]
+async fn legacy_response_cfb_state_continues_into_fragmented_checked_body() {
+    for cfb in [false, true] {
+        let key = [33; 16];
+        let iv = [44; 16];
+        let (wire, mut peer) = tokio::io::duplex(5);
+        let mut reader = VmessStream::new(
+            Box::new(wire),
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(ReadHeaderInfo {
+                response_header_key: key,
+                response_header_iv: iv,
+                response_authentication_v: 81,
+            }),
+        );
+        if cfb {
+            reader = reader.with_cfb(&key, &iv, &key, &iv);
+        }
+        reader = reader.with_legacy_response(true);
+        let payload = b"fragmented legacy response body";
+        let mut bytes = vec![81, 0, 0, 0];
+        let mut cipher = super::super::legacy::Cfb128::new(&key, &iv);
+        cipher.encrypt(&mut bytes);
+        let mut body = ((payload.len() + if cfb { 4 } else { 0 }) as u16)
+            .to_be_bytes()
+            .to_vec();
+        if cfb {
+            let mut checksum = super::super::fnv1a::Fnv1aHasher::new();
+            checksum.write(payload);
+            body.extend_from_slice(&checksum.finish().to_be_bytes());
+        }
+        body.extend_from_slice(payload);
+        if cfb {
+            cipher.encrypt(&mut body);
+        }
+        bytes.extend(body);
+        let sender = async {
+            for byte in bytes {
+                peer.write_u8(byte).await.unwrap();
+            }
+            peer.shutdown().await.unwrap();
+        };
+        let receiver = async {
+            let mut output = Vec::new();
+            reader.read_to_end(&mut output).await.unwrap();
+            assert_eq!(output, payload);
+        };
+        tokio::join!(sender, receiver);
+    }
 }
 
 #[tokio::test]
-async fn legacy_response_fragmentation_preserves_coalesced_payload_and_command_boundaries() {
-    for udp in [false, true] {
-        for command_len in [0, 255] {
-            let header = legacy_response(0x65, command_len);
-            let mut wire = header.clone();
-            wire.extend_from_slice(&[0, 5]);
-            wire.extend_from_slice(b"hello");
-            for split in 0..=header.len() + 1 {
-                let (transport, _) = tokio::io::duplex(1);
-                let mut stream = client_header_stream(Box::new(transport), true, udp);
-                for segment in [&wire[..split], &wire[split..]] {
-                    let end = stream.unprocessed_end_offset;
-                    stream.unprocessed_buf[end..end + segment.len()].copy_from_slice(segment);
-                    stream.unprocessed_end_offset += segment.len();
-                    if stream.read_header_state != ReadHeaderState::Done {
-                        stream.process_read_header().unwrap();
-                    }
-                }
-                assert_eq!(stream.read_header_state, ReadHeaderState::Done);
-                assert!(matches!(stream.try_decrypt().unwrap(), DecryptState::Success));
-                assert_eq!(&stream.processed_buf[..stream.processed_end_offset], b"hello");
+async fn cfb_rejects_modified_checksum_and_preserves_datagram_boundaries() {
+    for corrupt in [false, true] {
+        let key = [12; 16];
+        let iv = [19; 16];
+        let (wire, mut peer) = tokio::io::duplex(65536);
+        let mut reader =
+            VmessStream::new(Box::new(wire), true, None, None, None, false, None, None)
+                .with_cfb(&key, &iv, &key, &iv);
+        let mut cipher = super::super::legacy::Cfb128::new(&key, &iv);
+        let mut bytes = Vec::new();
+        for payload in [b"first datagram".as_slice(), b"second datagram"] {
+            let mut checksum = super::super::fnv1a::Fnv1aHasher::new();
+            checksum.write(payload);
+            let mut frame = ((payload.len() + 4) as u16).to_be_bytes().to_vec();
+            frame.extend_from_slice(&(checksum.finish() ^ u32::from(corrupt)).to_be_bytes());
+            frame.extend_from_slice(payload);
+            cipher.encrypt(&mut frame);
+            bytes.extend(frame);
+        }
+        peer.write_all(&bytes).await.unwrap();
+        for expected in [b"first datagram".as_slice(), b"second datagram"] {
+            let mut bytes = [0; 128];
+            let mut output = ReadBuf::new(&mut bytes);
+            let result =
+                std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read_message(cx, &mut output))
+                    .await;
+            if corrupt {
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+                break;
             }
+            result.unwrap();
+            assert_eq!(output.filled(), expected);
         }
     }
 }
 
 #[tokio::test]
-async fn legacy_invalid_auth_and_truncated_headers_are_errors_for_tcp_and_udp() {
-    for udp in [false, true] {
-        let (transport, _) = tokio::io::duplex(1);
-        let mut stream = client_header_stream(Box::new(transport), true, udp);
-        assert_eq!(stream.feed_initial_read_data(&legacy_response(0x64, 0)).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
-        for legacy in [false, true] {
-            for bytes in [vec![], legacy_response(0x65, 0)[..3].to_vec()] {
-                let (transport, mut peer) = tokio::io::duplex(32);
-                peer.write_all(&bytes).await.unwrap();
-                drop(peer);
-                let mut stream = client_header_stream(Box::new(transport), legacy, udp);
-                let error = if udp {
-                    let mut bytes = [0; 32];
-                    let mut output = ReadBuf::new(&mut bytes);
-                    std::future::poll_fn(|cx| Pin::new(&mut stream).poll_read_message(cx, &mut output)).await.unwrap_err()
-                } else {
-                    stream.read(&mut [0; 32]).await.unwrap_err()
+async fn authenticated_empty_datagrams_survive_then_transport_eof_is_explicit() {
+    for cfb in [false, true] {
+        let (wire, peer) = tokio::io::duplex(4096);
+        let build = |wire: tokio::io::DuplexStream| {
+            if cfb {
+                VmessStream::new(Box::new(wire), true, None, None, None, false, None, None)
+                    .with_cfb(&[12; 16], &[19; 16], &[12; 16], &[19; 16])
+            } else {
+                response_test_stream(Box::new(wire), Some(&AES_128_GCM), true, true, None)
+            }
+        };
+        let mut writer = build(wire);
+        let mut reader = build(peer);
+        // The shared test helper builds a TCP stream by default.
+        writer.is_udp = true;
+        reader.is_udp = true;
+        assert!(!reader.read_message_eof_on_empty());
+        for expected in [b"".as_slice(), b"after empty"] {
+            std::future::poll_fn(|cx| Pin::new(&mut writer).poll_write_message(cx, expected))
+                .await
+                .unwrap();
+            std::future::poll_fn(|cx| Pin::new(&mut writer).poll_flush_message(cx))
+                .await
+                .unwrap();
+            let mut bytes = [0; 128];
+            let mut output = ReadBuf::new(&mut bytes);
+            std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read_message(cx, &mut output))
+                .await
+                .unwrap();
+            assert_eq!(output.filled(), expected);
+        }
+        std::future::poll_fn(|cx| Pin::new(&mut writer).poll_shutdown_message(cx))
+            .await
+            .unwrap();
+        let mut bytes = [0; 128];
+        let mut output = ReadBuf::new(&mut bytes);
+        assert_eq!(
+            std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read_message(cx, &mut output))
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelling_cfb_flush_preserves_feedback_and_partially_written_frame() {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let (wire, mut peer) = tokio::io::duplex(1);
+        let key = [12; 16];
+        let iv = [19; 16];
+        let mut writer =
+            VmessStream::new(Box::new(wire), false, None, None, None, false, None, None)
+                .with_cfb(&key, &iv, &key, &iv);
+        writer.write_all(b"first").await.unwrap();
+        {
+            let flush = writer.flush();
+            tokio::pin!(flush);
+            assert!(futures::poll!(flush.as_mut()).is_pending());
+        }
+        let send = async {
+            writer.flush().await.unwrap();
+            writer.write_all(b"second").await.unwrap();
+            writer.flush().await.unwrap();
+        };
+        let receive = async {
+            let mut wire = [0; 23];
+            peer.read_exact(&mut wire).await.unwrap();
+            super::super::legacy::Cfb128::new(&key, &iv).decrypt(&mut wire);
+            let mut cursor = 0;
+            for payload in [b"first".as_slice(), b"second"] {
+                let length =
+                    u16::from_be_bytes(wire[cursor..cursor + 2].try_into().unwrap()) as usize;
+                assert_eq!(length, payload.len() + 4);
+                let mut checksum = super::super::fnv1a::Fnv1aHasher::new();
+                checksum.write(payload);
+                assert_eq!(
+                    &wire[cursor + 2..cursor + 6],
+                    &checksum.finish().to_be_bytes()
+                );
+                assert_eq!(&wire[cursor + 6..cursor + 2 + length], payload);
+                cursor += 2 + length;
+            }
+        };
+        tokio::join!(send, receive);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn invalid_response_auth_never_exposes_body_on_retry() {
+    for legacy in [false, true] {
+        for initial_feed in [false, true] {
+            let key = [33; 16];
+            let iv = [44; 16];
+            let (wire, mut peer) = tokio::io::duplex(4096);
+            let mut reader = VmessStream::new(
+                Box::new(wire),
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+                Some(ReadHeaderInfo {
+                    response_header_key: key,
+                    response_header_iv: iv,
+                    response_authentication_v: 81,
+                }),
+            )
+            .with_raw_body(true)
+            .with_legacy_response(legacy);
+            let mut header = vec![80, 0, 0, 0];
+            let mut bytes = if legacy {
+                super::super::legacy::Cfb128::new(&key, &iv).encrypt(&mut header);
+                header
+            } else {
+                let seal = |mut value: Vec<u8>, key_label: &[u8], iv_label: &[u8]| {
+                    let key = super::super::sha2::kdf(&key, &[key_label]);
+                    let nonce = super::super::sha2::kdf(&iv, &[iv_label]);
+                    let mut cipher = SealingKey::new(
+                        UnboundKey::new(&AES_128_GCM, &key[..16]).unwrap(),
+                        SingleUseNonce::new(&nonce[..12]),
+                    );
+                    cipher
+                        .seal_in_place_append_tag(Aad::empty(), &mut value)
+                        .unwrap();
+                    value
                 };
-                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+                let mut bytes = seal(
+                    vec![0, 4],
+                    b"AEAD Resp Header Len Key",
+                    b"AEAD Resp Header Len IV",
+                );
+                bytes.extend(seal(
+                    header,
+                    b"AEAD Resp Header Key",
+                    b"AEAD Resp Header IV",
+                ));
+                bytes
+            };
+            bytes.extend_from_slice(b"untrusted response body");
+            if initial_feed {
+                assert_eq!(
+                    reader.feed_initial_read_data(&bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::InvalidData,
+                );
+            } else {
+                peer.write_all(&bytes).await.unwrap();
+                peer.shutdown().await.unwrap();
+            }
+            for _ in 0..2 {
+                let mut bytes = [0; 128];
+                let mut output = ReadBuf::new(&mut bytes);
+                let error =
+                    std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read(cx, &mut output))
+                        .await
+                        .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(output.filled().is_empty());
             }
         }
     }
 }
 
-fn aead_response_length(length: u16) -> Vec<u8> {
-    let key = super::super::sha2::kdf(&[42;16], &[b"AEAD Resp Header Len Key"]);
-    let nonce = super::super::sha2::kdf(&[23;16], &[b"AEAD Resp Header Len IV"]);
-    let mut cipher = SealingKey::new(UnboundKey::new(&AES_128_GCM, &key[..16]).unwrap(), SingleUseNonce::new(&nonce[..12]));
-    let mut bytes = length.to_be_bytes().to_vec();
-    let tag = cipher.seal_in_place_separate_tag(Aad::empty(), &mut bytes).unwrap();
-    bytes.extend_from_slice(tag.as_ref());
-    bytes
-}
-
 #[tokio::test]
-async fn aead_response_length_is_bounded_before_buffering_or_indexing() {
-    for length in [0, 1, 2, 3, 260, u16::MAX] {
-        let (transport, _) = tokio::io::duplex(1);
-        let mut stream = client_header_stream(Box::new(transport), false, false);
-        assert_eq!(stream.feed_initial_read_data(&aead_response_length(length)).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+async fn malformed_frame_discards_preceding_buffered_plaintext_after_error() {
+    for cfb in [false, true] {
+        let (wire, mut peer) = tokio::io::duplex(4096);
+        let mut reader = if cfb {
+            VmessStream::new(Box::new(wire), false, None, None, None, false, None, None)
+                .with_cfb(&[42; 16], &[23; 16], &[42; 16], &[23; 16])
+        } else {
+            response_test_stream(Box::new(wire), Some(&AES_128_GCM), false, false, None)
+        };
+        let mut cfb_cipher = super::super::legacy::Cfb128::new(&[42; 16], &[23; 16]);
+        let mut aead_cipher = SealingKey::new(
+            UnboundKey::new(&AES_128_GCM, &[42; 16]).unwrap(),
+            VmessNonceSequence::new(&[23; 16]),
+        );
+        let mut bytes = Vec::new();
+        for (index, payload) in [b"buffered".as_slice(), b"corrupt"].into_iter().enumerate() {
+            if cfb {
+                let mut checksum = super::super::fnv1a::Fnv1aHasher::new();
+                checksum.write(payload);
+                let mut frame = ((payload.len() + 4) as u16).to_be_bytes().to_vec();
+                frame.extend_from_slice(&(checksum.finish() ^ index as u32).to_be_bytes());
+                frame.extend_from_slice(payload);
+                cfb_cipher.encrypt(&mut frame);
+                bytes.extend(frame);
+            } else {
+                let mut frame = payload.to_vec();
+                aead_cipher
+                    .seal_in_place_append_tag(Aad::empty(), &mut frame)
+                    .unwrap();
+                if index == 1 {
+                    *frame.last_mut().unwrap() ^= 1;
+                }
+                bytes.extend_from_slice(&(frame.len() as u16).to_be_bytes());
+                bytes.extend(frame);
+            }
+        }
+        peer.write_all(&bytes).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let mut bytes = [0; 128];
+        let mut output = ReadBuf::new(&mut bytes);
+        let first_error =
+            std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read(cx, &mut output))
+                .await
+                .unwrap_err();
+        assert!(output.filled().is_empty());
+        for message in [false, true] {
+            let error = std::future::poll_fn(|cx| {
+                if message {
+                    Pin::new(&mut reader).poll_read_message(cx, &mut output)
+                } else {
+                    Pin::new(&mut reader).poll_read(cx, &mut output)
+                }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), first_error.kind());
+            assert_eq!(error.to_string(), first_error.to_string());
+            assert!(output.filled().is_empty());
+        }
     }
 }
 
@@ -120,6 +356,18 @@ async fn message_padding_and_rejection_preserve_masks_and_nonces() {
                     .kind(),
                     std::io::ErrorKind::InvalidInput
                 );
+                if payload.is_empty() && algorithm.is_none() {
+                    assert_eq!(
+                        std::future::poll_fn(
+                            |cx| Pin::new(&mut writer).poll_write_message(cx, payload)
+                        )
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                        std::io::ErrorKind::InvalidInput,
+                    );
+                    continue;
+                }
                 std::future::poll_fn(|cx| Pin::new(&mut writer).poll_write_message(cx, payload))
                     .await
                     .unwrap();
@@ -287,15 +535,8 @@ async fn check_response_flushes(payload: &[u8]) {
                         capture.bytes_before_shutdown,
                         if payload.is_empty() { 0 } else { frame_start }
                     );
-                    if let Some(key) = &mut decoder.opening_key {
-                        let mut eof_tag =
-                            capture.data[frame_start + 2..frame_end - padding_len].to_vec();
-                        assert!(
-                            key.open_in_place(Aad::empty(), &mut eof_tag)
-                                .unwrap()
-                                .is_empty()
-                        );
-                    }
+                    // read_to_end authenticated the EOF tag and advanced its nonce.
+                    assert!(decoder.is_eof);
                 }
                 frame_start = frame_end;
             }
@@ -546,4 +787,165 @@ fn test_response_header_format() {
     // Response with options set (should still succeed)
     let header_with_opts = [response_v, 0x01, 0x00, 0x00];
     assert!(check_header_response(&header_with_opts, response_v).is_ok());
+}
+
+#[tokio::test]
+async fn authenticated_lengths_survive_fragmentation_and_reject_tampering() {
+    for algorithm in [&AES_128_GCM, &CHACHA20_POLY1305] {
+        let chacha = std::ptr::eq(algorithm, &CHACHA20_POLY1305);
+        for padding in [false, true] {
+            let make_stream = || {
+                let (wire, _) = tokio::io::duplex(1);
+                response_test_stream(Box::new(wire), Some(algorithm), true, padding, None)
+                    .with_authenticated_length(true, chacha, &[42; 16], &[23; 16])
+            };
+            let mut writer = make_stream();
+            let payload = b"authenticated data";
+            writer.write_cache[..payload.len()].copy_from_slice(payload);
+            writer.write_cache_size = payload.len();
+            assert!(writer.create_write_packet().unwrap());
+            let packet = writer.write_packet[..writer.write_packet_end_offset].to_vec();
+            for split in 0..packet.len() {
+                let mut reader = make_stream();
+                reader.feed_initial_read_data(&packet[..split]).unwrap();
+                assert_eq!(reader.processed_end_offset, 0);
+                let at = reader.unprocessed_end_offset;
+                reader.unprocessed_buf[at..at + packet.len() - split]
+                    .copy_from_slice(&packet[split..]);
+                reader.unprocessed_end_offset += packet.len() - split;
+                assert!(matches!(
+                    reader.try_decrypt().unwrap(),
+                    DecryptState::Success
+                ));
+                assert_eq!(
+                    &reader.processed_buf[..reader.processed_end_offset],
+                    payload
+                );
+            }
+            for offset in [0, 1, 2, 17, 18, 18 + payload.len()] {
+                let mut corrupted = packet.clone();
+                corrupted[offset] ^= 0x80;
+                assert_eq!(
+                    make_stream()
+                        .feed_initial_read_data(&corrupted)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+            }
+            // A valid authenticated EOF follows the data using the next nonce.
+            writer.write_packet_end_offset = 0;
+            assert!(writer.create_write_packet().unwrap());
+            let eof = writer.write_packet[..writer.write_packet_end_offset].to_vec();
+            let mut reader = make_stream();
+            reader.feed_initial_read_data(&packet).unwrap();
+            reader.unprocessed_buf[..eof.len()].copy_from_slice(&eof);
+            reader.unprocessed_end_offset = eof.len();
+            assert!(matches!(
+                reader.try_decrypt().unwrap(),
+                DecryptState::ReceivedEof
+            ));
+            // EOF still authenticates the payload tag even with a valid length header.
+            let mut reader = make_stream();
+            reader.feed_initial_read_data(&packet).unwrap();
+            reader.unprocessed_buf[..eof.len()].copy_from_slice(&eof);
+            reader.unprocessed_buf[18] ^= 1;
+            reader.unprocessed_end_offset = eof.len();
+            assert_eq!(
+                reader.try_decrypt().err().unwrap().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn coalesced_udp_packets_keep_boundaries_and_small_buffer_can_retry() {
+    for auth in [false, true] {
+        let (wire, _) = tokio::io::duplex(1);
+        let mut writer = response_test_stream(Box::new(wire), Some(&AES_128_GCM), true, true, None)
+            .with_authenticated_length(auth, false, &[42; 16], &[23; 16]);
+        let mut packets = Vec::new();
+        for payload in [b"first".as_slice(), b"second", b"third"] {
+            writer.write_packet_end_offset = 0;
+            writer.write_cache[..payload.len()].copy_from_slice(payload);
+            writer.write_cache_size = payload.len();
+            writer.create_write_packet().unwrap();
+            packets.extend_from_slice(&writer.write_packet[..writer.write_packet_end_offset]);
+        }
+        let (wire, _peer) = tokio::io::duplex(1);
+        let mut reader = response_test_stream(Box::new(wire), Some(&AES_128_GCM), true, true, None)
+            .with_authenticated_length(auth, false, &[42; 16], &[23; 16]);
+        reader.is_udp = true;
+        reader.feed_initial_read_data(&packets).unwrap();
+        for payload in [b"first".as_slice(), b"second", b"third"] {
+            let mut tiny = [0; 1];
+            assert_eq!(
+                std::future::poll_fn(
+                    |cx| Pin::new(&mut reader).poll_read_message(cx, &mut ReadBuf::new(&mut tiny))
+                )
+                .await
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            let mut bytes = [0; 32];
+            let mut output = ReadBuf::new(&mut bytes);
+            std::future::poll_fn(|cx| Pin::new(&mut reader).poll_read_message(cx, &mut output))
+                .await
+                .unwrap();
+            assert_eq!(output.filled(), payload);
+        }
+    }
+}
+
+#[tokio::test]
+async fn transport_eof_rejects_incomplete_authenticated_frames() {
+    for auth in [false, true] {
+        let (wire, _) = tokio::io::duplex(1);
+        let mut writer =
+            response_test_stream(Box::new(wire), Some(&AES_128_GCM), true, false, None)
+                .with_authenticated_length(auth, false, &[42; 16], &[23; 16]);
+        writer.write_cache[..4].copy_from_slice(b"data");
+        writer.write_cache_size = 4;
+        writer.create_write_packet().unwrap();
+        let packet = writer.write_packet[..writer.write_packet_end_offset].to_vec();
+        for split in 1..packet.len() {
+            let (wire, mut peer) = tokio::io::duplex(128);
+            tokio::io::AsyncWriteExt::write_all(&mut peer, &packet[..split])
+                .await
+                .unwrap();
+            drop(peer);
+            let mut reader =
+                response_test_stream(Box::new(wire), Some(&AES_128_GCM), true, false, None)
+                    .with_authenticated_length(auth, false, &[42; 16], &[23; 16]);
+            assert_eq!(
+                reader.read(&mut [0; 32]).await.unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_plaintext_buffer_does_not_wait_for_more_transport_bytes() {
+    let (wire, _peer) = tokio::io::duplex(1);
+    let mut reader = response_test_stream(Box::new(wire), None, false, false, None);
+    reader.processed_buf.fill(7);
+    reader.processed_end_offset = reader.processed_buf.len();
+    reader.unprocessed_buf[..6].copy_from_slice(&[0, 4, 1, 2, 3, 4]);
+    reader.unprocessed_end_offset = 6;
+    assert!(matches!(
+        reader.try_decrypt().unwrap(),
+        DecryptState::BufferFull
+    ));
+    let mut all = vec![0; reader.processed_buf.len() + 4];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        reader.read_exact(&mut all),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&all[all.len() - 4..], &[1, 2, 3, 4]);
 }

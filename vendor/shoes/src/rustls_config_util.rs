@@ -9,6 +9,7 @@ use crate::config::TlsKeyExchangeGroups;
 #[cfg(test)]
 mod hybrid_tests;
 
+pub(crate) mod browser;
 mod tls_options;
 
 pub fn try_create_client_config(
@@ -32,6 +33,10 @@ pub fn try_create_client_config(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "TLS construction boundary combines explicit verification inputs with node options"
+)]
 pub fn try_create_client_config_with_options(
     verify_webpki: bool,
     server_fingerprints: Vec<String>,
@@ -42,10 +47,35 @@ pub fn try_create_client_config_with_options(
     key_exchange_groups: &TlsKeyExchangeGroups,
     options: &crate::config::tls::TlsClientOptions,
 ) -> std::io::Result<rustls::ClientConfig> {
+    options.fragmentation.validate()?;
+    if let Some(ech) = &options.ech {
+        ech.static_config()?;
+        if options.disable_sni || options.max_version == Some(crate::config::tls::TlsVersion::V12) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ECH requires TLS 1.3 and SNI",
+            ));
+        }
+    }
     let provider = tls_options::provider(key_exchange_groups, options)?;
-    let versions =
-        tls_options::versions(options, tls13_only || key_exchange_groups.requires_hybrid())?;
+    let versions = tls_options::versions(
+        options,
+        tls13_only || key_exchange_groups.requires_hybrid() || options.ech.is_some(),
+    )?;
     let roots = tls_options::roots(options)?;
+    let rejection_verifier = if options.ech.is_some() {
+        Some(
+            rustls::client::WebPkiServerVerifier::builder_with_provider(
+                roots.clone(),
+                provider.clone(),
+            )
+            .build()
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+
     let builder =
         rustls::ClientConfig::builder_with_details(provider.clone(), crate::clock::time_provider())
             .with_protocol_versions(&versions)
@@ -73,6 +103,7 @@ pub fn try_create_client_config_with_options(
             get_disabled_verifier()
         };
     let verifier = tls_options::pin_verifier(verifier, options)?;
+    let verifier = tls_options::ech_verifier(verifier, rejection_verifier);
     let builder = builder
         .dangerous()
         .with_custom_certificate_verifier(verifier);
@@ -98,7 +129,17 @@ pub fn try_create_client_config_with_options(
         .map(|s| s.as_bytes().to_vec())
         .collect();
 
+    config.enable_secret_extraction = options.kernel_tx || options.kernel_rx;
     config.enable_sni = enable_sni && !options.disable_sni;
+    match options.client_fingerprint {
+        Some(crate::config::tls::TlsClientFingerprint::Chrome) => {
+            browser::configure(&mut config, false)?
+        }
+        Some(crate::config::tls::TlsClientFingerprint::Firefox) => {
+            config.client_hello_profile = Some(rustls::client::ClientHelloProfile::Firefox);
+        }
+        None => {}
+    }
     if key_exchange_groups.requires_hybrid() {
         config.enable_early_data = false;
     }

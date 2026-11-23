@@ -94,20 +94,42 @@ pub struct TcpClientSetupResult {
 
 /// A selected route whose transport is acquired only on a pool miss. Wrappers
 /// transform the future, keeping warm reuse ahead of every transport handshake.
+pub type ReopenTransport<'a> = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'a, std::io::Result<Box<dyn AsyncStream>>>
+        + Send
+        + Sync
+        + 'a,
+>;
+
 pub struct ClientTransport<'a> {
+    /// Recreate the entire transport stack, including every outer wrapper.
+    pub reopen: Option<ReopenTransport<'a>>,
     pub route: Arc<dyn super::carrier_dialer::CarrierDialer>,
     pub open: futures::future::BoxFuture<'a, std::io::Result<Box<dyn AsyncStream>>>,
 }
 
 impl<'a> ClientTransport<'a> {
-    pub fn wrap<F, Fut, S>(self, wrap: F) -> Self
+    pub fn wrap<'b, F, Fut, S>(self, wrap: F) -> ClientTransport<'b>
     where
-        F: FnOnce(Box<dyn AsyncStream>) -> Fut + Send + 'a,
-        Fut: Future<Output = std::io::Result<S>> + Send + 'a,
+        'a: 'b,
+        F: Fn(Box<dyn AsyncStream>) -> Fut + Send + Sync + 'b,
+        Fut: Future<Output = std::io::Result<S>> + Send + 'b,
         S: AsyncStream + 'static,
     {
-        Self {
+        let wrap = Arc::new(wrap);
+        let reopen = self.reopen.map(|reopen| {
+            let wrap = wrap.clone();
+            Arc::new(move || {
+                let open = reopen();
+                let wrap = wrap.clone();
+                Box::pin(
+                    async move { Ok(Box::new(wrap(open.await?).await?) as Box<dyn AsyncStream>) },
+                ) as futures::future::BoxFuture<'b, _>
+            }) as ReopenTransport<'b>
+        });
+        ClientTransport {
             route: self.route,
+            reopen,
             open: Box::pin(async move {
                 let stream = wrap(self.open.await?).await?;
                 Ok(Box::new(stream) as Box<dyn AsyncStream>)

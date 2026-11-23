@@ -425,6 +425,11 @@ fn tls_receive_errors_wake_writers_without_outbound_progress() {
                 Pin::new(&mut stream).poll_write(&mut write_cx, b"next"),
                 Poll::Ready(Err(_))
             ));
+            assert!(matches!(
+                Pin::new(&mut stream)
+                    .poll_write_vectored(&mut write_cx, &[io::IoSlice::new(b"next")]),
+                Poll::Ready(Err(_))
+            ));
             assert_eq!(state.lock().unwrap().allowance, 0);
         }
     }
@@ -788,7 +793,9 @@ async fn reality_certificate_errors_match_across_read_modes() {
         .unwrap();
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let server_config = Arc::new(
-        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
             .with_no_client_auth()
             .with_single_cert(
                 vec![cert.cert.der().clone()],
@@ -803,6 +810,8 @@ async fn reality_certificate_errors_match_across_read_modes() {
         (TlsReadMode::Stream, true),
     ] {
         let mut client = crate::reality::RealityClientConfig {
+            client_fingerprint: None,
+            alpn_protocols: None,
             mldsa65_verify: None,
             public_key: public_key.as_ref().try_into().unwrap(),
             short_id: [0; 8],
@@ -922,16 +931,23 @@ fn ordinary_connections() -> (TlsConnection, TlsConnection) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.cert.der().clone()).unwrap();
-    let server_config = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert.cert.der().clone()],
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into(),
-        )
-        .unwrap();
-    let client_config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let server_config =
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
+                    .into(),
+            )
+            .unwrap();
+    let client_config =
+        rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let server =
         TlsConnection::new(rustls::ServerConnection::new(Arc::new(server_config)).unwrap());
     let client = TlsConnection::new(

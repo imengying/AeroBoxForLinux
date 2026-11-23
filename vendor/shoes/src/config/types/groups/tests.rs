@@ -11,6 +11,7 @@ fn create_test_client_config() -> ClientConfig {
     ClientConfig {
         domain_resolver: None,
         connect_timeout_ms: None,
+        dial_options: Default::default(),
         name: None,
         control: None,
         bind_interface: crate::option_util::NoneOrOne::One("eth0".to_string()),
@@ -61,6 +62,7 @@ fn test_client_config_group() {
             ConfigSelection::Config(ClientConfig {
                 domain_resolver: None,
                 connect_timeout_ms: None,
+                dial_options: Default::default(),
                 name: None,
                 control: None,
                 bind_interface: crate::option_util::NoneOrOne::None,

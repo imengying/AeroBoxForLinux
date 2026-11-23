@@ -12,8 +12,9 @@ use crate::async_stream::{
     AsyncStream, AsyncWriteMessage,
 };
 
-// Xray reserves 666 bytes for metadata in its 8192-byte outbound buffer.
-const MAX_OUTBOUND_PAYLOAD: usize = 8192 - 666;
+// Mux.Cool carries a u16 payload length. A datagram can span multiple
+// underlying VMess/VLESS writes; the carrier's chunk size is not this limit.
+const MAX_OUTBOUND_PAYLOAD: usize = u16::MAX as usize;
 
 /// One XUDP association on an owned carrier; session IDs never cross carriers.
 pub(crate) struct XudpClientStream {
@@ -64,11 +65,18 @@ impl AsyncWriteMessage for XudpClientStream {
             return Poll::Ready(Err(ErrorKind::BrokenPipe.into()));
         }
         if data.len() > MAX_OUTBOUND_PAYLOAD {
-            log::debug!("Dropping oversized XUDP datagram: {} bytes", data.len());
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "XUDP datagram exceeds the 65535-byte payload limit",
+            )));
         }
         if data.is_empty() {
-            return Poll::Ready(Ok(()));
+            // Xray/sing-vmess treat zero-length Mux.Cool DATA as a control
+            // frame; they do not deliver an empty UDP datagram to the peer.
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "XUDP cannot represent an empty datagram; use packetaddr",
+            )));
         }
         ready!(this.drain(cx))?;
         let mut frame = BytesMut::new();
@@ -300,12 +308,76 @@ mod tests {
         );
         assert!(stream.write.is_empty() && !stream.started);
         stream.target = NetLocation::from_str("127.0.0.1:53", None).unwrap();
-        poll_fn(|cx| Pin::new(&mut stream).poll_write_message(cx, &[0; 7527]))
-            .await
-            .unwrap();
+        for rejected in [b"".as_slice(), &[0; 65536]] {
+            assert_eq!(
+                poll_fn(|cx| Pin::new(&mut stream).poll_write_message(cx, rejected))
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidInput,
+            );
+            assert!(stream.write.is_empty() && !stream.started);
+        }
         poll_fn(|cx| Pin::new(&mut stream).poll_write_message(cx, b"good"))
             .await
             .unwrap();
         assert_eq!(stream.write[4], SessionStatus::New as u8);
+    }
+
+    #[tokio::test]
+    async fn large_datagrams_cross_partial_carrier_writes_without_truncation() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (inner, mut peer) = tokio::io::duplex(127);
+            let mut stream = XudpClientStream::new(
+                Box::new(inner),
+                NetLocation::from_str("192.0.2.1:53", None).unwrap(),
+            );
+            let send = async {
+                for length in [7527, 32768, 65535] {
+                    let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+                    poll_fn(|cx| Pin::new(&mut stream).poll_write_message(cx, &payload))
+                        .await
+                        .unwrap();
+                    poll_fn(|cx| Pin::new(&mut stream).poll_flush_message(cx))
+                        .await
+                        .unwrap();
+                }
+            };
+            let receive = async {
+                let mut pending = BytesMut::new();
+                for (index, length) in [7527, 32768, 65535].into_iter().enumerate() {
+                    let (metadata, payload) = loop {
+                        if let Some(frame) =
+                            super::super::frame::decode_frame(&mut pending).unwrap()
+                        {
+                            break frame;
+                        }
+                        let mut bytes = [0; 1024];
+                        let count = peer.read(&mut bytes).await.unwrap();
+                        assert_ne!(count, 0);
+                        pending.extend_from_slice(&bytes[..count]);
+                    };
+                    assert_eq!(
+                        metadata.status,
+                        if index == 0 {
+                            SessionStatus::New
+                        } else {
+                            SessionStatus::Keep
+                        }
+                    );
+                    assert_eq!(payload.len(), length);
+                    assert!(
+                        payload
+                            .iter()
+                            .enumerate()
+                            .all(|(index, byte)| *byte == (index % 251) as u8)
+                    );
+                }
+                assert!(pending.is_empty());
+            };
+            tokio::join!(send, receive);
+        })
+        .await
+        .unwrap();
     }
 }

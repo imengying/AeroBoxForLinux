@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use crate::address::{Address, NetLocation, ResolvedLocation};
@@ -22,6 +23,7 @@ pub struct VlessTcpClientHandler {
     encryption: Option<ClientEncryption>,
     vision: bool,
     packet_encoding: PacketEncoding,
+    resolver: Option<Arc<dyn crate::resolver::Resolver>>,
 }
 
 impl std::fmt::Debug for VlessTcpClientHandler {
@@ -52,12 +54,24 @@ impl VlessTcpClientHandler {
             encryption,
             vision,
             packet_encoding: PacketEncoding::Raw,
+            resolver: None,
         })
     }
 
-    pub(crate) fn with_packet_encoding(mut self, encoding: PacketEncoding) -> Self {
+    pub(crate) fn with_packet_encoding(
+        mut self,
+        encoding: PacketEncoding,
+        resolver: Option<Arc<dyn crate::resolver::Resolver>>,
+    ) -> std::io::Result<Self> {
+        if self.vision && self.udp_enabled && !encoding.is_xudp() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "VLESS Vision UDP requires packet_encoding: xudp",
+            ));
+        }
         self.packet_encoding = encoding;
-        self
+        self.resolver = resolver;
+        Ok(self)
     }
 }
 
@@ -133,10 +147,29 @@ impl TcpClientHandler for VlessTcpClientHandler {
                 target.into_location(),
             )));
         }
-        write_vless_udp_header(&mut client_stream, &self.user_id, target.location()).await?;
+        let packet_addr = if self.packet_encoding == PacketEncoding::PacketAddr {
+            Some(
+                crate::packet_encoding::packet_addr_target(target.clone(), self.resolver.as_ref())
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let destination = if packet_addr.is_some() {
+            crate::packet_encoding::packet_addr_destination()
+        } else {
+            target.into_location()
+        };
+        write_vless_udp_header(&mut client_stream, &self.user_id, &destination).await?;
         client_stream.flush().await?;
         let response_stream = Box::new(VlessResponseStream::new(client_stream));
         let message_stream = VlessMessageStream::new(response_stream);
+        if let Some(endpoint) = packet_addr {
+            return Ok(Box::new(crate::packet_encoding::PacketAddrStream::new(
+                Box::new(message_stream),
+                endpoint,
+            )));
+        }
         Ok(Box::new(message_stream))
     }
 }

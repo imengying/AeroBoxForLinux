@@ -100,7 +100,7 @@ impl Ui {
             .collect();
         let indicators = Rc::new(RefCell::new(Vec::<(gtk::Stack, gtk::Spinner)>::new()));
         for item in state.subscriptions {
-            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
             content.add_css_class("subscription-card-content");
             let card = gtk::FlowBoxChild::new();
             card.set_widget_name("subscription-card");
@@ -124,6 +124,15 @@ impl Ui {
             title.set_max_width_chars(12);
             title.set_tooltip_text(Some(&item.name));
             header.append(&title);
+            if !item.import_issues.is_empty() {
+                let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
+                warning.add_css_class("warning");
+                warning.set_tooltip_text(Some(&format!(
+                    "{} 个节点未导入，可在菜单查看结果",
+                    item.import_issues.len()
+                )));
+                header.append(&warning);
+            }
             let indicator = gtk::Stack::new();
             indicator.set_size_request(16, 16);
             indicator.set_valign(gtk::Align::Center);
@@ -177,6 +186,28 @@ impl Ui {
                 }
             });
             actions.append(&edit);
+            let report = gtk::Button::with_label("导入结果");
+            report.add_css_class("flat");
+            report.set_widget_name("subscription-import-report");
+            let id = item.id.clone();
+            let weak = Rc::downgrade(self);
+            let pop = popover.downgrade();
+            report.connect_clicked(move |_| {
+                if let Some(pop) = pop.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(ui) = weak.upgrade()
+                    && let Some(sub) = ui
+                        .service
+                        .snapshot()
+                        .subscriptions
+                        .into_iter()
+                        .find(|s| s.id == id)
+                {
+                    ui.subscription_report(&sub, "导入结果", true);
+                }
+            });
+            actions.append(&report);
             let refresh = gtk::Button::with_label("更新订阅");
             refresh.add_css_class("flat");
             refresh.set_sensitive(!item.source.is_empty());
@@ -188,11 +219,22 @@ impl Ui {
                     ui.button_task(
                         button,
                         "更新中…",
-                        move |s| s.update_subscription(&id),
+                        move |s| {
+                            s.update_subscription(&id)?;
+                            Ok(id)
+                        },
                         |ui, result| match result {
-                            Ok(()) => {
-                                ui.notify("订阅已更新");
+                            Ok(id) => {
                                 ui.refresh(Page::Subscriptions);
+                                if let Some(sub) = ui
+                                    .service
+                                    .snapshot()
+                                    .subscriptions
+                                    .into_iter()
+                                    .find(|s| s.id == id)
+                                {
+                                    ui.subscription_report(&sub, "订阅已更新", false);
+                                }
                             }
                             Err(error) => ui.error("订阅更新失败", format!("{error:#}")),
                         },
@@ -215,6 +257,14 @@ impl Ui {
             header.append(&menu);
             content.append(&header);
             let used = item.download.saturating_add(item.upload);
+            let progress = gtk::ProgressBar::new();
+            progress.set_widget_name("subscription-progress");
+            progress.add_css_class("subscription-progress");
+            if item.total > 0 {
+                progress.set_fraction((used as f64 / item.total as f64).min(1.0));
+            }
+            content.append(&progress);
+            let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let info = label(
                 &if item.total > 0 {
                     format!("已用 {} / {}", bytes(used), bytes(item.total))
@@ -226,13 +276,35 @@ impl Ui {
                 "subscription-usage muted",
             );
             info.set_widget_name("subscription-usage");
+            info.set_hexpand(true);
+            info.set_width_chars(1);
             info.set_ellipsize(gtk::pango::EllipsizeMode::End);
             info.set_tooltip_text(Some(&if item.total > 0 {
                 format!("已用 {}，总量 {}", bytes(used), bytes(item.total))
             } else {
                 "订阅未提供流量信息".into()
             }));
-            content.append(&info);
+            footer.append(&info);
+            let updated = label(
+                &if item.updated == 0 {
+                    "尚未更新".into()
+                } else {
+                    format_timestamp(item.updated, "%m-%d %H:%M")
+                },
+                "subscription-updated muted small",
+            );
+            updated.set_widget_name("subscription-updated");
+            updated.set_xalign(1.0);
+            updated.set_tooltip_text(Some(&if item.updated == 0 {
+                "尚未更新".into()
+            } else {
+                format!(
+                    "更新于 {}",
+                    format_timestamp(item.updated, "%Y-%m-%d %H:%M")
+                )
+            }));
+            footer.append(&updated);
+            content.append(&footer);
             card.set_child(Some(&content));
             list.insert(&card, -1);
         }
@@ -429,10 +501,18 @@ impl Ui {
                     Ok(sub) => {
                         import.set_sensitive(true);
                         error.set_visible(false);
-                        hint.set_text(if sub.source.is_empty() {
-                            "已识别为节点内容，将保存为本地订阅"
+                        hint.set_text(&if sub.source.is_empty() {
+                            format!(
+                                "识别到 {} 个节点{}",
+                                sub.nodes.len(),
+                                if sub.import_issues.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("，{} 个节点无法导入", sub.import_issues.len())
+                                }
+                            )
                         } else {
-                            "已识别为订阅链接"
+                            "已识别为订阅链接".into()
                         });
                         hint.set_visible(true);
                     }
@@ -489,7 +569,9 @@ impl Ui {
                     }
                     sub.auto_update = auto_update && !sub.source.is_empty();
                     sub.update_interval_minutes = interval;
-                    s.import_subscription(sub)
+                    let id = sub.id.clone();
+                    s.import_subscription(sub)?;
+                    Ok(id)
                 },
                 move |ui, result| {
                     busy.set(false);
@@ -498,12 +580,20 @@ impl Ui {
                     }
                     validate(&buffer);
                     match result {
-                        Ok(()) => {
+                        Ok(id) => {
                             if let Some(window) = window.upgrade() {
                                 window.close();
                             }
-                            ui.notify("订阅已导入");
                             ui.refresh(Page::Subscriptions);
+                            if let Some(sub) = ui
+                                .service
+                                .snapshot()
+                                .subscriptions
+                                .into_iter()
+                                .find(|s| s.id == id)
+                            {
+                                ui.subscription_report(&sub, "订阅已导入", false);
+                            }
                         }
                         Err(e) => {
                             error.set_text(&format!("{e:#}"));
@@ -514,6 +604,60 @@ impl Ui {
             );
         });
         window.present();
+    }
+
+    fn subscription_report(&self, sub: &Subscription, title: &str, always_show: bool) {
+        let protocols = subscription::protocol_summary(&sub.nodes);
+        let summary = format!("{} 个节点 · {protocols}", sub.nodes.len());
+        if sub.import_issues.is_empty() && !always_show {
+            self.notify(&format!("{title}：{summary}"));
+            return;
+        }
+        let dialog = adw::AlertDialog::new(None::<&str>, None::<&str>);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.set_widget_name("subscription-import-result");
+        let heading = label(title, "title-3");
+        heading.set_halign(gtk::Align::Center);
+        content.append(&heading);
+        let text = gtk::Label::builder()
+            .label(format!("{}\n{summary}", sub.name))
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(48)
+            .build();
+        content.append(&text);
+        if !sub.import_issues.is_empty() {
+            let details = gtk::Expander::builder()
+                .label(format!(
+                    "{} 个节点未导入：查看原因",
+                    sub.import_issues.len()
+                ))
+                .build();
+            details.set_widget_name("subscription-import-issues");
+            let text = gtk::Label::builder()
+                .label(sub.import_issues.join("\n\n"))
+                .xalign(0.0)
+                .yalign(0.0)
+                .selectable(true)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .max_width_chars(48)
+                .build();
+            let scroll = gtk::ScrolledWindow::builder()
+                .child(&text)
+                .min_content_height(120)
+                .max_content_height(260)
+                .propagate_natural_height(true)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .build();
+            details.set_child(Some(&scroll));
+            content.append(&details);
+        }
+        dialog.set_extra_child(Some(&content));
+        dialog.add_response("close", "知道了");
+        dialog.set_default_response(Some("close"));
+        dialog.set_close_response("close");
+        dialog.present(Some(&self.window));
     }
 }
 
@@ -576,10 +720,15 @@ pub(super) async fn smoke_selection(
             };
             let name = get("subscription-name")?;
             let expiry = get("subscription-expiry")?;
+            let progress = get("subscription-progress")?;
             let usage = get("subscription-usage")?;
+            let updated = get("subscription-updated")?;
             ensure!(
-                name.y() + name.height() <= usage.y() && expiry.y() + expiry.height() <= usage.y(),
-                "流量信息没有位于名称和有效期下方"
+                name.y() + name.height() <= progress.y()
+                    && expiry.y() + expiry.height() <= progress.y()
+                    && progress.y() + progress.height() <= usage.y()
+                    && (usage.y() - updated.y()).abs() <= 2.0,
+                "订阅进度条与流量、更新时间布局不正确"
             );
             ensure!(
                 (name.y() - expiry.y()).abs() < 2.0,

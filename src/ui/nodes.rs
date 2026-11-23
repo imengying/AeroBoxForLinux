@@ -279,7 +279,7 @@ impl NodesPanel {
             card.test.set_tooltip_text(Some(if node.available {
                 "测试此节点延迟"
             } else {
-                "启动内核后测速"
+                "启动后测速"
             }));
             card.test_spinner.set_spinning(busy);
             card.test_indicator
@@ -296,7 +296,7 @@ impl NodesPanel {
         let generation = ui.service.status().generation;
         let weak = Rc::downgrade(self);
         ui.task_result(
-            move |s| s.subscription_nodes_runtime(&id),
+            move |s| s.subscription_nodes(&id),
             move |ui, result| {
                 if let Some(panel) = weak.upgrade()
                     && panel.revision.get() == revision
@@ -878,13 +878,13 @@ pub(super) fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
     } else {
         ensure!(
             !panel.pending.borrow().contains(&node.node_tag),
-            "未启动内核仍发起了测速"
+            "未启动仍发起了测速"
         );
         ensure!(
             button
                 .tooltip_text()
-                .is_some_and(|text| text.contains("启动内核")),
-            "未说明测速需要启动内核"
+                .is_some_and(|text| text.contains("启动后测速")),
+            "未说明测速需要先启动"
         );
     }
     let after = ui.service.snapshot();

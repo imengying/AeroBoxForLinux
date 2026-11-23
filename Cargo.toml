@@ -1,6 +1,6 @@
 [package]
 name = "aerobox-for-linux"
-version = "0.1.5"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.100"
 license = "GPL-3.0-only"
@@ -34,6 +34,8 @@ thiserror = "2.0.21"
 
 [dev-dependencies]
 rcgen = { path = "vendor/rcgen", default-features = false, features = ["rustcrypto", "pem"] }
+rustls = { path = "vendor/rustls/rustls", default-features = false, features = ["std", "tls12"] }
+aerobox-crypto = { path = "vendor/support/aerobox-crypto" }
 
 [lints.cargo]
 unused_dependencies = "deny"

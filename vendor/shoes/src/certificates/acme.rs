@@ -52,6 +52,43 @@ pub(super) fn validate_url(value: &str) -> io::Result<url::Url> {
     Ok(url)
 }
 
+fn tls_config(domain: &str, digest: &[u8]) -> io::Result<Arc<rustls::ServerConfig>> {
+    if digest.len() != 32 {
+        return Err(invalid("invalid ACME authorization digest"));
+    }
+    let key = rcgen::KeyPair::generate().map_err(io::Error::other)?;
+    let mut params =
+        rcgen::CertificateParams::new(vec![domain.to_owned()]).map_err(io::Error::other)?;
+    let now = std::time::SystemTime::now();
+    params.not_before = (now - Duration::from_secs(60)).into();
+    params.not_after = (now + Duration::from_secs(600)).into();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::new_acme_identifier(digest));
+    let cert = params.self_signed(&key).map_err(io::Error::other)?;
+    let provider = Arc::new(aerobox_crypto::provider());
+    let private = rustls::pki_types::PrivateKeyDer::from_pem_slice(key.serialize_pem().as_bytes())
+        .map_err(io::Error::other)?;
+    let signing_key = provider
+        .key_provider
+        .load_private_key(private)
+        .map_err(io::Error::other)?;
+    // The key and certificate were generated together. with_single_cert's generic
+    // WebPKI parsing rejects RFC 8737's intentionally critical acmeIdentifier.
+    let certified = rustls::sign::CertifiedKey::new(vec![cert.der().clone()], signing_key);
+    let mut config =
+        rustls::ServerConfig::builder_with_details(provider, crate::clock::time_provider())
+            .with_safe_default_protocol_versions()
+            .map_err(io::Error::other)?
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(super::FixedCertificate(Some(Arc::new(certified)))));
+    config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
+    config.send_tls13_tickets = 0;
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    Ok(Arc::new(config))
+}
+
 pub(super) fn client_tls(ca: Option<&Path>) -> io::Result<Arc<rustls::ClientConfig>> {
     let mut config = crate::rustls_config_util::create_dns_client_config();
     if let Some(path) = ca {
@@ -1140,7 +1177,7 @@ impl Scheduler {
             let authorization = challenge.key_authorization();
             let tls = if kind == ChallengeType::TlsAlpn01 {
                 Some(
-                    challenge::tls_config(&domain, authorization.digest().as_ref())
+                    tls_config(&domain, authorization.digest().as_ref())
                         .map_err(|error| instant_acme::Error::Other(Box::new(error)))?,
                 )
             } else {

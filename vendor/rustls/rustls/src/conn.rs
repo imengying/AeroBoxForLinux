@@ -497,6 +497,30 @@ impl<Data> ConnectionCommon<Data> {
         self.core.dangerous_extract_secrets()
     }
 
+    /// Transfer a fully drained buffered connection into an external record layer.
+    /// The caller must read exactly to a record boundary before transferring ownership.
+    pub fn dangerous_into_kernel_connection(
+        mut self,
+    ) -> Result<(ExtractedSecrets, KernelConnection<Data>), Error> {
+        if !self
+            .deframer_buffer
+            .filled_mut()
+            .is_empty()
+            || !self
+                .core
+                .common_state
+                .received_plaintext
+                .is_empty()
+            || !self.sendable_plaintext.is_empty()
+        {
+            return Err(Error::General(
+                "cannot transfer buffered TLS input or plaintext".into(),
+            ));
+        }
+        self.core
+            .dangerous_into_kernel_connection()
+    }
+
     /// Sets a limit on the internal buffers used to buffer
     /// unsent plaintext (prior to completing the TLS handshake)
     /// and unsent TLS records.  This limit acts only on application
@@ -1022,8 +1046,9 @@ impl<Data> ConnectionCore<Data> {
                 };
 
                 let allowed_plaintext = match message.typ {
-                    // CCS messages are always plaintext.
-                    ContentType::ChangeCipherSpec => true,
+                    // TLS 1.3 compatibility CCS is plaintext. A TLS 1.2
+                    // renegotiation CCS is authenticated under the old epoch.
+                    ContentType::ChangeCipherSpec => !self.common_state.tls12_renegotiating,
                     // Alerts are allowed to be plaintext if-and-only-if:
                     // * The negotiated protocol version is TLS 1.3. - In TLS 1.2 it is unambiguous when
                     //   keying changes based on the CCS message. Only TLS 1.3 requires these heuristics.

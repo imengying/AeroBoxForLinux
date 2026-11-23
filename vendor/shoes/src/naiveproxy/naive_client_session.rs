@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Version;
-#[cfg(test)] use http::{Method, Request};
+#[cfg(test)]
+use http::{Method, Request};
 use log::debug;
 use tokio::sync::oneshot;
 
@@ -53,6 +54,7 @@ impl NaiveClientSession {
     /// Create a new client session from an established TLS stream.
     ///
     /// Performs H2 handshake and spawns the connection driver.
+    #[cfg(test)]
     pub async fn new(stream: Box<dyn AsyncStream>) -> io::Result<Self> {
         Self::with_options(stream, &Options::default()).await
     }
@@ -109,20 +111,31 @@ impl NaiveClientSession {
     /// Open a new CONNECT stream to the specified target.
     ///
     /// Returns a stream wrapped with padding if enabled.
+    #[cfg(test)]
     pub async fn open_stream(
         &mut self,
         target: &NetLocation,
         auth_header: &str,
         padding_enabled: bool,
     ) -> io::Result<Box<dyn AsyncStream>> {
-        self.open_with_headers(target, auth_header, padding_enabled, &Headers::default()).await
+        self.open_with_headers(target, auth_header, padding_enabled, &Headers::default())
+            .await
     }
 
     pub async fn open_with_headers(
-        &mut self, target: &NetLocation, auth_header: &str, padding_enabled: bool,
+        &mut self,
+        target: &NetLocation,
+        auth_header: &str,
+        padding_enabled: bool,
         headers: &Headers,
     ) -> io::Result<Box<dyn AsyncStream>> {
-        let request = super::request::connect_request(target, auth_header, padding_enabled, headers, Version::HTTP_2)?;
+        let request = super::request::connect_request(
+            target,
+            auth_header,
+            padding_enabled,
+            headers,
+            Version::HTTP_2,
+        )?;
 
         std::future::poll_fn(|cx| self.send_request.poll_ready(cx))
             .await
@@ -136,7 +149,10 @@ impl NaiveClientSession {
             .await
             .map_err(|e| self.errors.map_with("CONNECT response error", e))?;
 
-        debug!("NaiveClientSession: CONNECT response: status={}", response.status());
+        debug!(
+            "NaiveClientSession: CONNECT response: status={}",
+            response.status()
+        );
 
         if response.status() != http::StatusCode::OK {
             return Err(io::Error::other(format!(

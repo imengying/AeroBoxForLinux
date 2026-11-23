@@ -16,7 +16,6 @@ use crate::conn::{ConnectionCore, UnbufferedConnectionCommon};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
-use crate::kernel::KernelConnection;
 use crate::log::trace;
 use crate::msgs::enums::NamedGroup;
 use crate::msgs::handshake::ClientExtensionsInput;
@@ -162,9 +161,37 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
 /// [`RootCertStore`]: crate::RootCertStore
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
+    /// Optional browser-style ClientHello layout.
+    ///
+    /// Firefox changes wire preferences while retaining the configured
+    /// cryptographic capabilities, ALPN and certificate-verification policy.
+    /// Chrome133 uses `client_hello_layout` instead; the policies are exclusive.
+    /// The default is `None`, preserving the standard rustls ClientHello.
+    pub client_hello_profile: Option<super::ClientHelloProfile>,
+
     /// Which ALPN protocols we include in our client hello.
     /// If empty, no ALPN extension is sent.
     pub alpn_protocols: Vec<Vec<u8>>,
+
+    /// Optional TLS 1.3 application settings, authenticated before being exposed.
+    pub application_settings: Option<super::alps::ApplicationSettings>,
+
+    /// Explicit initial TLS 1.3 key shares, in wire order. Each share uses an
+    /// independent private key, including a separate classical share alongside
+    /// a hybrid share. Empty preserves the provider/session-cache default.
+    /// At most eight unique, enabled TLS 1.3 groups may be specified.
+    /// A retry requesting a new group replaces all initial shares.
+    pub initial_key_share_groups: Vec<NamedGroup>,
+
+    /// Optional validated ClientHello wire construction policy.
+    pub client_hello_layout: Option<super::ClientHelloLayout>,
+
+    /// Permit at most one server-initiated TLS 1.2 renegotiation. Defaults to false.
+    /// Requires secure renegotiation, preserves the peer leaf certificate and
+    /// ALPN, and performs a full authenticated handshake. EMS cannot be downgraded.
+    /// Legacy resumed sessions without EMS cannot renegotiate (RFC7627).
+    /// TLS 1.3 and QUIC are unaffected.
+    pub enable_tls12_renegotiation: bool,
 
     /// Whether to check the selected ALPN was offered.
     ///
@@ -287,6 +314,8 @@ pub struct ClientConfig {
 
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
+    /// Authenticated ECH retry configurations for this connection only.
+    pub ech_rejection_handler: Option<Arc<dyn crate::client::EchRejectionHandler>>,
 
     /// Request a specific number of TLS 1.3 session tickets via [RFC 9149].
     ///
@@ -306,6 +335,29 @@ pub struct TicketRequest {
 }
 
 impl ClientConfig {
+    /// Install a DNS-discovered ECH configuration, preserving certificate policy.
+    /// Like the ECH builder, this restricts the handshake to TLS 1.3. TLS 1.3
+    /// must already be enabled and SNI cannot be disabled. No cleartext fallback
+    /// is possible when the server rejects the encrypted ClientHello.
+    pub fn set_ech_config(&mut self, config: crate::client::EchConfig) -> Result<(), Error> {
+        if !self
+            .versions
+            .contains(ProtocolVersion::TLSv1_3)
+            || !self
+                .provider
+                .cipher_suites
+                .iter()
+                .any(|suite| suite.tls13().is_some())
+            || !self.enable_sni
+        {
+            return Err(Error::General("ECH requires TLS 1.3 and SNI".into()));
+        }
+        self.versions = versions::EnabledVersions::new(&[&versions::TLS13]);
+        self.ech_mode = Some(config.into());
+        self.enable_early_data = false;
+        Ok(())
+    }
+
     /// Create a builder for a client configuration with
     /// [the process-default `CryptoProvider`][CryptoProvider#using-the-per-process-default-cryptoprovider]
     /// and safe protocol version defaults.
@@ -461,6 +513,12 @@ impl ClientConfig {
         group: NamedGroup,
         version: ProtocolVersion,
     ) -> Option<&'static dyn SupportedKxGroup> {
+        if self
+            .client_hello_layout
+            .is_some_and(|p| !p.permits_group(group))
+        {
+            return None;
+        }
         self.provider
             .kx_groups
             .iter()
@@ -830,6 +888,20 @@ mod connection {
             self.inner.dangerous_extract_secrets()
         }
 
+        /// Transfer an established, drained connection into an external record layer.
+        pub fn dangerous_into_kernel_connection(
+            self,
+        ) -> Result<
+            (
+                ExtractedSecrets,
+                crate::kernel::KernelConnection<ClientConnectionData>,
+            ),
+            Error,
+        > {
+            self.inner
+                .dangerous_into_kernel_connection()
+        }
+
         /// Return the connection's Encrypted Client Hello (ECH) status.
         pub fn ech_status(&self) -> EchStatus {
             self.inner.core.data.ech_status
@@ -924,6 +996,7 @@ impl ConnectionCore<ClientConnectionData> {
         if reality.is_some() {
             common_state.fips = false;
         }
+        data.reality_session = reality.is_some();
         data.reality = reality;
 
         let mut cx = hs::ClientContext {
@@ -1009,7 +1082,13 @@ impl UnbufferedClientConnection {
     /// for calling this method.
     pub fn dangerous_into_kernel_connection(
         self,
-    ) -> Result<(ExtractedSecrets, KernelConnection<ClientConnectionData>), Error> {
+    ) -> Result<
+        (
+            ExtractedSecrets,
+            crate::kernel::KernelConnection<ClientConnectionData>,
+        ),
+        Error,
+    > {
         self.inner
             .core
             .dangerous_into_kernel_connection()
@@ -1121,7 +1200,14 @@ pub struct ClientConnectionData {
     pub(super) early_data: EarlyData,
     pub(super) ech_status: EchStatus,
     pub(super) reality: Option<alloc::boxed::Box<dyn crate::reality::ClientHooks>>,
+    // The hooks are consumed at ServerHello, but REALITY's certificate policy
+    // continues through CertificateVerify. Ordinary TLS never sets this bit.
+    pub(super) reality_session: bool,
     pub(super) reality_client_hello: Vec<u8>,
+    pub(super) pending_application_settings: Option<super::alps::NegotiatedApplicationSettings>,
+    pub(super) send_application_settings: bool,
+    #[cfg(feature = "tls12")]
+    pub(super) tls12_renegotiation: Option<alloc::boxed::Box<super::tls12::Renegotiation>>,
 }
 
 impl ClientConnectionData {
@@ -1130,7 +1216,12 @@ impl ClientConnectionData {
             early_data: EarlyData::new(),
             ech_status: EchStatus::NotOffered,
             reality: None,
+            reality_session: false,
             reality_client_hello: Vec::new(),
+            pending_application_settings: None,
+            send_application_settings: false,
+            #[cfg(feature = "tls12")]
+            tls12_renegotiation: None,
         }
     }
 }

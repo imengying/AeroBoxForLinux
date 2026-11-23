@@ -48,6 +48,18 @@ pub trait SocketConnector: Send + Sync + Debug {
         ))
     }
 
+    async fn connect_quic_early(
+        &self,
+        resolver: &Arc<dyn Resolver>,
+        address: &ResolvedLocation,
+    ) -> std::io::Result<super::carrier_dialer::PendingQuicCarrier> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        Ok(super::carrier_dialer::PendingQuicCarrier::confirmed(
+            self.connect_quic(resolver, address).await?,
+            deadline,
+        ))
+    }
+
     /// Create a TCP/QUIC connection to the given address.
     ///
     /// # Arguments

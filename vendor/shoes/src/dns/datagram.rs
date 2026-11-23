@@ -12,7 +12,7 @@ use std::{
 use tokio::{io::ReadBuf, sync::mpsc};
 
 type Packet = io::Result<Vec<u8>>;
-pub(super) struct DatagramSocket {
+pub(crate) struct DatagramSocket {
     server: std::net::SocketAddr,
     local: std::net::SocketAddr,
     sender: mpsc::Sender<Vec<u8>>,
@@ -202,7 +202,7 @@ impl Drop for DatagramSocket {
         self.task.abort();
     }
 }
-pub(super) struct Writable(tokio_util::sync::PollSender<Vec<u8>>);
+pub(crate) struct Writable(tokio_util::sync::PollSender<Vec<u8>>);
 impl std::fmt::Debug for Writable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DnsDatagramWritable")

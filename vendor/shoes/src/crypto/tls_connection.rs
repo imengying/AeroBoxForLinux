@@ -63,6 +63,26 @@ impl TlsConnection {
             .map(|group| group.name())
     }
 
+    pub(crate) fn take_kernel(
+        &mut self,
+    ) -> io::Result<(
+        rustls::ExtractedSecrets,
+        rustls::kernel::KernelConnection<rustls::client::ClientConnectionData>,
+    )> {
+        match self.inner.take() {
+            Some(rustls::Connection::Client(connection))
+                if !self.reality && self.prefix.is_empty() =>
+            {
+                connection
+                    .dangerous_into_kernel_connection()
+                    .map_err(io::Error::other)
+            }
+            _ => Err(io::Error::other(
+                "kTLS requires an established ordinary TLS client",
+            )),
+        }
+    }
+
     pub fn read_tls(&mut self, reader: &mut dyn Read) -> io::Result<usize> {
         self.inner
             .as_mut()
@@ -199,10 +219,11 @@ mod tests {
     use std::sync::Arc;
 
     fn client() -> rustls::ClientConnection {
-        let config =
-            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
-                .with_root_certificates(rustls::RootCertStore::empty())
-                .with_no_client_auth();
+        let config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
         rustls::ClientConnection::new(Arc::new(config), "cover.test".try_into().unwrap()).unwrap()
     }
 

@@ -1,0 +1,69 @@
+# 开发
+
+```sh
+sudo pacman -S --needed rust gcc make cmake pkgconf gtk4 libadwaita gtksourceview5 librsvg
+git clone https://github.com/imengying/AeroBoxForLinux.git
+cd AeroBoxForLinux
+cargo build --release --locked
+./target/release/AeroBox
+```
+
+Rust 工具链固定为 1.100.0，见 `rust-toolchain.toml`；依赖由 `Cargo.lock` 锁定。桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.5、GtkSourceView ≥ 5.6。Ubuntu 24.04 开发包为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config cmake`。
+
+```sh
+make test     # 格式、Clippy、单元与集成测试
+make wayland  # headless Wayland 界面测试
+make package  # 生成 target/packages/*.tar.gz
+make clean
+```
+
+普通集成测试使用临时目录、回环地址和临时端口，验证实际流量、节点与模式切换、回滚、下载、测速和启停，不依赖外部内核，不启动特权 TUN。慢规则下载测试同时持续查询状态，验证在线更新不会被首页轮询打断；传输测试检查分享链接缺省路径、Host 和免认证 SOCKS 的实际请求。
+
+`make test` 和 GitHub Actions 还运行 `scripts/test-protocols.sh --unit`，覆盖内置传输、DNS、TLS 与密码组件的回归测试。这个模式无需 Go 或独立协议服务端。组件测试以主项目的 `Cargo.lock` 为基础解析测试依赖，结束时清理临时锁文件。
+
+额外测试按需显式运行，测试服务端不属于应用运行依赖：
+
+```sh
+# 混合协议订阅、字段保留，以及真实 TLS ClientHello / 会话恢复
+cargo test --test subscription_profiles --test tls_profiles
+# 隔离命名空间内验证 TUN TCP/UDP/DNS、断网与崩溃恢复、停止清理
+cargo test --test tun managed_tun_routes_traffic_and_restores_network_in_namespace -- --ignored
+# 与独立 sing-box 测试服务端验证协议及 WS/gRPC/HTTP/Vision/REALITY 传输互通
+AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
+# Naive HTTP/2、HTTP/3 的独立 Go 回显服务端
+(cd vendor/shoes/tests/fixtures/naive-peer && go build -o /tmp/aerobox-naive-peer .)
+AEROBOX_NAIVE_PEER=/tmp/aerobox-naive-peer cargo test --test naive_interop -- --ignored
+# VMess、SS 插件、TUIC 0-RTT/UoT、ECH 与 TLS 分片：独立 Go 服务互通
+scripts/test-protocols.sh
+# 还可同时加入 sing-box 作为独立服务端
+AEROBOX_TEST_PEER=/path/to/sing-box scripts/test-protocols.sh
+# Linux 6.14+ 且启用 kTLS：增加 TLS 1.3 密钥更新测试
+AEROBOX_TEST_KTLS_REKEY=1 scripts/test-protocols.sh
+```
+
+独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片、kTLS 的组合，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
+
+TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使用独立 SOCKS 测试服务端，覆盖 IPv4/IPv6 数据报、UDP/TCP DNS 接管、切换网关、断网恢复与停止，以及强制结束进程后的恢复；所有路由更改均限制在测试命名空间内。
+
+界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放；截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
+
+`src/runtime.rs` 组装原生运行配置，`engine.rs` 管理连接生命周期和事务回滚，`protocol/` 严格转换节点参数，`model.rs` 管理数据与原子存储，`ui/` 为 GTK 界面。`vendor/` 保存带本项目修改的第三方源码，`tests/` 包含集成测试。GitHub Actions 使用 `ubuntu-latest`，仅构建 amd64，推送 `v*` 标签后发布安装包。
+
+## 文件布局
+
+- `src/`：AeroBox 的数据、连接管理、协议转换与桌面界面。
+- `src/ui/`：页面与共用组件；`smoke.rs` 负责 Wayland 界面回归。
+- `resources/icons/`、`resources/styles/`、`resources/desktop/`：图标、Material 3 样式与桌面入口。
+- `resources/rules/`：初始规则数据及来源说明。
+- `build.rs`：构建时将资源清单编译到 Cargo 输出目录，不在源码中保存生成的资源包。需要 `glib-compile-resources`（GLib 开发工具）。
+- `tests/`：应用的集成测试与测试服务端。
+- `vendor/`、`licenses/`：第三方源码及许可。
+- `scripts/`：安装、卸载、打包和 Wayland 验证。
+- `docs/`：开发说明和协议支持。
+- `target/`：编译产物、安装包和截图，不提交到 Git。
+
+AeroBox 作为一个应用构建、测试和发布；连接管理和界面共用同一份状态，没有独立内核的安装或升级流程。
+
+界面参考 [Material 3 色彩角色](https://m3.material.io/styles/color/roles)，使用 GTK 原生控件及桌面字体渲染；配色、卡片、选中状态和间距统一在 `resources/styles/` 管理。
+
+Chrome133 的参考互通测试还覆盖 ALPS、Brotli、独立密钥共享、客户端证书认证、REALITY 认证失败和 TLS 1.2 重协商。`scripts/test-protocols.sh` 构建测试用 Go 服务端并运行生产连接路径。密码组件的完整独立测试可用 `cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml` 运行；`tests/fixtures` 中的 CBC peer，以及上述脚本生成的 `AEROBOX_TLS_PROFILE_PEER` / `AEROBOX_TLS12_RENEGOTIATION_PEER`，用于显式运行对应 ignored 互通测试。TLS 重协商参考服务端的补丁只用于测试，由上游源码哈希和补丁后哈希校验。

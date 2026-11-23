@@ -16,15 +16,7 @@ concurrency:
 
 jobs:
   linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -42,6 +34,8 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Test network and TLS components
+        run: scripts/test-protocols.sh --unit
       - name: Build
         env:
           AEROBOX_VERSION: ${{ github.ref_name }}
@@ -49,26 +43,24 @@ jobs:
       - name: Test Wayland without X11
         run: timeout 90s scripts/test-wayland.sh
       - name: Test text and layout at 2x display scale
-        if: matrix.arch == 'amd64'
         env:
           AEROBOX_TEST_SCALE: "2"
         run: timeout 90s scripts/test-wayland.sh
       - name: Test fractional Wayland scale at 1.25x
-        if: matrix.arch == 'amd64'
         env:
           AEROBOX_TEST_SCALE: "1.25"
         run: timeout 90s scripts/test-wayland.sh
       - name: Package
-        run: scripts/package.sh ${{ matrix.arch }}
+        run: scripts/package.sh amd64
       - uses: actions/upload-artifact@v6
         with:
-          name: linux-${{ matrix.arch }}
-          path: target/packages/AeroBoxForLinux-linux-*.tar.gz
+          name: linux-amd64
+          path: target/packages/AeroBoxForLinux-linux-amd64.tar.gz
           if-no-files-found: error
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: wayland-${{ matrix.arch }}
+          name: wayland-amd64
           path: target/wayland/
 
   release:
@@ -76,27 +68,30 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: linux-*
+          name: linux-amd64
           path: release-assets
-          merge-multiple: true
       - uses: softprops/action-gh-release@v3
         with:
-          files: release-assets/AeroBoxForLinux-linux-*.tar.gz
+          name: AeroBox ${{ github.ref_name }}
+          files: release-assets/AeroBoxForLinux-linux-amd64.tar.gz
           prerelease: ${{ contains(github.ref_name, 'dev') || contains(github.ref_name, 'preview') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
           body: |
             AeroBox，使用 Rust、GTK4 / libadwaita 的原生 Linux Wayland 客户端。
 
-            节点恢复方框卡片，点击卡片选中并高亮，底部图标独立测速；测速不会改变当前节点。
-            订阅采用两列卡片：名称与有效期在上方，流量进度条居中，已用 / 总量与更新时间在下方。
-            首页、节点、订阅及设置统一卡片边框、圆角、间距、字体和选中样式，支持窄窗口及 1.25 倍缩放。
-            节点页仍只展示当前订阅的实际节点；规则、全局与直连只在首页切换。
+            连接、分流、DNS 和 TUN 直接集成在应用中，无需下载或指定外部内核。
+
+            - 支持 Shadowsocks、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP，以及相应传输与 TLS 参数。
+            - 完善混合协议订阅导入，保留节点参数并显示导入问题；点击订阅或节点卡片即可选用，节点可独立测速。
+            - 完善浏览器 TLS、REALITY、ECH、TLS 分片和 Linux kTLS，并修复握手重试校验。
+            - 首页统一显示出口 IP、流量与应用内存，集中切换规则、全局和直连；界面支持窄窗口与 1.25 倍缩放。
+            - 使用 Rust 1.100；仅发布 AMD64 安装包，在 ubuntu-latest 构建并执行应用、网络组件及 Wayland 回归测试。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
-            Intel / AMD 选择 amd64，ARM64 选择 arm64。下载并解压 tar.gz 后运行 `./install.sh`。
-            更新后完全退出旧进程，再从应用菜单启动 AeroBox；Rust 网络功能已内置，无需下载或指定外部内核。
+            安装包适用于 Intel / AMD 的 x86_64 电脑。下载并解压 tar.gz 后运行 `./install.sh`。
+            更新后完全退出旧进程，再从应用菜单启动 AeroBox。本版不迁移旧版配置数据；升级前请保留订阅来源。
 
-            安装与使用说明见 README.md。
+            安装与使用说明见 README.md，协议支持及参数组合限制见 docs/protocols.md。

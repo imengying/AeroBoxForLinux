@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/imengying/AeroBoxForLinux">
+    <file alias="icons/scalable/actions/aerobox-bolt-symbolic.svg">icons/bolt-symbolic.svg</file>
+    <file>styles/main.css</file>
+    <file>styles/theme.css</file>
+    <file>styles/components.css</file>
+    <file>styles/pages.css</file>
+  </gresource>
+</gresources>

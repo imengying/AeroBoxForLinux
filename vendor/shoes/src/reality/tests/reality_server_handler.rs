@@ -274,8 +274,10 @@ async fn incompatible_hellos_and_small_targets_forward_unchanged() {
             _ => {
                 let mut message = vec![2, 0, 0, 0, 3, 3];
                 if case == "retry" {
-                    let retry_random =
-                        aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, b"HelloRetryRequest");
+                    let retry_random = aerobox_primitives::digest::digest(
+                        &aerobox_primitives::digest::SHA256,
+                        b"HelloRetryRequest",
+                    );
                     message.extend_from_slice(retry_random.as_ref());
                 } else {
                     message.extend_from_slice(&[3; 32]);
@@ -416,6 +418,8 @@ async fn authenticated_non_vision_oversized_preread_returns_error_without_panick
         .compute_public_key()
         .unwrap();
     let mut client = RealityClientConfig {
+        client_fingerprint: None,
+        alpn_protocols: None,
         mldsa65_verify: None,
         public_key: public_key.as_ref().try_into().unwrap(),
         short_id: [0; 8],
@@ -440,7 +444,9 @@ async fn authenticated_non_vision_oversized_preread_returns_error_without_panick
     )
     .unwrap();
     let decoy_config =
-        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
             .with_no_client_auth()
             .with_single_cert(
                 vec![cert.cert.der().clone()],

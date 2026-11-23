@@ -40,7 +40,7 @@ pub(super) fn addresses(message: &Message) -> impl Iterator<Item = std::net::IpA
     })
 }
 
-pub(super) fn decode(bytes: &[u8]) -> io::Result<Message> {
+pub(crate) fn decode(bytes: &[u8]) -> io::Result<Message> {
     if bytes.len() < 12 || bytes.len() > u16::MAX as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

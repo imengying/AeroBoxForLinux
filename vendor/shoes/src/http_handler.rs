@@ -49,28 +49,63 @@ mod custom_options_tests {
     use tokio::io::AsyncReadExt;
     #[tokio::test]
     async fn custom_path_and_repeated_headers_preserve_coalesced_response() {
-        tokio::time::timeout(std::time::Duration::from_secs(3),async {
-            let options:HttpClientOptions=serde_json::from_value(serde_json::json!({"path":"/tunnel?q=1","headers":{"x-key":["a","b"]}})).unwrap();
-            let handler=HttpTcpClientHandler::with_options(Some(("u".into(),"p".into())),None,HttpVersion::H1,options).unwrap();
-            let (client,mut peer)=tokio::io::duplex(1024);
-            let peer=tokio::spawn(async move {
-                let mut header=Vec::new();while !header.ends_with(b"\r\n\r\n") {header.push(peer.read_u8().await.unwrap());}
-                let header=String::from_utf8(header).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let options: HttpClientOptions = serde_json::from_value(
+                serde_json::json!({"path":"/tunnel?q=1","headers":{"x-key":["a","b"]}}),
+            )
+            .unwrap();
+            let handler = HttpTcpClientHandler::with_options(
+                Some(("u".into(), "p".into())),
+                None,
+                HttpVersion::H1,
+                options,
+            )
+            .unwrap();
+            let (client, mut peer) = tokio::io::duplex(1024);
+            let peer = tokio::spawn(async move {
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(peer.read_u8().await.unwrap());
+                }
+                let header = String::from_utf8(header).unwrap();
                 assert!(header.starts_with("CONNECT /tunnel?q=1 HTTP/1.1\r\nHost: [::1]:443\r\n"));
                 assert!(header.contains("x-key: a\r\nx-key: b\r\n"));
                 assert!(header.contains("Proxy-Authorization: Basic dTpw\r\n"));
-                peer.write_all(b"HTTP/1.1 200 OK\r\n\r\ninitial").await.unwrap();
+                peer.write_all(b"HTTP/1.1 200 OK\r\n\r\ninitial")
+                    .await
+                    .unwrap();
             });
-            let mut result=handler.setup_client_tcp_stream(Box::new(client),NetLocation::from_str("[::1]:443",None).unwrap().into()).await.unwrap();
-            let mut data=result.early_data.take().unwrap_or_default();result.client_stream.read_to_end(&mut data).await.unwrap();assert_eq!(data,b"initial");peer.await.unwrap();
-        }).await.unwrap();
+            let mut result = handler
+                .setup_client_tcp_stream(
+                    Box::new(client),
+                    NetLocation::from_str("[::1]:443", None).unwrap().into(),
+                )
+                .await
+                .unwrap();
+            let mut data = result.early_data.take().unwrap_or_default();
+            result.client_stream.read_to_end(&mut data).await.unwrap();
+            assert_eq!(data, b"initial");
+            peer.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
     #[test]
     fn options_reject_header_injection_and_invalid_connect_framing() {
-        for value in [serde_json::json!({"path":"/ok\r\nInjected: true"}),serde_json::json!({"headers":{"x-key":"a\r\nInjected: true"}}),serde_json::json!({"headers":{"content-length":"42"}}),serde_json::json!({"headers":{"host":["a","b"]}})] {
-            let options:HttpClientOptions=serde_json::from_value(value).unwrap();assert!(options.validate(HttpVersion::H1).is_err());
+        for value in [
+            serde_json::json!({"path":"/ok\r\nInjected: true"}),
+            serde_json::json!({"headers":{"x-key":"a\r\nInjected: true"}}),
+            serde_json::json!({"headers":{"content-length":"42"}}),
+            serde_json::json!({"headers":{"host":["a","b"]}}),
+        ] {
+            let options: HttpClientOptions = serde_json::from_value(value).unwrap();
+            assert!(options.validate(HttpVersion::H1).is_err());
         }
-        let options=HttpClientOptions{path:"/tunnel".into(),..Default::default()};assert!(options.validate(HttpVersion::H2).is_err());
+        let options = HttpClientOptions {
+            path: "/tunnel".into(),
+            ..Default::default()
+        };
+        assert!(options.validate(HttpVersion::H2).is_err());
     }
 }
 
@@ -604,16 +639,30 @@ pub struct HttpClientOptions {
 }
 impl HttpClientOptions {
     pub fn validate(&self, version: HttpVersion) -> std::io::Result<()> {
-        let headers=self.headers.parsed()?;
-        if headers.get_all("host").iter().count()>1 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"HTTP proxy requires a single Host header"));
+        let headers = self.headers.parsed()?;
+        if headers.get_all("host").iter().count() > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP proxy requires a single Host header",
+            ));
         }
         if !self.path.is_empty() {
-            let path=self.path.parse::<http::uri::PathAndQuery>().map_err(|_|std::io::Error::new(std::io::ErrorKind::InvalidInput,"invalid HTTP proxy path"))?;
-            if !self.path.starts_with('/') || self.path.contains('#') || path.as_str()!=self.path {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"invalid HTTP proxy path"));
+            let path = self.path.parse::<http::uri::PathAndQuery>().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid HTTP proxy path")
+            })?;
+            if !self.path.starts_with('/') || self.path.contains('#') || path.as_str() != self.path
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid HTTP proxy path",
+                ));
             }
-            if version==HttpVersion::H2 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"HTTP/2 CONNECT cannot carry a path"));}
+            if version == HttpVersion::H2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "HTTP/2 CONNECT cannot carry a path",
+                ));
+            }
         }
         Ok(())
     }
@@ -660,9 +709,16 @@ impl HttpTcpClientHandler {
         }
     }
 
-    pub fn with_options(auth: Option<(String,String)>, resolver: Option<Arc<dyn Resolver>>, version: HttpVersion, options: HttpClientOptions) -> std::io::Result<Self> {
+    pub fn with_options(
+        auth: Option<(String, String)>,
+        resolver: Option<Arc<dyn Resolver>>,
+        version: HttpVersion,
+        options: HttpClientOptions,
+    ) -> std::io::Result<Self> {
         options.validate(version)?;
-        let mut handler=Self::new(auth,resolver,version);handler.options=options;Ok(handler)
+        let mut handler = Self::new(auth, resolver, version);
+        handler.options = options;
+        Ok(handler)
     }
 
     async fn connect_location(
@@ -718,7 +774,9 @@ impl HttpTcpClientHandler {
             .method(http::Method::CONNECT)
             .version(http::Version::HTTP_2)
             .uri(format_authority(&location));
-        for (name,value) in self.options.headers.parsed()?.iter() {request=request.header(name,value);}
+        for (name, value) in self.options.headers.parsed()?.iter() {
+            request = request.header(name, value);
+        }
         if let Some(auth) = &self.auth_header {
             let mut value = http::HeaderValue::from_str(auth).map_err(std::io::Error::other)?;
             value.set_sensitive(true);
@@ -776,7 +834,7 @@ impl TcpClientHandler for HttpTcpClientHandler {
 
     fn validate_alpn(&self, alpn: Option<&[u8]>) -> std::io::Result<()> {
         let valid = match self.version {
-            HttpVersion::H1 => true,
+            HttpVersion::H1 => alpn.is_none_or(|protocol| protocol == b"http/1.1"),
             HttpVersion::H2 => alpn == Some(b"h2"),
         };
         if valid {
@@ -828,17 +886,36 @@ impl TcpClientHandler for HttpTcpClientHandler {
         }
         let connect_location = self.connect_location(remote_location).await?;
 
-        let authority=format_authority(&connect_location);
-        let headers=self.options.headers.parsed()?;
-        if !self.options.path.is_empty() && headers.get("host").is_some_and(|host|connect_location.address().hostname()!=host.to_str().ok()) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"HTTP CONNECT cannot combine path with a different Host"));
+        let authority = format_authority(&connect_location);
+        let headers = self.options.headers.parsed()?;
+        if !self.options.path.is_empty()
+            && headers
+                .get("host")
+                .is_some_and(|host| connect_location.address().hostname() != host.to_str().ok())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP CONNECT cannot combine path with a different Host",
+            ));
         }
-        let target=if self.options.path.is_empty() {&authority} else {&self.options.path};
-        let mut connect_str=format!("CONNECT {target} HTTP/1.1\r\n");
-        if !self.options.path.is_empty() && !headers.contains_key("host") {connect_str.push_str(&format!("Host: {authority}\r\n"));}
-        for (name,value) in headers.iter() {
-            connect_str.push_str(name.as_str());connect_str.push_str(": ");
-            connect_str.push_str(value.to_str().map_err(|_|std::io::Error::new(std::io::ErrorKind::InvalidInput,"HTTP proxy header must be textual"))?);
+        let target = if self.options.path.is_empty() {
+            &authority
+        } else {
+            &self.options.path
+        };
+        let mut connect_str = format!("CONNECT {target} HTTP/1.1\r\n");
+        if !self.options.path.is_empty() && !headers.contains_key("host") {
+            connect_str.push_str(&format!("Host: {authority}\r\n"));
+        }
+        for (name, value) in headers.iter() {
+            connect_str.push_str(name.as_str());
+            connect_str.push_str(": ");
+            connect_str.push_str(value.to_str().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "HTTP proxy header must be textual",
+                )
+            })?);
             connect_str.push_str("\r\n");
         }
 

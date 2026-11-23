@@ -173,6 +173,7 @@ impl Default for ResolvedClientConfig {
             address: super::types::common::unspecified_address(),
             domain_resolver: None,
             connect_timeout_ms: None,
+            dial_options: Default::default(),
             protocol: ResolvedClientProxyConfig::Direct,
             transport: super::Transport::default(),
             tcp_settings: None,

@@ -195,6 +195,10 @@ async fn prepare_tracking(
     .await
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Shared preparation boundary keeps reload state and borrowed services explicit"
+)]
 async fn prepare_tracking_mode(
     paths: &[String],
     configs: Vec<Config>,

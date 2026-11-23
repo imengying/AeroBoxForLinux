@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 /// Convert a single Android/sing-box outbound into a named Rust client group.
 /// Returns an error for every field that cannot be represented faithfully.
 pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
+    let port = super::server_port(&value);
     let mut f = Fields::new(value, path)?;
     let kind = f.text("type")?;
     let tag = f.text("tag")?;
@@ -39,22 +40,10 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     let mut client = json!({"name":format!("{tag}-transport")});
     if kind != "direct" {
         let server = f.text("server")?;
-        let mut port = f.take("server_port");
-        if port.is_none() && kind == "hysteria2" {
-            port = f
-                .values
-                .get("server_ports")
-                .and_then(Value::as_array)
-                .and_then(|v| v.first())
-                .and_then(Value::as_str)
-                .and_then(|v| v.split(':').next())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Value::from);
-        }
-        let port = port
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| error(format!("{path}.server_port"), "required port in 1..65535"))?;
-        client["address"] = address(&server, port, path)?.into();
+        f.take("server_port");
+        let port =
+            port.ok_or_else(|| error(format!("{path}.server_port"), "required port in 1..65535"))?;
+        client["address"] = address(&server, u64::from(port), path)?.into();
     }
     f.copy("bind_interface", &mut client, "bind_interface");
     f.copy("domain_resolver", &mut client, "domain_resolver");
@@ -69,10 +58,15 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         }
     };
     let mut vision = false;
+    let mut vless_encryption = false;
     let mut protocol = match kind.as_str() {
         "direct" => json!({"type":"direct"}),
         "shadowsocks" => {
-            json!({"type":"shadowsocks", "cipher":f.text("method")?, "password":f.text("password")?, "udp_enabled":udp})
+            let mut p = json!({"type":"shadowsocks", "cipher":f.text("method")?, "password":f.text("password")?, "udp_enabled":udp});
+            if let Some(plugin) = super::ss_plugin::convert(&mut f)? {
+                p["plugin"] = plugin;
+            }
+            p
         }
         "vmess" => {
             let alter_id = f.take("alter_id").unwrap_or(json!(0));
@@ -85,8 +79,8 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                         "expected an integer in 0..65535",
                     )
                 })?;
-            f.default_only("global_padding", &[json!(false)])?;
-            f.default_only("authenticated_length", &[json!(false)])?;
+            let global_padding = f.boolean("global_padding", false)?;
+            let authenticated_length = f.boolean("authenticated_length", false)?;
             let packet_encoding = packet_encoding(&mut f, false)?;
             let cipher = f.string("security")?.unwrap_or("auto".into());
             let cipher = if cipher == "auto" {
@@ -94,26 +88,46 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             } else {
                 cipher
             };
-            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "alter_id":alter_id, "udp_enabled":udp, "packet_encoding":packet_encoding})
+            json!({"type":"vmess", "cipher":cipher, "user_id":f.text("uuid")?, "alter_id":alter_id, "global_padding":global_padding, "authenticated_length":authenticated_length, "udp_enabled":udp, "packet_encoding":packet_encoding})
         }
         "vless" => {
+            let encryption = f.string("encryption")?.unwrap_or_else(|| "none".into());
+            vless_encryption = !matches!(encryption.as_str(), "" | "none");
             let packet_encoding = packet_encoding(&mut f, true)?;
             let flow = f.string("flow")?.unwrap_or_default();
             if !["", "xtls-rprx-vision"].contains(&flow.as_str()) {
                 return Err(error(format!("{path}.flow"), "unsupported VLESS flow"));
             }
             vision = flow == "xtls-rprx-vision";
-            if vision && udp && packet_encoding.is_empty() {
+            if vision && udp && packet_encoding != "xudp" {
                 return Err(error(
                     format!("{path}.packet_encoding"),
                     "VLESS Vision requires XUDP for UDP payloads",
                 ));
             }
-            json!({"type":"vless", "user_id":f.text("uuid")?, "udp_enabled":udp, "packet_encoding":packet_encoding})
+            json!({"type":"vless", "user_id":f.text("uuid")?, "encryption":encryption, "vision":vision && vless_encryption, "udp_enabled":udp, "packet_encoding":packet_encoding})
         }
         "trojan" => json!({"type":"trojan", "password":f.text("password")?, "udp_enabled":udp}),
         "anytls" => {
             let mut p = json!({"type":"anytls", "password":f.text("password")?, "udp_enabled":udp});
+            f.copy("client_metadata", &mut p, "client_metadata");
+            // AnyTLS carries UDP inside its multiplexed TLS session using
+            // UoT v2. It must not be wrapped in another UoT transport.
+            if let Some(uot) = f.take("udp_over_tcp") {
+                let enabled = match uot {
+                    Value::Bool(enabled) => enabled,
+                    value => {
+                        let mut options = Fields::new(value, &format!("{path}.udp_over_tcp"))?;
+                        let enabled = options.boolean("enabled", false)?;
+                        options.default_only("version", &[json!(2)])?;
+                        options.finish()?;
+                        enabled
+                    }
+                };
+                if !enabled {
+                    p["udp_enabled"] = false.into();
+                }
+            }
             for (src, dst) in [
                 (
                     "idle_session_check_interval",
@@ -149,8 +163,21 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                     .collect::<Result<Vec<_>>>()?
                     .join(",");
                 let mut hopping = json!({"ports":ports});
-                if let Some(v) = f.take("hop_interval") {
-                    hopping["interval_secs"] = seconds(v, &format!("{path}.hop_interval"))?.into();
+                let interval = f
+                    .take("hop_interval")
+                    .map(|v| seconds(v, &format!("{path}.hop_interval")))
+                    .transpose()?
+                    .filter(|v| *v != 0);
+                let max = f
+                    .take("hop_interval_max")
+                    .map(|v| seconds(v, &format!("{path}.hop_interval_max")))
+                    .transpose()?
+                    .filter(|v| *v != 0);
+                if let Some(max) = max {
+                    hopping["min_interval_secs"] = interval.unwrap_or(30).into();
+                    hopping["max_interval_secs"] = max.into();
+                } else if let Some(interval) = interval {
+                    hopping["interval_secs"] = interval.into();
                 }
                 p["hopping"] = hopping;
             }
@@ -160,14 +187,31 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         }
         "tuic" => {
             let mut p = json!({"type":"tuic", "uuid":f.text("uuid")?, "password":f.text("password")?, "udp_enabled":udp});
-            f.copy("udp_relay_mode", &mut p, "udp_relay_mode");
+            let udp_over_stream = f.boolean("udp_over_stream", false)?;
+            let relay_mode = f.string("udp_relay_mode")?.filter(|v| !v.is_empty());
+            if udp_over_stream && relay_mode.is_some() {
+                return Err(error(
+                    format!("{path}.udp_relay_mode"),
+                    "cannot be combined with udp_over_stream",
+                ));
+            }
+            if let Some(mode) = relay_mode {
+                if !matches!(mode.as_str(), "native" | "quic") {
+                    return Err(error(
+                        format!("{path}.udp_relay_mode"),
+                        "expected native or quic",
+                    ));
+                }
+                p["udp_relay_mode"] = mode.into();
+            }
+            p["udp_over_stream"] = udp_over_stream.into();
             if let Some(v) = f.take("heartbeat") {
-                p["heartbeat_interval_secs"] = seconds(v, &format!("{path}.heartbeat"))?.into();
+                let interval = parse_duration_millis(v, &format!("{path}.heartbeat"), true)?;
+                if interval != 0 {
+                    p["heartbeat_interval_ms"] = interval.into();
+                }
             }
-            if f.boolean("udp_over_stream", false)? {
-                p["udp_relay_mode"] = "quic".into();
-            }
-            f.default_only("zero_rtt_handshake", &[json!(false)])?;
+            f.copy("zero_rtt_handshake", &mut p, "zero_rtt_handshake");
             f.copy("congestion_control", &mut p, "congestion_control");
             p
         }
@@ -275,10 +319,10 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         .and_then(|v| v.get("enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if vision && !has_tls {
+    if vision && !has_tls && !vless_encryption {
         return Err(error(
             format!("{path}.flow"),
-            "VLESS Vision requires TLS or REALITY",
+            "VLESS Vision requires TLS, REALITY or VLESS encryption",
         ));
     }
     if ["anytls", "trojan", "naive", "tuic", "hysteria2"].contains(&kind.as_str()) && !has_tls {
@@ -289,7 +333,14 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     }
     let native_quic = ["hysteria2", "tuic"].contains(&kind.as_str())
         || (kind == "naive" && protocol["settings"]["quic"] == true);
-    let mut quic_transport = native_quic;
+    let plugin_quic = super::ss_plugin::uses_quic(&protocol);
+    if plugin_quic && (has_tls || f.values.contains_key("transport")) {
+        return Err(error(
+            path,
+            "v2ray-plugin QUIC configures its own TLS and transport through plugin_opts",
+        ));
+    }
+    let mut quic_transport = native_quic || plugin_quic;
     if let Some(v) = f.take("transport") {
         if vision {
             return Err(error(
@@ -302,7 +353,14 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         quic_transport |= quic;
     }
     if let Some(tls) = tls {
-        let (wrapped, quic) = tls_config(tls, protocol, quic_transport, &kind, vision, path)?;
+        let (wrapped, quic) = tls_config(
+            tls,
+            protocol,
+            quic_transport,
+            &kind,
+            vision && !vless_encryption,
+            path,
+        )?;
         protocol = wrapped;
         if let Some(quic) = quic {
             client["quic_settings"] = quic;
@@ -312,10 +370,6 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         client["transport"] = "quic".into();
     }
     dial_options(&mut f, &mut client, quic_transport)?;
-    // Disabled optional features are accepted; enabled variants are never discarded.
-    for key in ["tcp_fast_open", "tcp_multi_path", "udp_fragment"] {
-        f.default_only(key, &[json!(false)])?;
-    }
     if let Some(uot) = f.take("udp_over_tcp") {
         let (enabled, version) = match uot {
             Value::Bool(enabled) => (enabled, 2),
@@ -357,6 +411,22 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
 }
 
 fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
+    let mut options = json!({});
+    for key in ["tcp_fast_open", "tcp_multi_path", "udp_fragment"] {
+        if f.values.contains_key(key) {
+            let enabled = f.boolean(key, false)?;
+            if quic && enabled && key != "udp_fragment" {
+                return Err(error(
+                    format!("{}.{}", f.path, key),
+                    "TCP options require a TCP transport",
+                ));
+            }
+            options[key] = enabled.into();
+        }
+    }
+    if !options.as_object().unwrap().is_empty() {
+        client["dial_options"] = options;
+    }
     if let Some(value) = f.take("connect_timeout") {
         client["connect_timeout_ms"] =
             duration_millis(value, &format!("{}.connect_timeout", f.path))?.into();
@@ -491,10 +561,10 @@ fn packet_encoding(f: &mut Fields, default_xudp: bool) -> Result<String> {
             String::new()
         }
     });
-    if !matches!(encoding.as_str(), "" | "xudp") {
+    if !matches!(encoding.as_str(), "" | "xudp" | "packetaddr") {
         return Err(error(
             format!("{}.packet_encoding", f.path),
-            "supported UDP encodings are an empty string or xudp",
+            "supported UDP encodings are an empty string, xudp or packetaddr",
         ));
     }
     Ok(encoding)
@@ -617,6 +687,10 @@ fn tls_config(
         out["sni_hostname"] = server_name.into();
     }
     let mut options = json!({});
+    if let Some(value) = f.take("handshake_timeout") {
+        options["handshake_timeout_ms"] =
+            parse_duration_millis(value, &format!("{}.handshake_timeout", f.path), true)?.into();
+    }
     for key in [
         "disable_sni",
         "min_version",
@@ -650,10 +724,18 @@ fn tls_config(
         out["options"] = options;
     }
     f.copy("alpn", &mut out, "alpn_protocols");
-    if out.get("alpn_protocols").is_none()
-        && (kind == "naive" || matches!(out["protocol"]["kind"].as_str(), Some("grpc" | "http2")))
-    {
-        out["alpn_protocols"] = json!([if quic { "h3" } else { "h2" }]);
+    if out.get("alpn_protocols").is_none() || out["alpn_protocols"] == json!([]) {
+        if kind == "naive" || matches!(out["protocol"]["kind"].as_str(), Some("grpc" | "http2")) {
+            out["alpn_protocols"] = json!([if quic { "h3" } else { "h2" }]);
+        } else if out["protocol"]["type"] == "websocket"
+            || kind == "http"
+            || matches!(
+                out["protocol"]["kind"].as_str(),
+                Some("http_upgrade" | "http1")
+            )
+        {
+            out["alpn_protocols"] = json!(["http/1.1"]);
+        }
     }
     f.copy("curve_preferences", &mut out, "key_exchange_groups");
     for (inline, file, target) in [
@@ -677,8 +759,16 @@ fn tls_config(
             if quic {
                 return Err(error(&r.path, "REALITY requires TCP"));
             }
-            if out.get("options").is_some() || out.get("cert").is_some() || out.get("key").is_some()
-            {
+            if let Some(options) = out.as_object_mut().unwrap().remove("options") {
+                let mut options = Fields::new(options, &f.path)?;
+                options.default_only("disable_sni", &[json!(false)])?;
+                options.default_only("min_version", &[json!("1.2"), json!("1.3")])?;
+                options.default_only("max_version", &[json!("1.3")])?;
+                options.copy("cipher_suites", &mut out, "cipher_suites");
+                options.copy("handshake_timeout_ms", &mut out, "handshake_timeout_ms");
+                options.finish()?;
+            }
+            if out.get("cert").is_some() || out.get("key").is_some() {
                 return Err(error(
                     &f.path,
                     "ordinary TLS certificate options do not apply to REALITY",
@@ -697,23 +787,128 @@ fn tls_config(
     if vision {
         out["vision"] = true.into();
     }
-    for key in ["fragment", "record_fragment", "kernel_tx", "kernel_rx"] {
-        f.default_only(key, &[json!(false)])?;
+    let mut fragmentation = json!({});
+    for key in ["fragment", "record_fragment"] {
+        let enabled = f.boolean(key, false)?;
+        if enabled && quic {
+            return Err(error(
+                format!("{}.{}", f.path, key),
+                "TLS fragmentation requires TCP",
+            ));
+        }
+        fragmentation[key] = enabled.into();
+    }
+    if let Some(delay) = f.string("fragment_fallback_delay")? {
+        if quic {
+            return Err(error(
+                format!("{}.fragment_fallback_delay", f.path),
+                "TLS fragmentation requires TCP",
+            ));
+        }
+        fragmentation["fragment_fallback_delay"] = delay.into();
+    }
+    if fragmentation["fragment"] == true
+        || fragmentation["record_fragment"] == true
+        || fragmentation.get("fragment_fallback_delay").is_some()
+    {
+        if out["type"] == "reality" {
+            out["fragmentation"] = fragmentation;
+        } else {
+            if out.get("options").is_none() {
+                out["options"] = json!({});
+            }
+            out["options"]["fragmentation"] = fragmentation;
+        }
+    }
+    for key in ["kernel_tx", "kernel_rx"] {
+        let enabled = f.boolean(key, false)?;
+        if enabled {
+            if quic || out["type"] == "reality" || out["vision"] == true {
+                return Err(error(
+                    format!("{}.{}", f.path, key),
+                    "kTLS requires ordinary TLS over TCP without Vision",
+                ));
+            }
+            if out.get("options").is_none() {
+                out["options"] = json!({});
+            }
+            out["options"][key] = true.into();
+        }
     }
     if let Some(utls) = f.take("utls") {
         let mut u = Fields::new(utls, &format!("{}.utls", f.path))?;
+        let fingerprint = u
+            .string("fingerprint")?
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "chrome".into());
         if u.boolean("enabled", false)? {
-            return Err(error(
-                &u.path,
-                "browser TLS fingerprints are not implemented",
-            ));
+            if !matches!(fingerprint.as_str(), "chrome" | "firefox") {
+                return Err(error(
+                    &u.path,
+                    "supported TLS fingerprints: chrome, firefox",
+                ));
+            }
+            if out["type"] == "reality" {
+                out["client_fingerprint"] = fingerprint.into();
+            } else {
+                if out.get("options").is_none() {
+                    out["options"] = json!({});
+                }
+                out["options"]["client_fingerprint"] = fingerprint.into();
+            }
+            // sing-box keeps the browser's default ALPN on raw TCP, while
+            // HTTP transports supply their own ALPN before TLS is constructed.
+            if !quic && (out.get("alpn_protocols").is_none() || out["alpn_protocols"] == json!([]))
+            {
+                out["alpn_protocols"] = json!(["h2", "http/1.1"]);
+            }
         }
         u.finish()?;
     }
     if let Some(ech) = f.take("ech") {
         let mut e = Fields::new(ech, &format!("{}.ech", f.path))?;
-        if e.boolean("enabled", false)? {
-            return Err(error(&e.path, "ECH is not implemented"));
+        let enabled = e.boolean("enabled", false)?;
+        let config = e
+            .take("config")
+            .map(|config| match config {
+                Value::String(text) => Ok(text),
+                Value::Array(lines) => lines
+                    .iter()
+                    .map(|line| {
+                        line.as_str().ok_or_else(|| {
+                            error(
+                                format!("{}.config", e.path),
+                                "expected PEM text or a list of text lines",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|lines| lines.join("\n")),
+                _ => Err(error(
+                    format!("{}.config", e.path),
+                    "expected PEM text or a list of text lines",
+                )),
+            })
+            .transpose()?;
+        let config_path = e.string("config_path")?;
+        let query_server_name = e.string("query_server_name")?;
+        if enabled {
+            if out["type"] == "reality" {
+                return Err(error(&e.path, "ECH cannot be combined with REALITY"));
+            }
+            let mut options = json!({});
+            if let Some(config) = config.filter(|text| !text.is_empty()) {
+                options["config"] = config.into();
+            } else if let Some(config_path) = config_path.filter(|path| !path.is_empty()) {
+                options["config_path"] = config_path.into();
+            }
+            if let Some(query_server_name) = query_server_name.filter(|name| !name.is_empty()) {
+                options["query_server_name"] = query_server_name.into();
+            }
+            if out.get("options").is_none() {
+                out["options"] = json!({});
+            }
+            out["options"]["ech"] = options;
         }
         e.finish()?;
     }

@@ -8,6 +8,7 @@ test:
 	cargo fmt --package aerobox-for-linux --check
 	cargo clippy --all-targets --locked -- -D warnings
 	cargo test --locked
+	scripts/test-protocols.sh --unit
 wayland: build
 	scripts/test-wayland.sh "$(BINARY)"
 package: build

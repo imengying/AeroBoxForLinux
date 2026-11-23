@@ -182,7 +182,7 @@ impl Ctr {
             .map_err(|_| invalid("VLESS CTR key initialization failed"))?;
         let key = cipher::StreamingEncryptingKey::less_safe_ctr(
             key,
-            cipher::EncryptionContext::Iv128((*iv).into()),
+            cipher::EncryptionContext::Iv128(*iv),
         )
         .map_err(|_| invalid("VLESS CTR initialization failed"))?;
         Ok(Self(Mutex::new(key)))

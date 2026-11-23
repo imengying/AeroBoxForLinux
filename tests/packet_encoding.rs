@@ -17,13 +17,14 @@ use std::{
 const UUID: &str = "00000000-0000-4000-8000-000000000001";
 const TARGET: [u8; 4] = [203, 0, 113, 17];
 const PORT: u16 = 5353;
+const PAYLOAD_SIZES: [usize; 7] = [1, 64, 1400, 3000, 7527, 32768, 60000];
 
 #[test]
 fn packet_encoding_survives_each_subscription_format() {
     use aerobox_for_linux::subscription;
     use base64::{Engine, engine::general_purpose::STANDARD};
     for kind in ["vless", "vmess"] {
-        for encoding in ["xudp", ""] {
+        for encoding in ["xudp", "", "packetaddr"] {
             let uri = if kind == "vless" {
                 format!("vless://{UUID}@example.com:443?packetEncoding={encoding}#fixture")
             } else {
@@ -45,7 +46,6 @@ fn packet_encoding_survives_each_subscription_format() {
     }
     for query in [
         "packetEncoding=xudp&packet_encoding=",
-        "packetEncoding=packetaddr",
         "packetEncoding=unknown",
     ] {
         assert!(subscription::parse(&format!("vless://{UUID}@example.com:443?{query}")).is_err());
@@ -66,16 +66,21 @@ fn sized_bytes(stream: &mut TcpStream) -> Vec<u8> {
     let mut length = [0; 2];
     stream.read_exact(&mut length).unwrap();
     let length = u16::from_be_bytes(length) as usize;
-    assert!(length <= 4096);
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes).unwrap();
     bytes
 }
 
 #[test]
-fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
+fn vless_udp_encodings_use_the_requested_wire_format() {
     let _serial = support::runtime_lock();
-    for (encoding, xudp) in [(None, true), (Some("xudp"), true), (Some(""), false)] {
+    for (encoding, xudp) in [
+        (None, true),
+        (Some("xudp"), true),
+        (Some(""), false),
+        (Some("packetaddr"), false),
+    ] {
+        let packetaddr = encoding == Some("packetaddr");
         let packets = Arc::new(AtomicUsize::new(0));
         let seen = packets.clone();
         let peer = support::Server::spawn(move |mut stream| {
@@ -88,7 +93,13 @@ fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
             );
             assert_eq!(request[17], 0, "no VLESS addons");
             assert_eq!(request[18], if xudp { 3 } else { 2 }, "{encoding:?}");
-            if !xudp {
+            if packetaddr {
+                let magic = b"sp.packet-addr.v2fly.arpa";
+                let mut destination = vec![0; 4 + magic.len()];
+                stream.read_exact(&mut destination).unwrap();
+                assert_eq!(&destination[..4], &[0, 0, 2, magic.len() as u8]);
+                assert_eq!(&destination[4..], magic);
+            } else if !xudp {
                 let mut destination = [0; 7];
                 stream.read_exact(&mut destination).unwrap();
                 assert_eq!(&destination[..2], PORT.to_be_bytes());
@@ -96,7 +107,7 @@ fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
                 assert_eq!(&destination[3..], TARGET);
             }
             stream.write_all(&[0, 0]).unwrap();
-            for index in 0..4 {
+            for index in 0..PAYLOAD_SIZES.len() {
                 if xudp {
                     let metadata = sized_bytes(&mut stream);
                     assert_eq!(metadata.len(), 12);
@@ -108,6 +119,12 @@ fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
                     assert_eq!(&metadata[8..], TARGET);
                 }
                 let payload = sized_bytes(&mut stream);
+                if packetaddr {
+                    assert_eq!(payload[0], 1);
+                    assert_eq!(&payload[1..5], TARGET);
+                    assert_eq!(&payload[5..7], PORT.to_be_bytes());
+                    assert!(payload.len() > 7);
+                }
                 assert!(!payload.is_empty());
                 seen.fetch_add(1, Ordering::Relaxed);
                 if xudp {
@@ -152,12 +169,12 @@ fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
         let mut address = vec![0, 0, 0, 1];
         address.extend_from_slice(&TARGET);
         address.extend_from_slice(&PORT.to_be_bytes());
-        for size in [1, 64, 1400, 3000] {
+        for size in PAYLOAD_SIZES {
             let payload: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
             let mut request = address.clone();
             request.extend_from_slice(&payload);
             socket.send_to(&request, relay).unwrap();
-            let mut response = vec![0; 4096];
+            let mut response = vec![0; 65535];
             let (length, _) = socket.recv_from(&mut response).unwrap();
             assert_eq!(
                 &response[..length],
@@ -165,7 +182,7 @@ fn vless_default_xudp_and_explicit_raw_use_the_requested_wire_format() {
                 "{encoding:?}: datagram changed"
             );
         }
-        assert_eq!(packets.load(Ordering::Relaxed), 4);
+        assert_eq!(packets.load(Ordering::Relaxed), PAYLOAD_SIZES.len());
         app.service.stop().unwrap();
     }
 }

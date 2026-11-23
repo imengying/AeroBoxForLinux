@@ -56,7 +56,9 @@ mod tests {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert.cert.der().clone()).unwrap();
         let mut server_config =
-            rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+            rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
                 .with_no_client_auth()
                 .with_single_cert(
                     vec![cert.cert.der().clone()],
@@ -64,11 +66,14 @@ mod tests {
                         .into(),
                 )
                 .unwrap();
+        server_config.cert_compressors.clear();
         server_config.max_fragment_size = Some(32);
         server_config.send_tls13_tickets = 0;
         let server_config = Arc::new(server_config);
         let client_config = Arc::new(
-            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
+            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
         );

@@ -63,6 +63,7 @@ static DISALLOWED_TLS13_EXTS: &[ExtensionType] = &[
     ExtensionType::SessionTicket,
     ExtensionType::RenegotiationInfo,
     ExtensionType::ExtendedMasterSecret,
+    ExtensionType::SCT,
 ];
 
 /// `early_data_key_schedule` is `Some` if we sent the
@@ -97,6 +98,8 @@ pub(super) fn handle_server_hello(
         mut sent_tls13_fake_ccs,
         mut hello,
         mut server_name,
+        profile_key_share,
+        mut additional_key_shares,
         ..
     } = input;
 
@@ -108,6 +111,45 @@ pub(super) fn handle_server_hello(
         _ => None,
     };
 
+    let our_key_share = match profile_key_share {
+        Some(share) if share.group() == their_key_share.group => {
+            let group = config
+                .find_kx_group(share.group(), ProtocolVersion::TLSv1_3)
+                .ok_or_else(|| {
+                    cx.common.send_fatal_alert(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::WrongGroupForKeyShare,
+                    )
+                })?;
+            cx.common.kx_state = KxState::Start(group);
+            share
+        }
+        _ => our_key_share,
+    };
+    let our_key_share = if let Some(index) = additional_key_shares
+        .iter()
+        .position(|share| share.group() == their_key_share.group)
+    {
+        let share = additional_key_shares.swap_remove(index);
+        let group = config
+            .find_kx_group(share.group(), ProtocolVersion::TLSv1_3)
+            .ok_or(PeerMisbehaved::WrongGroupForKeyShare)?;
+        cx.common.kx_state = KxState::Start(group);
+        share
+    } else {
+        if !config
+            .initial_key_share_groups
+            .is_empty()
+            && our_key_share.group() != their_key_share.group
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::WrongGroupForKeyShare,
+            ));
+        }
+        our_key_share
+    };
+    drop(additional_key_shares);
     let our_key_share = KeyExchangeChoice::new(&config, cx, our_key_share, their_key_share)
         .map_err(|_| {
             cx.common.send_fatal_alert(
@@ -162,6 +204,7 @@ pub(super) fn handle_server_hello(
             debug!("Not resuming");
             // Discard the early data key schedule.
             cx.data.early_data.rejected();
+            cx.common.application_settings = None;
             cx.common.early_traffic = false;
             resuming_session.take();
             KeySchedulePreHandshake::new(suite)
@@ -308,11 +351,18 @@ pub(super) fn initial_key_share(
     server_name: &ServerName<'_>,
     kx_state: &mut KxState,
 ) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-    let group = config
-        .resumption
-        .store
-        .kx_hint(server_name)
-        .and_then(|group_name| config.find_kx_group(group_name, ProtocolVersion::TLSv1_3))
+    let configured = config
+        .initial_key_share_groups
+        .first()
+        .and_then(|group| config.find_kx_group(*group, ProtocolVersion::TLSv1_3));
+    let group = configured
+        .or_else(|| {
+            config
+                .resumption
+                .store
+                .kx_hint(server_name)
+                .and_then(|group_name| config.find_kx_group(group_name, ProtocolVersion::TLSv1_3))
+        })
         .unwrap_or_else(|| {
             config
                 .provider
@@ -379,7 +429,36 @@ pub(super) fn prepare_resumption(
     // The EarlyData extension MUST be supplied together with the
     // PreSharedKey extension.
     let max_early_data_size = resuming_session.max_early_data_size();
-    if config.enable_early_data && max_early_data_size > 0 && !doing_retry {
+    let alps_compatible = super::alps::early_data_compatible(
+        config.application_settings.as_ref(),
+        resuming_session
+            .application_settings
+            .as_ref(),
+        resuming_session.alpn.as_deref(),
+    );
+    let alpn_compatible = match &resuming_session.alpn {
+        None => exts
+            .protocols
+            .as_ref()
+            .map_or(true, Vec::is_empty),
+        Some(previous) => exts
+            .protocols
+            .as_ref()
+            .is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|name| name.as_ref() == previous.as_slice())
+            }),
+    };
+    if config.enable_early_data
+        && max_early_data_size > 0
+        && !doing_retry
+        && alps_compatible
+        && alpn_compatible
+    {
+        cx.common.application_settings = resuming_session
+            .application_settings
+            .clone();
         cx.data
             .early_data
             .enable(max_early_data_size as usize);
@@ -505,6 +584,13 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 .as_ref()
                 .map(|protocol| protocol.as_ref()),
             self.config.check_selected_alpn,
+        )?;
+        super::alps::receive(
+            &self.config,
+            &self.hello.alpn_protocols,
+            cx,
+            exts,
+            self.resuming_session.as_ref(),
         )?;
         hs::process_client_cert_type_extension(
             cx.common,
@@ -1119,6 +1205,22 @@ impl State<ClientConnectionData> for ExpectCertificate {
             ));
         }
 
+        if self
+            .config
+            .client_hello_layout
+            .is_none()
+            && cert_chain.entries.iter().any(|entry| {
+                entry
+                    .extensions
+                    .signed_certificate_timestamps
+                    .is_some()
+            })
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnsupportedExtension,
+                InvalidMessage::UnknownCertificateExtension,
+            ));
+        }
         let end_entity_ocsp = cert_chain.end_entity_ocsp().to_vec();
         let server_cert = ServerCertDetails::new(
             cert_chain
@@ -1186,20 +1288,47 @@ impl State<ClientConnectionData> for ExpectCertificateVerify<'_> {
 
         let now = self.config.current_time()?;
 
-        let cert_verified = self
-            .config
-            .verifier
-            .verify_server_cert(
+        let cert_verified = if cx.data.ech_status == EchStatus::Rejected {
+            self.config
+                .verifier
+                .verify_ech_rejection_cert(
+                    end_entity,
+                    intermediates,
+                    &self.server_name,
+                    &self.server_cert.ocsp_response,
+                    now,
+                )
+        } else {
+            self.config.verifier.verify_server_cert(
                 end_entity,
                 intermediates,
                 &self.server_name,
                 &self.server_cert.ocsp_response,
                 now,
             )
-            .map_err(|err| {
-                cx.common
-                    .send_cert_verify_error_alert(err)
-            })?;
+        }
+        .map_err(|err| {
+            cx.common
+                .send_cert_verify_error_alert(err)
+        })?;
+
+        // REALITY authenticates an Ed25519 synthetic certificate even when
+        // its cover ClientHello does not list Ed25519. Only the explicit
+        // new_reality constructor can enable this protocol-specific exception;
+        // the caller's REALITY certificate and signature verifier still runs.
+        let reality_ed25519 =
+            cx.data.reality_session && cert_verify.scheme == SignatureScheme::ED25519;
+        if !reality_ed25519
+            && self
+                .config
+                .client_hello_layout
+                .is_some_and(|p| !p.permits_signature(cert_verify.scheme))
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+            ));
+        }
 
         // 2. Verify their signature on the handshake.
         let handshake_hash = self.transcript.current_hash();
@@ -1384,6 +1513,13 @@ impl State<ClientConnectionData> for ExpectFinished {
         }
 
         let mut flight = HandshakeFlightTls13::new(&mut st.transcript);
+        if cx.data.send_application_settings {
+            if let Some(settings) = &cx.data.pending_application_settings {
+                flight.add(HandshakeMessagePayload(
+                    HandshakePayload::EncryptedExtensions(Box::new(settings.client_extensions())),
+                ));
+            }
+        }
 
         /* Send our authentication/finished messages.  These are still encrypted
          * with our handshake keys. */
@@ -1460,15 +1596,31 @@ impl State<ClientConnectionData> for ExpectFinished {
         // for application data, since the server has only been authenticated for the ECH config's
         // `public_name`.
         if cx.data.ech_status == EchStatus::Rejected {
+            if let Some(handler) = &st.config.ech_rejection_handler {
+                handler.rejected(
+                    st.ech_retry_configs
+                        .as_ref()
+                        .map(Codec::get_encoding),
+                );
+            }
             return Err(ech::fatal_alert_required(st.ech_retry_configs, cx.common));
         }
 
+        cx.common.application_settings = cx
+            .data
+            .pending_application_settings
+            .take();
         cx.common
             .start_traffic(&mut cx.sendable_plaintext);
 
         let st = ExpectTraffic {
             config: st.config.clone(),
             session_storage: st.config.resumption.store.clone(),
+            application_settings: cx.common.application_settings.clone(),
+            alpn: cx
+                .common
+                .alpn_protocol()
+                .map(<[u8]>::to_vec),
             server_name: st.server_name,
             suite: st.suite,
             key_schedule,
@@ -1493,6 +1645,8 @@ impl State<ClientConnectionData> for ExpectFinished {
 // In this state we can be sent tickets, key updates,
 // and application data.
 struct ExpectTraffic {
+    application_settings: Option<super::alps::NegotiatedApplicationSettings>,
+    alpn: Option<Vec<u8>>,
     config: Arc<ClientConfig>,
     session_storage: Arc<dyn ClientSessionStore>,
     server_name: ServerName<'static>,
@@ -1533,6 +1687,9 @@ impl ExpectTraffic {
                 .max_early_data_size
                 .unwrap_or_default(),
         );
+
+        value.application_settings = self.application_settings.clone();
+        value.alpn = self.alpn.clone();
 
         if cx.is_quic() {
             if let Some(sz) = nst.extensions.max_early_data_size {

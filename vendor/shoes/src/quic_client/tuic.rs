@@ -118,8 +118,8 @@ pub(super) async fn dissociate_loop(
     }
 }
 
-pub(super) async fn heartbeat(connection: quinn::Connection, seconds: u64) {
-    let mut tick = tokio::time::interval(Duration::from_secs(seconds));
+pub(super) async fn heartbeat(connection: quinn::Connection, milliseconds: u64) {
+    let mut tick = tokio::time::interval(Duration::from_millis(milliseconds));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
     loop {
@@ -139,6 +139,9 @@ pub(super) async fn connect(
 ) -> io::Result<TcpClientSetupResult> {
     let mut request = BytesMut::from(&[5, 1][..]);
     encode_address(&mut request, target.location())?;
+    if !generation.confirmed() {
+        return super::early_stream::connect(generation, request.to_vec()).await;
+    }
     let (mut send, recv) =
         tokio::time::timeout(SETUP_TIMEOUT, generation.connection().open_bi()).await??;
     tokio::time::timeout(SETUP_TIMEOUT, send.write_all(&request)).await??;

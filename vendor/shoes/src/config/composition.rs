@@ -84,6 +84,7 @@ pub(super) fn validate_position_flags(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn direct_only(hops: &OneOrSome<ClientChainHop>) -> bool {
     if hops.iter().count() != 1 {
         return false;
@@ -93,21 +94,6 @@ pub(crate) fn direct_only(hops: &OneOrSome<ClientChainHop>) -> bool {
             choice.members.iter().all(|chain| direct_only(&chain.hops))
         }
         hop => clients(hop).all(|client| client.protocol.is_direct()),
-    }
-}
-
-pub(crate) fn final_clients(
-    hops: &OneOrSome<ClientChainHop>,
-) -> Box<dyn Iterator<Item = &ClientConfig> + '_> {
-    match hops.iter().last() {
-        Some(ClientChainHop::Choice(choice)) => Box::new(
-            choice
-                .members
-                .iter()
-                .flat_map(|chain| final_clients(&chain.hops)),
-        ),
-        Some(hop) => clients(hop),
-        None => Box::new(std::iter::empty()),
     }
 }
 

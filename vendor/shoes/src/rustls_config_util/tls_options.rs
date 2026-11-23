@@ -17,23 +17,31 @@ pub(super) fn provider(
     groups: &crate::config::TlsKeyExchangeGroups,
     options: &TlsClientOptions,
 ) -> io::Result<Arc<rustls::crypto::CryptoProvider>> {
-    let mut provider = (*super::crypto_provider_with_groups(groups)).clone();
+    let chrome =
+        options.client_fingerprint == Some(crate::config::tls::TlsClientFingerprint::Chrome);
+    let mut provider = if chrome {
+        super::browser::validate_policy(groups, options)?;
+        super::browser::provider()
+    } else {
+        (*super::crypto_provider_with_groups(groups)).clone()
+    };
     if !options.cipher_suites.is_empty() {
         let mut selected = Vec::with_capacity(options.cipher_suites.len());
         for name in &options.cipher_suites {
-            // rustls uses a TLS13_ prefix internally; configuration accepts
-            // the IANA names used by Android/sing-box as well as that spelling.
             let canonical = match name.as_str() {
                 "TLS_AES_128_GCM_SHA256" => "TLS13_AES_128_GCM_SHA256",
                 "TLS_AES_256_GCM_SHA384" => "TLS13_AES_256_GCM_SHA384",
                 "TLS_CHACHA20_POLY1305_SHA256" => "TLS13_CHACHA20_POLY1305_SHA256",
                 other => other,
             };
+            // Debug deliberately omits some names; as_str covers all IANA values.
             let suite = provider
                 .cipher_suites
                 .iter()
                 .copied()
-                .find(|suite| format!("{:?}", suite.suite()) == canonical)
+                .chain(aerobox_crypto::legacy_cbc::suites())
+                .chain(aerobox_crypto::legacy_rsa::suites())
+                .find(|suite| suite.suite().as_str() == Some(canonical))
                 .ok_or_else(|| {
                     invalid(format!("unsupported pure Rust TLS cipher suite: {name}"))
                 })?;
@@ -44,6 +52,17 @@ pub(super) fn provider(
                 return Err(invalid(format!("duplicate TLS cipher suite: {name}")));
             }
             selected.push(suite);
+        }
+        if chrome
+            && selected
+                .iter()
+                .map(|s| u16::from(s.suite()))
+                .collect::<Vec<_>>()
+                != super::browser::CIPHERS
+        {
+            return Err(invalid(
+                "Chrome133 conflicts with the explicit cipher suite policy",
+            ));
         }
         provider.cipher_suites = selected;
     }
@@ -183,3 +202,59 @@ impl ServerCertVerifier for PinnedVerifier {
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn ech_verifier(
+    inner: Arc<dyn ServerCertVerifier>,
+    public: Option<Arc<rustls::client::WebPkiServerVerifier>>,
+) -> Arc<dyn ServerCertVerifier> {
+    match public {
+        Some(public) => Arc::new(EchVerifier { inner, public }),
+        None => inner,
+    }
+}
+#[derive(Debug)]
+struct EchVerifier {
+    inner: Arc<dyn ServerCertVerifier>,
+    public: Arc<rustls::client::WebPkiServerVerifier>,
+}
+impl ServerCertVerifier for EchVerifier {
+    fn verify_server_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        chain: &[CertificateDer<'_>],
+        name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.inner.verify_server_cert(cert, chain, name, ocsp, now)
+    }
+    fn verify_ech_rejection_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        chain: &[CertificateDer<'_>],
+        name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.public.verify_server_cert(cert, chain, name, ocsp, now)
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, signature)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, signature)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}

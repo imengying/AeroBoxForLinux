@@ -4,8 +4,8 @@ use super::*;
 /// source editor. Text rendering follows the current GTK desktop settings.
 ///
 /// The size is expressed in points and becomes the root font size; every
-/// spacing and control metric in `style.css` is written in `em`, so changing
-/// the font also changes row heights and paddings.
+/// text spacing and control metrics in `resources/styles/` use `em`, so
+/// changing the font also changes row heights and paddings.
 pub(super) struct Typography {
     provider: gtk::CssProvider,
     font_size: Cell<u32>,

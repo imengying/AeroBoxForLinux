@@ -10,6 +10,10 @@ use crate::tcp::tcp_handler::{ClientTransport, TcpClientHandler, TcpClientSetupR
 
 #[derive(Debug)]
 pub struct RealityClientHandler {
+    fragmentation: crate::tls_fragment::TlsFragmentOptions,
+    handshake_timeout: std::time::Duration,
+    client_fingerprint: Option<crate::config::tls::TlsClientFingerprint>,
+    alpn_protocols: Option<Vec<String>>,
     mldsa65_verify: Option<Mldsa65VerifyKey>,
     public_key: [u8; 32],
     short_id: [u8; 8],
@@ -33,7 +37,11 @@ impl RealityClientHandler {
         handler: Box<dyn TcpClientHandler>,
     ) -> Self {
         Self {
+            fragmentation: Default::default(),
+            handshake_timeout: crate::config::tls::handshake_timeout(0),
             mldsa65_verify: None,
+            client_fingerprint: None,
+            alpn_protocols: None,
             public_key,
             short_id,
             server_name,
@@ -50,7 +58,11 @@ impl RealityClientHandler {
         udp_enabled: bool,
     ) -> Self {
         Self {
+            fragmentation: Default::default(),
+            handshake_timeout: crate::config::tls::handshake_timeout(0),
             mldsa65_verify: None,
+            client_fingerprint: None,
+            alpn_protocols: None,
             public_key,
             short_id,
             server_name,
@@ -62,8 +74,34 @@ impl RealityClientHandler {
         }
     }
 
+    pub(crate) fn with_fragmentation(
+        mut self,
+        options: crate::tls_fragment::TlsFragmentOptions,
+    ) -> Self {
+        self.fragmentation = options;
+        self
+    }
+
     pub fn with_mldsa65_verify(mut self, key: Option<Mldsa65VerifyKey>) -> Self {
         self.mldsa65_verify = key;
+        self
+    }
+
+    pub(crate) fn with_handshake_timeout(mut self, millis: u32) -> Self {
+        self.handshake_timeout = crate::config::tls::handshake_timeout(millis);
+        self
+    }
+
+    pub fn with_client_fingerprint(
+        mut self,
+        fingerprint: Option<crate::config::tls::TlsClientFingerprint>,
+    ) -> Self {
+        self.client_fingerprint = fingerprint;
+        self
+    }
+
+    pub fn with_alpn_protocols(mut self, protocols: Option<Vec<String>>) -> Self {
+        self.alpn_protocols = protocols;
         self
     }
 
@@ -89,6 +127,8 @@ impl RealityClientHandler {
 
         log::debug!("REALITY CLIENT: Creating authenticated TLS connection");
         let reality_config = RealityClientConfig {
+            client_fingerprint: self.client_fingerprint,
+            alpn_protocols: self.alpn_protocols.clone(),
             mldsa65_verify: self.mldsa65_verify.clone(),
             public_key: self.public_key,
             short_id: self.short_id,
@@ -96,12 +136,21 @@ impl RealityClientHandler {
             cipher_suites: self.cipher_suites.clone(),
         };
 
+        let client_stream = self.fragmentation.wrap(client_stream)?;
         let connection = reality_config.create_connection()?;
         let mode = match self.handler {
             RealityInnerClientHandler::VisionVless { .. } => TlsReadMode::PreserveRecords,
             RealityInnerClientHandler::Default(_) => TlsReadMode::Stream,
         };
-        let stream = CryptoTlsStream::handshake(client_stream, connection, mode, &[]).await?;
+        let stream = tokio::time::timeout(
+            self.handshake_timeout,
+            CryptoTlsStream::handshake(client_stream, connection, mode, &[]),
+        )
+        .await
+        .map_err(std::io::Error::from)??;
+        if let RealityInnerClientHandler::Default(handler) = &self.handler {
+            handler.validate_alpn(stream.alpn_protocol())?;
+        }
         log::debug!(
             "REALITY CLIENT: Handshake completed successfully, negotiated_group={:?}",
             stream.negotiated_group()

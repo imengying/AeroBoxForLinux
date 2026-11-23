@@ -150,7 +150,9 @@ fn new_connections(backend: Backend) -> (TlsConnection, TlsConnection) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.cert.der().clone()).unwrap();
-    let mut config = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[version]).unwrap()
+    let mut config = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+        .with_protocol_versions(&[version])
+        .unwrap()
         .with_no_client_auth()
         .with_single_cert(
             vec![cert.cert.der().clone()],
@@ -158,9 +160,12 @@ fn new_connections(backend: Backend) -> (TlsConnection, TlsConnection) {
         )
         .unwrap();
     config.send_tls13_tickets = 0;
-    let client_config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[version]).unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client_config =
+        rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_protocol_versions(&[version])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let client = TlsConnection::new(
         rustls::ClientConnection::new(Arc::new(client_config), "localhost".try_into().unwrap())
             .unwrap(),
@@ -177,6 +182,8 @@ fn reality_connections() -> (TlsConnection, TlsConnection) {
         .compute_public_key()
         .unwrap();
     let mut client = RealityClientConfig {
+        client_fingerprint: None,
+        alpn_protocols: None,
         mldsa65_verify: None,
         public_key: public_key.as_ref().try_into().unwrap(),
         short_id: [0; 8],
