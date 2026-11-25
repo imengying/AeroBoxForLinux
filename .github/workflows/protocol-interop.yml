@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   independent-peers:
+    name: External reference servers (Go test tools only)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -22,7 +23,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.100.0"
-      - uses: actions/setup-go@v6
+      # Go builds independent reference servers; AeroBox and its package use Rust.
+      - name: Install Go for reference test servers
+        uses: actions/setup-go@v6
         with:
           go-version: "1.27.3"
           cache-dependency-path: "vendor/**/go.sum"

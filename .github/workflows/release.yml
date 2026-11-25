@@ -16,9 +16,11 @@ concurrency:
 
 jobs:
   protocols:
+    name: Protocol interoperability (external test servers)
     uses: ./.github/workflows/protocol-interop.yml
 
   linux:
+    name: Rust application build and package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -45,7 +47,9 @@ jobs:
       - name: Check network benchmark tooling
         run: |
           cargo build --locked --example network-bench
-          python3 scripts/bench-network.py --candidate target/debug/examples/network-bench --output target/bench-smoke --rounds 1 --mib 1 --operations 10 --smoke
+          benchmark_dir=$(mktemp -d "$RUNNER_TEMP/aerobox-bench.XXXXXX")
+          trap 'rm -rf "$benchmark_dir"' EXIT
+          python3 scripts/bench-network.py --candidate target/debug/examples/network-bench --output "$benchmark_dir/results" --rounds 1 --mib 1 --operations 10 --smoke
       - name: Build UI checks
         run: cargo build --bin AeroBox --features ui-smoke --locked
       - name: Test Wayland without X11
@@ -96,6 +100,7 @@ jobs:
 
             连接、分流、DNS 和 TUN 直接集成在应用中，无需下载或指定外部内核。
 
+            - 修复 CI 基准测试目录冲突和外部参考服务补丁的目录权限问题。
             - 出站模式保留规则与全局；移除局域网共享和端口设置，本地代理固定使用 127.0.0.1:2080。
             - 缩小节点卡片，未测速时隐藏占位文字，结果显示在测速按钮内；启动与测速使用纯图标，出口 IP 左对齐，移除订阅编辑快捷工具栏。
             - DNS 按需建立连接，网络暂时不可用时仍可启动；上游返回失败时继续尝试已配置的其他解析器。正常取消、重置和断管不再刷 ERROR，保留真实协议错误诊断。

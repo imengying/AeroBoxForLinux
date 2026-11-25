@@ -30,12 +30,19 @@ for name, hashes in meta["files"].items():
     if hashes["original"] is not None:
         assert digest(source / name) == hashes["original"], f"upstream source changed: {name}"
 if not dest.exists():
-    shutil.copytree(source, dest)
-    for path in dest.rglob("*"):
-        if path.is_file():
-            path.chmod(0o644)
-    subprocess.run(["patch", "--batch", "--forward", "-p1", "-i", str(here / "utls-fixture.patch")],
-                   cwd=dest, check=True)
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="utls-patch-", dir=target) as directory:
+        staged = Path(directory) / "source"
+        shutil.copytree(source, staged)
+        # Go's module cache contains read-only directories as well as files.
+        # patch creates temporary files beside its inputs, so both must be writable.
+        for path in (staged, *staged.rglob("*")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        subprocess.run(["patch", "--batch", "--forward", "-p1", "-i", str(here / "utls-fixture.patch")],
+                       cwd=staged, check=True)
+        assert all(digest(staged / name) == hashes["patched"] for name, hashes in meta["files"].items()), \
+            "patched reference differs from expected hashes"
+        staged.rename(dest)
 assert all(digest(dest / name) == hashes["patched"] for name, hashes in meta["files"].items()), \
     "reference fork differs; review before replacing"
 
