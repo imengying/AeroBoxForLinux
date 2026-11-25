@@ -523,6 +523,12 @@ impl<IO: AsyncStream> AsyncRead for CryptoTlsStream<IO> {
                     return Poll::Ready(Ok(()));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    return Poll::Ready(Err(io::Error::new(
+                        error.kind(),
+                        crate::diagnostics::TlsTruncation(error),
+                    )));
+                }
                 Err(error) => return Poll::Ready(Err(error)),
             }
             let received = if this.session.is_handshaking() {

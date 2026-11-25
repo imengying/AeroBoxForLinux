@@ -144,8 +144,7 @@ fn stopping_cancels_a_pending_automatic_rule_download_and_keeps_its_cache() {
     assert!(disconnected.recv_timeout(Duration::from_secs(2)).unwrap());
     assert_eq!(fs::read(&cache).unwrap(), before);
     assert!(!core.is_running());
-    let _port =
-        TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port)).unwrap();
+    let _port = TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
 }
 
 #[test]

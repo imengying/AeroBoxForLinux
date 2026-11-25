@@ -15,8 +15,7 @@ name = "AeroBoxForLinux-linux-amd64"
 app_id = "io.github.imengying.AeroBoxForLinux"
 expected = {
     "AeroBox", "install.sh", "uninstall.sh", f"{app_id}.png",
-    "README.md", "LICENSE", "THIRD_PARTY.md", "docs/protocols.md",
-    "resources/rules/README.md", "resources/rules/sing-geoip-LICENSE",
+    "LICENSE", "THIRD_PARTY.md", "resources/rules/sing-geoip-LICENSE",
     "resources/rules/sing-geosite-LICENSE",
 }
 expected.update(str(path.relative_to(root)) for path in (root / "licenses").rglob("*") if path.is_file())

@@ -3304,7 +3304,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                         upstream_ip, upstream_port, TEST_UUID, proxy.ip, proxy.port
                     );
                     self.certs.push((cert, key));
@@ -3334,7 +3334,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip, upstream_port, TEST_UUID, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesVlessTlsServer => {
@@ -3380,7 +3380,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip, upstream_port, TEST_UUID, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesH2muxVlessClient {
@@ -3407,7 +3407,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip, upstream_port, TEST_UUID, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesVmessServer { cipher } => Some(format!(
@@ -3464,7 +3464,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip,
                     upstream_port,
                     TEST_UUID,
@@ -3495,7 +3495,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip,
                     upstream_port,
                     TEST_UUID,
@@ -3525,7 +3525,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip, upstream_port, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesHttpProxy => Some(format!(
@@ -3621,7 +3621,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                         upstream_ip,
                         upstream_port,
                         config.public_key,
@@ -3685,7 +3685,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                         upstream_ip,
                         upstream_port,
                         config.public_key,
@@ -3764,7 +3764,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip, upstream_port, password, sni, TEST_UUID, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesShadowsocksServer { cipher, password } => Some(format!(
@@ -3798,7 +3798,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip,
                     upstream_port,
                     cipher.as_str(),
@@ -3837,7 +3837,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: default"#,
+    client_chain: default"#,
                     upstream_ip,
                     upstream_port,
                     cipher.as_str(),
@@ -3893,7 +3893,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: anytls-client"#,
+    client_chain: anytls-client"#,
                     upstream_ip, upstream_port, sni, password, proxy.ip, proxy.port
                 )),
                 ProxyType::ShoesNaiveProxyServer {
@@ -3968,7 +3968,7 @@ impl ProxyTestFixture {
   rule:
     mask: "0.0.0.0/0"
     action: allow
-    client_proxy: naiveproxy-client"#,
+    client_chain: naiveproxy-client"#,
                     upstream_ip, upstream_port, sni, username, password, proxy.ip, proxy.port
                 )),
 
@@ -6104,10 +6104,13 @@ impl BuiltFixture {
                 }
             }
 
-            let tls_config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(std::sync::Arc::new(InsecureCertVerifier))
-                .with_no_client_auth();
+            let tls_config =
+                rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(InsecureCertVerifier))
+                    .with_no_client_auth();
 
             let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
             let ip_owned = ip.clone();

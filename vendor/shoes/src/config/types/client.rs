@@ -199,109 +199,6 @@ where
     state.end()
 }
 
-/// Custom deserializer for TlsClientConfig that handles deprecated shadowtls_password field
-fn deserialize_tls_client_config<'de, D>(deserializer: D) -> Result<TlsClientConfig, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct TlsClientConfigTemp {
-        #[serde(default)]
-        options: super::tls::TlsClientOptions,
-        #[serde(default)]
-        key_exchange_groups: super::tls::TlsKeyExchangeGroups,
-        #[serde(default = "default_true")]
-        verify: bool,
-        #[serde(alias = "server_fingerprint", default)]
-        server_fingerprints: NoneOrSome<String>,
-        #[serde(default)]
-        sni_hostname: NoneOrOne<String>,
-        #[serde(alias = "alpn_protocol", default)]
-        alpn_protocols: NoneOrSome<String>,
-        #[serde(default)]
-        tls_buffer_size: Option<usize>,
-        #[serde(default)]
-        key: Option<String>,
-        #[serde(default)]
-        cert: Option<String>,
-        #[serde(default)]
-        shadowtls_password: Option<String>,
-        #[serde(default)]
-        vision: bool,
-        protocol: Box<ClientProxyConfig>,
-    }
-
-    let temp = TlsClientConfigTemp::deserialize(deserializer)?;
-
-    // Check for mutually exclusive fields
-    if temp.vision && temp.shadowtls_password.is_some() {
-        return Err(Error::custom(
-            "TLS client config cannot have both vision=true and shadowtls_password set. \
-             Vision and ShadowTLS are incompatible. \
-             Use either 'vision: true' with regular TLS, or 'type: shadowtls' for ShadowTLS.",
-        ));
-    }
-
-    // Check if deprecated shadowtls_password was used
-    if let Some(password) = temp.shadowtls_password {
-        if !temp.key_exchange_groups.is_default() || !temp.options.is_default() {
-            return Err(Error::custom(
-                "key_exchange_groups and options require ordinary TLS, not deprecated shadowtls_password",
-            ));
-        }
-        log::warn!(
-            "The 'shadowtls_password' field in TLS client configuration is deprecated. \
-             Please use 'type: shadowtls' with 'password' field instead. \
-             This field will be removed in a future version."
-        );
-
-        // Transform to ShadowTLS variant internally by wrapping protocol
-        return Ok(TlsClientConfig {
-            options: temp.options,
-            key_exchange_groups: temp.key_exchange_groups,
-            verify: temp.verify,
-            server_fingerprints: temp.server_fingerprints,
-            sni_hostname: temp.sni_hostname.clone(),
-            alpn_protocols: temp.alpn_protocols,
-            tls_buffer_size: temp.tls_buffer_size,
-            key: temp.key,
-            cert: temp.cert,
-            vision: false,
-            protocol: Box::new(ClientProxyConfig::ShadowTls {
-                password,
-                sni_hostname: temp.sni_hostname.into_option(),
-                protocol: temp.protocol,
-            }),
-        });
-    }
-
-    // Normal case - no shadowtls_password
-    Ok(TlsClientConfig {
-        options: temp.options,
-        key_exchange_groups: temp.key_exchange_groups,
-        verify: temp.verify,
-        server_fingerprints: temp.server_fingerprints,
-        sni_hostname: temp.sni_hostname,
-        alpn_protocols: temp.alpn_protocols,
-        tls_buffer_size: temp.tls_buffer_size,
-        key: temp.key,
-        cert: temp.cert,
-        vision: temp.vision,
-        protocol: temp.protocol,
-    })
-}
-
-/// Variant deserializer for Tls in ClientProxyConfig enum
-fn deserialize_tls_variant<'de, D>(deserializer: D) -> Result<TlsClientConfig, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_tls_client_config(deserializer)
-}
-
 fn deserialize_shadowtls_variant<'de, D>(
     deserializer: D,
 ) -> Result<(String, Option<String>, Box<ClientProxyConfig>), D::Error>
@@ -482,7 +379,7 @@ pub enum HttpVersion {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum ClientProxyConfig {
     #[serde(rename = "sudoku_mask")]
     SudokuMask(crate::sudoku_mask::SudokuMaskConfig<ClientProxyConfig>),
@@ -619,7 +516,6 @@ pub enum ClientProxyConfig {
         /// Inner protocol (typically VLESS, Trojan, etc.)
         protocol: Box<ClientProxyConfig>,
     },
-    #[serde(deserialize_with = "deserialize_tls_variant")]
     Tls(TlsClientConfig),
     Vmess {
         cipher: String,
@@ -738,7 +634,8 @@ impl ClientProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsClientRecord<P> {
     #[serde(
         default,

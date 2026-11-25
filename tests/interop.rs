@@ -180,7 +180,7 @@ fn legacy_vmess_authentication_carries_tcp_and_udp_over_plain_tls_and_stream_tra
         (
             "ws-tls",
             64,
-            UUID,
+            "AeroBox VMess",
             "aes-128-gcm",
             true,
             Some(json!({"type":"ws","path":"/legacy"})),
@@ -271,7 +271,7 @@ fn legacy_vmess_authentication_carries_tcp_and_udp_over_plain_tls_and_stream_tra
             .proxy(
                 reqwest::Proxy::all(format!(
                     "socks5h://127.0.0.1:{}",
-                    app.service.snapshot().settings.mixed_port
+                    app.service.local_proxy_port()
                 ))
                 .unwrap(),
             )
@@ -291,19 +291,16 @@ fn legacy_vmess_authentication_carries_tcp_and_udp_over_plain_tls_and_stream_tra
                 )
             });
         assert_eq!(response.as_ref(), payload);
-        support::udp_roundtrip(app.service.snapshot().settings.mixed_port).unwrap_or_else(
-            |error| {
-                panic!(
-                    "legacy {name} UDP: {error}\nclient:\n{}\npeer:\n{}",
-                    app.service.logs(),
-                    peer.logs()
-                )
-            },
-        );
+        support::udp_roundtrip(app.service.local_proxy_port()).unwrap_or_else(|error| {
+            panic!(
+                "legacy {name} UDP: {error}\nclient:\n{}\npeer:\n{}",
+                app.service.logs(),
+                peer.logs()
+            )
+        });
         app.service.stop().unwrap();
         let _released =
-            std::net::TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port))
-                .unwrap();
+            std::net::TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
         eprintln!("independent legacy VMess peer: {name}, alterId={aid}, TCP/UDP payload passed");
     }
 }
@@ -389,8 +386,13 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
                 node["password"] = password.into();
             }
             "vmess" | "vless" | "vmess-xudp" | "vless-raw" => {
-                inbound["users"] = json!([{"name":"fixture","uuid":UUID}]);
-                node["uuid"] = UUID.into();
+                let identity = if kind.ends_with("-xudp") || kind.ends_with("-raw") {
+                    "AeroBox user"
+                } else {
+                    UUID
+                };
+                inbound["users"] = json!([{"name":"fixture","uuid":identity}]);
+                node["uuid"] = identity.into();
                 if protocol == "vmess" {
                     node["security"] = "auto".into();
                 }
@@ -464,20 +466,17 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
             "{kind} did not reach the local origin twice"
         );
         if kind != "http" {
-            support::udp_roundtrip(app.service.snapshot().settings.mixed_port).unwrap_or_else(
-                |error| {
-                    panic!(
-                        "{kind} UDP: {error}\nclient:\n{}\npeer:\n{}",
-                        app.service.logs(),
-                        peer.logs()
-                    )
-                },
-            );
+            support::udp_roundtrip(app.service.local_proxy_port()).unwrap_or_else(|error| {
+                panic!(
+                    "{kind} UDP: {error}\nclient:\n{}\npeer:\n{}",
+                    app.service.logs(),
+                    peer.logs()
+                )
+            });
         }
         app.service.stop().unwrap();
         let _released =
-            std::net::TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port))
-                .unwrap();
+            std::net::TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
         eprintln!("independent peer: {kind} TCP and supported UDP payload passed");
     }
 }
@@ -606,8 +605,13 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             inbound["users"] = json!([{"name":"fixture","password":"transport-password"}]);
             node["password"] = "transport-password".into();
         } else {
-            inbound["users"] = json!([{"name":"fixture","uuid":UUID}]);
-            node["uuid"] = UUID.into();
+            let identity = if transport_name.starts_with("reality") || transport_name == "vision" {
+                "AeroBox Vision"
+            } else {
+                UUID
+            };
+            inbound["users"] = json!([{"name":"fixture","uuid":identity}]);
+            node["uuid"] = identity.into();
             if kind == "vmess" {
                 node["security"] = "auto".into();
             }
@@ -616,6 +620,9 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             inbound["tls"] = json!({"enabled":true,"server_name":"localhost","certificate_path":certificate_path,"key_path":key_path});
             node["tls"] =
                 json!({"enabled":true,"server_name":"localhost","certificate":certificate});
+            if fingerprint.is_none() {
+                node["tls"]["curve_preferences"] = "X25519".into();
+            }
         }
         if let Some(transport) = transport {
             // Inbound WebSocket configuration uses the same host and early
@@ -728,7 +735,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             .proxy(
                 reqwest::Proxy::all(format!(
                     "socks5h://127.0.0.1:{}",
-                    app.service.snapshot().settings.mixed_port
+                    app.service.local_proxy_port()
                 ))
                 .unwrap(),
             )
@@ -763,7 +770,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
                     .proxy(
                         reqwest::Proxy::all(format!(
                             "{entry}://127.0.0.1:{}",
-                            app.service.snapshot().settings.mixed_port
+                            app.service.local_proxy_port()
                         ))
                         .unwrap(),
                     )
@@ -796,9 +803,9 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
             }
         }
         let udp_result = if kind == "http" || transport_name.ends_with("-tcp-only") {
-            udp_policy::assert_udp_blocked(app.service.snapshot().settings.mixed_port)
+            udp_policy::assert_udp_blocked(app.service.local_proxy_port())
         } else {
-            support::udp_roundtrip(app.service.snapshot().settings.mixed_port)
+            support::udp_roundtrip(app.service.local_proxy_port())
         };
         udp_result.unwrap_or_else(|error| {
             panic!(
@@ -809,8 +816,7 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
         });
         app.service.stop().unwrap();
         let _released =
-            std::net::TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port))
-                .unwrap();
+            std::net::TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
         eprintln!("independent peer: {name} TCP payload and UDP policy passed");
     }
 }

@@ -1,9 +1,6 @@
 .resource-subtitle { color: @app_muted; font-size: 0.92em; }
 .resource-row { padding: 0.73em 1.18em; }
 .resource-row + .resource-row { border-top: 1px solid alpha(#728292,.13); }
-/* Fixed slot for trailing row controls: rows with fewer actions keep the same
- * right edge instead of drifting outward. */
-.row-actions { min-width: 13.64em; }
 .row-actions > button, .row-actions > switch { margin-left: 0; }
 .empty-icon { color: @app_muted; background: alpha(@window_fg_color,.06); border-radius: 12px; -gtk-icon-size: 2.73em; min-height: 5.45em; min-width: 5.45em; }
 .empty-description { color: alpha(@window_fg_color, .70); }
@@ -44,13 +41,13 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 3px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content { padding: 0.85em 0.9em; }
+.node-card-content { padding: 0.55em 0.7em; }
 .subscription-card-content { padding: 1em 1em; }
 .node-name { font-size: 1em; font-weight: 600; }
 .subscription-name { font-size: 1em; font-weight: 600; }
 .node-protocol, .node-delay { font-size: 0.92em; }
 .node-protocol { color: @app_muted; letter-spacing: .01em; margin-top: 0.15em; }
-.node-card-footer { min-height: 1.8em; margin-top: 0.35em; }
+.node-card-footer { min-height: 1.6em; margin-top: 0.1em; }
 .dark .node-protocol { color: @dark_muted; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
 /* Latency colour communicates quality on an unselected card. The selected
@@ -66,9 +63,8 @@
 .node-card.node-selected .node-delay.latency-medium,
 .node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
 /* Keep the 16px symbol small but give the whole target room to click. */
-.aerobox-window button.node-test-button { padding: 0; min-width: 2.2em; min-height: 2.2em; border-radius: 8px; }
-.aerobox-window button.node-test-button:hover { background: alpha(@window_fg_color, .07); }
-.node-card.node-selected button.node-test-button:hover { background: alpha(@accent_fg_color, .15); }
+.aerobox-window button.node-test-button { padding: 0; min-width: 2em; min-height: 2em; background: transparent; border: none; box-shadow: none; }
+.aerobox-window button.node-test-button:hover { background: transparent; opacity: .8; }
 .node-card.node-selected button.node-test-button:focus-visible { outline-color: @accent_fg_color; }
 .node-test-button:disabled { color: alpha(@window_fg_color, .62); opacity: 1; filter: none; }
 /* Adwaita gives some symbolic image nodes their own foreground; explicitly

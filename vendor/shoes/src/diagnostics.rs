@@ -6,6 +6,7 @@ use std::{error::Error, fmt, io, time::Instant};
 struct Context {
     description: String,
     source: io::Error,
+    stage: Option<&'static str>,
 }
 
 impl fmt::Display for Context {
@@ -26,28 +27,43 @@ pub(crate) fn context(description: impl Into<String>, source: io::Error) -> io::
         Context {
             description: description.into(),
             source,
+            stage: None,
         },
     )
 }
 
 pub(crate) fn stage(stage: &'static str, source: io::Error) -> io::Error {
-    context(format!("stage={stage}"), source)
+    stage_context(stage, "", source)
+}
+
+pub(crate) fn stage_context(
+    stage: &'static str,
+    details: impl fmt::Display,
+    source: io::Error,
+) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        Context {
+            description: format!("stage={stage} {details}").trim_end().to_owned(),
+            source,
+            stage: Some(stage),
+        },
+    )
 }
 
 pub(crate) fn timed(stage: &'static str, began: Instant, source: io::Error) -> io::Error {
-    context(
-        format!("stage={stage} elapsed_ms={}", began.elapsed().as_millis()),
+    stage_context(
+        stage,
+        format_args!("elapsed_ms={}", began.elapsed().as_millis()),
         source,
     )
 }
 
 pub(crate) fn vless_response(source: io::Error, received: &[u8]) -> io::Error {
     let expected = received.get(1).map_or(2, |length| 2 + usize::from(*length));
-    context(
-        format!(
-            "stage=vless_response received={} expected={expected}",
-            received.len()
-        ),
+    stage_context(
+        "vless_response",
+        format!("received={} expected={expected}", received.len()),
         source,
     )
 }
@@ -62,10 +78,133 @@ impl fmt::Display for DnsPolicyRejection {
 }
 impl Error for DnsPolicyRejection {}
 
+#[derive(Debug)]
+pub(crate) struct FlowCancelled;
+impl fmt::Display for FlowCancelled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("flow cancelled")
+    }
+}
+impl Error for FlowCancelled {}
+
+#[derive(Debug)]
+pub(crate) struct DnsResponse(pub hickory_resolver::proto::op::ResponseCode);
+impl fmt::Display for DnsResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DNS response {}", self.0)
+    }
+}
+impl Error for DnsResponse {}
+
+#[derive(Debug)]
+pub(crate) struct DnsNoData;
+impl fmt::Display for DnsNoData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DNS returned no usable IP addresses")
+    }
+}
+impl Error for DnsNoData {}
+
+#[derive(Debug)]
+pub(crate) struct TlsTruncation(pub io::Error);
+impl fmt::Display for TlsTruncation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl Error for TlsTruncation {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// Classify at the connection boundary, without changing error propagation or
+/// matching human-readable messages. A closed relay is not a failed handshake.
+pub(crate) fn connection_level(error: &io::Error) -> log::Level {
+    use hickory_resolver::proto::op::ResponseCode;
+    use io::ErrorKind;
+    use log::Level;
+    if contains::<FlowCancelled>(error)
+        || contains::<DnsPolicyRejection>(error)
+        || contains::<DnsNoData>(error)
+        || crate::routing::ingress::is_policy_block(error)
+    {
+        return Level::Debug;
+    }
+    let mut relay = false;
+    let mut protocol_header = false;
+    let mut dns_code = None;
+    walk(error, |cause| {
+        if let Some(context) = cause.downcast_ref::<Context>() {
+            relay |= matches!(
+                context.stage,
+                Some("relay" | "relay_upload" | "relay_download")
+            );
+            protocol_header |= context.stage == Some("vless_response");
+        }
+        if let Some(response) = cause.downcast_ref::<DnsResponse>() {
+            dns_code = Some(response.0);
+        }
+        if let Some(hickory_resolver::net::NetError::Dns(response)) = cause.downcast_ref() {
+            use hickory_resolver::net::DnsError;
+            dns_code = match response {
+                DnsError::ResponseCode(code) => Some(*code),
+                DnsError::NoRecordsFound(records) => Some(records.response_code),
+                _ => dns_code,
+            };
+        }
+        false
+    });
+    if let Some(code) = dns_code {
+        return if matches!(code, ResponseCode::NXDomain | ResponseCode::NoError) {
+            Level::Debug
+        } else {
+            Level::Warn
+        };
+    }
+    if protocol_header {
+        return Level::Error;
+    }
+    if relay && contains::<TlsTruncation>(error) {
+        return Level::Warn;
+    }
+    match error.kind() {
+        ErrorKind::BrokenPipe
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+            if relay =>
+        {
+            Level::Debug
+        }
+        ErrorKind::TimedOut
+        | ErrorKind::ConnectionRefused
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::NetworkDown => Level::Warn,
+        _ => Level::Error,
+    }
+}
+
+pub(crate) fn report_connection(peer: impl fmt::Display, error: &io::Error) {
+    log::log!(
+        connection_level(error),
+        "connection peer={peer} kind={:?}: {error}",
+        error.kind()
+    );
+}
+
 /// io::Error::source can skip the custom error stored inside it.
-pub(crate) fn contains<T: Error + 'static>(mut error: &(dyn Error + 'static)) -> bool {
+pub(crate) fn contains<T: Error + 'static>(error: &(dyn Error + 'static)) -> bool {
+    walk(error, |cause| cause.is::<T>())
+}
+
+fn walk(
+    mut error: &(dyn Error + 'static),
+    mut visit: impl FnMut(&(dyn Error + 'static)) -> bool,
+) -> bool {
     loop {
-        if error.is::<T>() {
+        if visit(error) {
             return true;
         }
         let next = match error.downcast_ref::<io::Error>() {
@@ -80,6 +219,104 @@ pub(crate) fn contains<T: Error + 'static>(mut error: &(dyn Error + 'static)) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_levels_separate_lifecycle_dns_and_protocol_failures() {
+        use hickory_resolver::{
+            net::{DnsError, NetError},
+            proto::op::ResponseCode,
+        };
+        use io::ErrorKind;
+        use log::Level;
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+        ] {
+            assert_eq!(
+                connection_level(&stage("relay_download", kind.into())),
+                Level::Debug
+            );
+            assert_eq!(
+                connection_level(&stage("tls_handshake", kind.into())),
+                Level::Error
+            );
+        }
+        assert_eq!(
+            connection_level(&stage(
+                "outbound_setup",
+                crate::control::tracked_stream::cancelled()
+            )),
+            Level::Debug
+        );
+        assert_eq!(
+            connection_level(&context(
+                "dns",
+                io::Error::new(ErrorKind::NotFound, DnsNoData)
+            )),
+            Level::Debug
+        );
+        for (code, level) in [
+            (ResponseCode::NXDomain, Level::Debug),
+            (ResponseCode::ServFail, Level::Warn),
+            (ResponseCode::Refused, Level::Warn),
+        ] {
+            assert_eq!(
+                connection_level(&context(
+                    "dns",
+                    io::Error::new(ErrorKind::NotFound, DnsResponse(code))
+                )),
+                level
+            );
+            assert_eq!(
+                connection_level(&context(
+                    "dns",
+                    io::Error::other(NetError::Dns(DnsError::ResponseCode(code)))
+                )),
+                level
+            );
+        }
+        assert_eq!(
+            connection_level(&stage("outbound_setup", ErrorKind::TimedOut.into())),
+            Level::Warn
+        );
+        for kind in [
+            ErrorKind::InvalidData,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert_eq!(
+                connection_level(&stage("relay_download", kind.into())),
+                Level::Error
+            );
+        }
+        let tls_eof = || {
+            io::Error::new(
+                ErrorKind::UnexpectedEof,
+                TlsTruncation(ErrorKind::UnexpectedEof.into()),
+            )
+        };
+        assert_eq!(
+            connection_level(&stage("relay_download", tls_eof())),
+            Level::Warn
+        );
+        assert_eq!(
+            connection_level(&stage("tls_handshake", tls_eof())),
+            Level::Error
+        );
+        assert_eq!(
+            connection_level(&stage("relay_download", vless_response(tls_eof(), &[0]))),
+            Level::Error
+        );
+        // Message text alone never downgrades an unclassified failure.
+        assert_eq!(
+            connection_level(&io::Error::other(
+                "flow cancelled; DNS response Non-Existent Domain"
+            )),
+            Level::Error
+        );
+    }
 
     #[test]
     fn context_keeps_error_classification_and_original_source() {

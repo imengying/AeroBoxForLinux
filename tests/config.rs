@@ -134,20 +134,31 @@ fn native_modes_and_network_settings_validate_without_binding_privileged_interfa
     let _serial = support::runtime_lock();
     let app = setup();
     let original = app.service.snapshot().subscriptions;
-    for mode in ["rule", "global", "direct"] {
+    for mode in ["rule", "global"] {
         for ipv6 in [false, true] {
             for tun_enabled in [false, true] {
                 let mut settings = app.service.snapshot().settings;
                 settings.routing_mode = mode.into();
                 settings.ipv6 = ipv6;
                 settings.tun_enabled = tun_enabled;
-                settings.allow_lan = true;
                 settings.dns_cache = false;
                 settings.sniff = false;
                 settings.dns_hijack = false;
                 app.service.apply_settings(settings).unwrap();
                 let config = app.service.generate_current().unwrap();
                 assert!(config.is_array());
+                let listener = config
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["name"] == "mixed-in")
+                    .unwrap();
+                assert_eq!(
+                    listener["address"],
+                    format!("127.0.0.1:{}", app.service.local_proxy_port())
+                );
+                let saved = serde_json::to_value(&app.service.snapshot().settings).unwrap();
+                assert!(saved.get("allow_lan").is_none() && saved.get("mixed_port").is_none());
                 app.service
                     .check(&config)
                     .unwrap_or_else(|e| panic!("{mode}, ipv6={ipv6}, TUN={tun_enabled}: {e:#}"));
@@ -156,35 +167,21 @@ fn native_modes_and_network_settings_validate_without_binding_privileged_interfa
         }
     }
     assert_eq!(app.service.snapshot().subscriptions, original);
+    let before = app.service.snapshot().settings;
+    assert!(app.service.set_routing_mode("direct").is_err());
+    let mut invalid = before.clone();
+    invalid.routing_mode = "direct".into();
+    assert!(app.service.apply_settings(invalid).is_err());
+    assert_eq!(app.service.snapshot().settings, before);
 }
 
 #[test]
-fn stored_data_requires_the_current_schema_and_rejects_external_core_settings() {
+fn invalid_stored_data_is_reported_without_overwriting_it() {
     let app = setup();
     let mut state = app.service.snapshot();
     state.rulesets.push(RuleSet::default());
     let original = serde_json::to_value(state).unwrap();
     let mut invalid = vec![
-        {
-            let mut v = original.clone();
-            v["schema_version"] = json!(1);
-            v
-        },
-        {
-            let mut v = original.clone();
-            v.as_object_mut().unwrap().remove("schema_version");
-            v
-        },
-        {
-            let mut v = original.clone();
-            v["settings"]["core_path"] = json!("/tmp/old-core");
-            v
-        },
-        {
-            let mut v = original.clone();
-            v["settings"]["tun_stack"] = json!("gvisor");
-            v
-        },
         {
             let mut v = original.clone();
             v["settings"]["unknown_option"] = json!(120);

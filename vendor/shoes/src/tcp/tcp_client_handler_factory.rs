@@ -26,7 +26,7 @@ use crate::tcp::chain_builder::try_build_client_chain_group;
 use crate::tcp::tcp_handler::TcpClientHandler;
 use crate::tls_client_handler::TlsClientHandler;
 use crate::trojan_handler::TrojanTcpHandler;
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::parse_user_id;
 use crate::vless::vless_client_handler::VlessTcpClientHandler;
 use crate::vmess::VmessTcpClientHandler;
 use crate::websocket::WebsocketTcpClientHandler;
@@ -292,9 +292,7 @@ pub(crate) fn create_with_hop_context(
                     // Validated when loading config
                     unreachable!();
                 };
-                let user_id_bytes = parse_uuid(user_id)
-                    .expect("Invalid user_id UUID")
-                    .into_boxed_slice();
+                let user_id_bytes = parse_user_id(user_id)?.into_boxed_slice();
                 Box::new(
                     TlsClientHandler::new_vision_vless(
                         client_config,
@@ -363,9 +361,7 @@ pub(crate) fn create_with_hop_context(
                 else {
                     unreachable!("Vision requires VLESS (should be validated during config load)")
                 };
-                let user_id_bytes = parse_uuid(user_id)
-                    .expect("Invalid user_id UUID")
-                    .into_boxed_slice();
+                let user_id_bytes = parse_user_id(user_id)?.into_boxed_slice();
                 Box::new(
                     RealityClientHandler::new_vision_vless(
                         public_key_bytes,

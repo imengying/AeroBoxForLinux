@@ -38,7 +38,6 @@ pub struct NaiveUserConfig {
 /// NaiveProxy fallback configuration for probe resistance
 ///
 /// Must be an absolute path to a directory to serve static files from.
-/// External server fallback (http/https URLs) is no longer supported.
 #[derive(Debug, Clone)]
 pub struct NaiveFallbackConfig(pub std::path::PathBuf);
 
@@ -112,44 +111,6 @@ where
     config.serialize_fields(&mut state)?;
     state.serialize_field("udp_enabled", udp_enabled)?;
     state.end()
-}
-
-/// Custom deserializer for ServerProxyConfig::Vmess that validates legacy force_aead field
-fn deserialize_vmess_server<'de, D>(deserializer: D) -> Result<(String, String, bool), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct VmessServerTemp {
-        cipher: String,
-        user_id: String,
-        #[serde(default = "default_true")]
-        udp_enabled: bool,
-        #[serde(default)]
-        force_aead: Option<bool>,
-    }
-
-    let temp = VmessServerTemp::deserialize(deserializer)?;
-
-    // Check if force_aead was explicitly set
-    if let Some(force_aead_value) = temp.force_aead {
-        if !force_aead_value {
-            return Err(Error::custom(
-                "Non-AEAD VMess mode (force_aead=false) is no longer supported. \
-                 Please remove the force_aead field from your configuration, or set it to true.",
-            ));
-        }
-        // Warn about deprecated field
-        log::warn!(
-            "The 'force_aead' field in VMess server configuration is deprecated and will be removed in a future version. \
-             AEAD mode is now always enabled. Please remove this field from your configuration."
-        );
-    }
-
-    Ok((temp.cipher, temp.user_id, temp.udp_enabled))
 }
 
 pub fn direct_allow_rule() -> NoneOrSome<ConfigSelection<RuleConfig>> {
@@ -528,54 +489,17 @@ impl<'de> Deserialize<'de> for ShadowTlsRemoteHandshake {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ShadowTlsRemoteHandshakeTemp {
             address: NetLocation,
-            /// Legacy field - will be converted to client_chain
-            #[serde(alias = "client_proxy", default)]
-            client_proxies: NoneOrSome<ConfigSelection<ClientConfig>>,
-            /// New field
             #[serde(default)]
             client_chain: NoneOrSome<ClientChainHop>,
         }
 
         let temp = ShadowTlsRemoteHandshakeTemp::deserialize(deserializer)?;
 
-        // Check for conflicting fields
-        let has_client_proxies = !temp.client_proxies.is_empty();
-        let has_client_chain = !temp.client_chain.is_empty();
-
-        if has_client_proxies && has_client_chain {
-            return Err(D::Error::custom(
-                "cannot specify both 'client_proxies' and 'client_chain' in ShadowTLS remote handshake. \
-                 'client_proxies' is deprecated - please use 'client_chain' instead.",
-            ));
-        }
-
-        // Convert client_proxies to client_chain if present
-        let client_chain: OneOrSome<ClientChainHop> = if has_client_proxies {
-            log::warn!(
-                "client_proxy/client_proxies in ShadowTLS remote handshake is deprecated; use client_chain. \
-                 Preserve a proxy list's alternatives with [{{pool: [a, b]}}]; \
-                 a bare [a, b] specifies sequential hops."
-            );
-
-            // Convert to client_chain format:
-            // - Single proxy -> Single hop
-            // - Multiple proxies -> Pool hop
-            let proxy_list = temp.client_proxies.into_vec();
-            if proxy_list.len() == 1 {
-                let selection = proxy_list.into_iter().next().unwrap();
-                OneOrSome::One(ClientChainHop::Single(selection))
-            } else {
-                // Multiple client_proxies entries mean a pool
-                let selections: Vec<ConfigSelection<ClientConfig>> = proxy_list;
-                OneOrSome::One(ClientChainHop::Pool(OneOrSome::Some(selections)))
-            }
-        } else if has_client_chain {
+        let client_chain = if !temp.client_chain.is_empty() {
             // client_chain specified - convert NoneOrSome to OneOrSome
             let hops = temp.client_chain.into_vec();
             if hops.len() == 1 {
@@ -738,7 +662,7 @@ impl WebsocketPingType {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum ServerProxyConfig {
     #[serde(rename = "sudoku_mask")]
     SudokuMask(crate::sudoku_mask::SudokuMaskConfig<ServerProxyConfig>),
@@ -827,7 +751,6 @@ pub enum ServerProxyConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tls_buffer_size: Option<usize>,
     },
-    #[serde(deserialize_with = "deserialize_vmess_server")]
     Vmess {
         cipher: String,
         user_id: String,

@@ -20,13 +20,11 @@ trap 'exit 1' HUP INT TERM
 mkdir "$stage/$name"
 install -m755 "$binary" "$stage/$name/AeroBox"
 install -m755 scripts/install.sh scripts/uninstall.sh "$stage/$name/"
-install -m644 resources/icons/io.github.imengying.AeroBoxForLinux.png README.md LICENSE THIRD_PARTY.md "$stage/$name/"
+install -m644 resources/icons/io.github.imengying.AeroBoxForLinux.png LICENSE THIRD_PARTY.md "$stage/$name/"
 cp -R licenses "$stage/$name/licenses"
-# Runtime assets are embedded. Ship user documentation and required notices
-# explicitly so new developer docs, fixtures or tools cannot enter the archive.
-mkdir "$stage/$name/docs"
-install -m644 docs/protocols.md "$stage/$name/docs/"
+# Runtime assets are embedded. Documentation stays in the repository;
+# only the executable, installation resources and license notices are shipped.
 mkdir -p "$stage/$name/resources/rules"
-install -m644 resources/rules/README.md resources/rules/*-LICENSE "$stage/$name/resources/rules/"
+install -m644 resources/rules/*-LICENSE "$stage/$name/resources/rules/"
 tar -C "$stage" -czf "$output_dir/$name.tar.gz" "$name"
 printf 'Package: %s/%s.tar.gz\n' "$output_dir" "$name"

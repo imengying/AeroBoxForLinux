@@ -6,8 +6,6 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use hickory_resolver::proto::op::ResponseCode;
-
 use crate::address::NetLocation;
 use crate::resolver::Resolver;
 
@@ -40,6 +38,7 @@ impl CompositeResolver {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no DNS resolvers configured");
             let mut retained_setup = false;
             let mut truncated = None;
+            let mut failure_response = None;
             for resolver in resolvers {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     last = std::io::Error::new(
@@ -54,21 +53,20 @@ impl CompositeResolver {
                 };
                 match exchange.await {
                     Ok(response) => {
-                        let message = super::message::decode(&response);
-                        if message
-                            .as_ref()
-                            .is_ok_and(|message| message.metadata.truncation)
-                        {
-                            truncated.get_or_insert(response);
-                        } else if truncated.is_none()
-                            || message.is_ok_and(|message| {
-                                matches!(
-                                    message.metadata.response_code,
-                                    ResponseCode::NoError | ResponseCode::NXDomain
-                                )
-                            })
-                        {
+                        let message = match super::message::decode(&response) {
+                            Ok(message) => message,
+                            Err(error) => {
+                                last = error;
+                                continue;
+                            }
+                        };
+                        if super::message::is_complete_answer(&message) {
                             return Ok(response);
+                        }
+                        if message.metadata.truncation {
+                            truncated.get_or_insert(response);
+                        } else {
+                            failure_response.get_or_insert(response);
                         }
                     }
                     Err(error) => {
@@ -77,7 +75,7 @@ impl CompositeResolver {
                     }
                 }
             }
-            if let Some(response) = truncated {
+            if let Some(response) = truncated.or(failure_response) {
                 Ok(response)
             } else if retained_setup {
                 Err(std::io::Error::new(
@@ -191,7 +189,12 @@ mod tests {
             let result = self.result.clone();
             Box::pin(async move {
                 result
-                    .map(|_| vec![])
+                    .map(|_| {
+                        hickory_resolver::proto::op::Message::query()
+                            .into_response()
+                            .to_vec()
+                            .unwrap()
+                    })
                     .map_err(|kind| io::Error::new(kind, "exchange failure"))
             })
         }
@@ -279,11 +282,14 @@ mod tests {
             Ok(vec![]),
             Err(ErrorKind::PermissionDenied),
         ]);
-        assert_eq!(resolver.exchange(vec![]).await.unwrap(), Vec::<u8>::new());
+        let response = resolver.exchange(vec![]).await.unwrap();
+        assert!(super::super::message::is_complete_answer(
+            &super::super::message::decode(&response).unwrap()
+        ));
     }
 
     #[tokio::test]
-    async fn truncated_exchange_tries_fallback_and_preserves_first_partial_answer() {
+    async fn exchange_uses_complete_answers_and_preserves_wire_failures() {
         use hickory_resolver::proto::op::{Message, ResponseCode};
 
         #[derive(Debug)]
@@ -333,6 +339,30 @@ mod tests {
             ]);
             assert_eq!(resolver.exchange(vec![]).await.unwrap(), expected);
         }
+        for code in [
+            ResponseCode::ServFail,
+            ResponseCode::Refused,
+            ResponseCode::NXDomain,
+            ResponseCode::NoError,
+        ] {
+            response.metadata.response_code = code;
+            let first = response.to_vec().unwrap();
+            response.metadata.response_code = ResponseCode::NoError;
+            response.metadata.id = 42;
+            let healthy = response.to_vec().unwrap();
+            let expected = if matches!(code, ResponseCode::NoError | ResponseCode::NXDomain) {
+                &first
+            } else {
+                &healthy
+            };
+            let resolver = CompositeResolver::new(vec![
+                Arc::new(WireReply(Ok(first.clone()))),
+                Arc::new(WireReply(Ok(healthy.clone()))),
+            ]);
+            assert_eq!(&resolver.exchange(vec![]).await.unwrap(), expected);
+            response.metadata.id = 1;
+        }
+        response.metadata.response_code = ResponseCode::ServFail;
         let resolver =
             CompositeResolver::new(vec![Arc::new(WireReply(Ok(response.to_vec().unwrap())))]);
         assert_eq!(

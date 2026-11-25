@@ -118,9 +118,6 @@ impl Expression {
                     "network" => decode_alternatives(value).map(Self::Network),
                     "protocol" => decode_alternatives(value).map(Self::Protocol),
                     "rule_source_group" => decode(value).map(Self::RuleSourceGroup),
-                    "rule_group" => Err(invalid(
-                        "rule_group predicate was renamed; use {rule_source_group: name} and declare the group with rule_source_group",
-                    )),
                     "all" => Self::parse_children(decode(value)?, depth).map(Self::All),
                     "any" => Self::parse_children(decode(value)?, depth).map(Self::Any),
                     "not" => Self::parse_config(value, depth + 1).map(|p| Self::Not(Box::new(p))),
@@ -294,24 +291,6 @@ mod tests {
                 error.to_string(),
                 "a masks leaf requires a mask string or a nonempty list of mask strings; combine other predicates with all/any/not"
             );
-        }
-    }
-
-    #[test]
-    fn renamed_rule_group_hint_works_in_every_expression_position() {
-        for form in ["direct", "list", "all", "any", "not"] {
-            let wrap = |predicate| match form {
-                "direct" => predicate,
-                "list" => json!([predicate]),
-                "not" => json!({"not": predicate}),
-                operator => json!({operator: [predicate]}),
-            };
-            let error = Expression::from_config(wrap(json!({"rule_group": "other"}))).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "rule_group predicate was renamed; use {rule_source_group: name} and declare the group with rule_source_group"
-            );
-            Expression::from_config(wrap(json!({"rule_source_group": "other"}))).unwrap();
         }
     }
 

@@ -6,54 +6,6 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 #[tokio::test]
-async fn persisted_acme_retry_is_reported_once_without_contacting_the_ca() {
-    use std::os::unix::fs::PermissionsExt;
-    timeout(Duration::from_secs(10), async {
-        let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().join("state");
-        std::fs::create_dir(&state).unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let ca = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/directory", ca.local_addr().unwrap());
-        let retry_at = chrono::Utc::now().timestamp() + 3600;
-        let state_file = state.join("state.json");
-        std::fs::write(&state_file, serde_json::to_vec(&json!({
-            "directory_url": url, "domains": ["proxy.test"], "account_key": "not used until retry",
-            "credentials": null, "certificate": null, "private_key": null, "order_url": null, "order_key": null, "retry_at": retry_at
-        })).unwrap()).unwrap();
-        std::fs::set_permissions(&state_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let path = directory.path().join("config.yaml");
-        let (challenge_listener, challenge) = reserve_address();
-        let (proxy_listener, proxy) = reserve_address();
-        std::fs::write(&path, serde_yaml::to_string(&json!([
-            {"certificate_source": "managed", "type": "acme", "domains": ["proxy.test"], "directory_url": url,
-             "state_dir": state, "challenge": {"type": "http01", "listen": [challenge.to_string()]}},
-            {"address": proxy.to_string(), "protocol": {"type": "socks"}}
-        ])).unwrap()).unwrap();
-        drop(challenge_listener);
-        drop(proxy_listener);
-        let child = Command::new(env!("CARGO_BIN_EXE_shoes"))
-            .args(["-t", "1"]).arg(&path).env_remove("RUST_LOG")
-            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
-        let mut child = Process::from_child(child);
-        let marker = "ACME retry deferred until Unix time";
-        loop {
-            let line = child.lines.recv().await.unwrap();
-            if line.contains(marker) {
-                assert!(line.contains("managed") && line.contains(state.to_str().unwrap()) && line.contains(&retry_at.to_string()), "{line}");
-                break;
-            }
-        }
-        assert!(timeout(Duration::from_millis(200), ca.accept()).await.is_err());
-        child.signal(libc::SIGTERM);
-        assert!(child.exit().await.success());
-        while let Some(line) = child.lines.recv().await {
-            assert!(!line.contains(marker), "duplicate retry message: {line}");
-        }
-    }).await.unwrap();
-}
-
-#[tokio::test]
 async fn certificate_failures_are_visible_with_default_logging() {
     timeout(Duration::from_secs(12), async {
         let directory = tempfile::tempdir().unwrap();
@@ -62,44 +14,38 @@ async fn certificate_failures_are_visible_with_default_logging() {
         let key = directory.path().join("key.pem");
         std::fs::write(&cert, pair.cert.pem()).unwrap();
         std::fs::write(&key, pair.signing_key.serialize_pem()).unwrap();
-        let ca = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/directory", ca.local_addr().unwrap());
-        let mut fixture = tokio::task::JoinSet::new();
-        fixture.spawn(async move {
-            let (mut stream, _) = ca.accept().await.unwrap();
-            let mut request = [0; 4096];
-            let mut received = 0;
-            while !request[..received].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                assert!(received < request.len(), "request headers exceed fixture limit");
-                let count = stream.read(&mut request[received..]).await.unwrap();
-                assert_ne!(count, 0, "request ended before headers");
-                received += count;
-            }
-            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
-        });
         let path = directory.path().join("config.yaml");
-        let (challenge_listener, challenge) = reserve_address();
         let (proxy_listener, proxy) = reserve_address();
-        std::fs::write(&path, serde_yaml::to_string(&json!([
-            {"certificate_source": "files", "type": "files", "cert": cert, "key": key},
-            {"certificate_source": "managed", "type": "acme", "domains": ["proxy.test"], "directory_url": url,
-                "state_dir": directory.path().join("state"), "challenge": {"type": "http01", "listen": [challenge.to_string()]}},
-            {"address": proxy.to_string(), "protocol": {"type": "tls", "default_tls_target": {
-                "certificate_source": "files", "protocol": {"type": "socks"}}}}
-        ])).unwrap()).unwrap();
-        drop(challenge_listener);
+        std::fs::write(
+            &path,
+            serde_yaml::to_string(&json!([
+                {"certificate_source": "files", "type": "files", "cert": cert, "key": key},
+                {"address": proxy.to_string(), "protocol": {"type": "tls", "default_tls_target": {
+                    "certificate_source": "files", "protocol": {"type": "socks"}}}}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
         drop(proxy_listener);
         let child = Command::new(env!("CARGO_BIN_EXE_shoes"))
-            .args(["-t", "1"]).arg(&path).env_remove("RUST_LOG")
-            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            .args(["-t", "1"])
+            .arg(&path)
+            .env_remove("RUST_LOG")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         let mut child = Process::from_child(child);
-        child.wait_for("ACME directory returned HTTP 503").await;
+        child.wait_for("Servers ready").await;
         std::fs::write(&key, "invalid replacement").unwrap();
-        child.wait_for("Certificate source files update failed").await;
+        child
+            .wait_for("Certificate source files update failed")
+            .await;
         child.signal(libc::SIGTERM);
         assert!(child.exit().await.success());
-        fixture.join_next().await.unwrap().unwrap();
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -297,83 +243,6 @@ async fn rejected_inbound_identities_recover_without_yaml_edits() {
 }
 
 #[tokio::test]
-async fn reload_releases_retired_http01_ports_before_starting_proxy_listeners() {
-    timeout(Duration::from_secs(20), async {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.yaml");
-        let (challenge_listener, challenge) = reserve_address();
-        let (proxy_listener, proxy) = reserve_address();
-        let mut config = json!([
-            {"certificate_source": "managed", "type": "acme", "domains": ["proxy.test"],
-                "directory_url": "http://127.0.0.1:9/directory", "state_dir": directory.path().join("state"),
-                "challenge": {"type": "http01", "listen": [challenge.to_string()]}},
-            {"address": proxy.to_string(), "protocol": {"type": "tls", "default_tls_target": {
-                "certificate_source": "managed", "protocol": {"type": "socks"}}}}
-        ]);
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        drop(challenge_listener);
-        drop(proxy_listener);
-        let mut child = Process::start(&path, &[]);
-        child.wait_for("Servers ready").await;
-        config[0]["challenge"] = json!({"type": "tls_alpn01"});
-        config.as_array_mut().unwrap().push(json!({"address": challenge.to_string(), "protocol": {"type": "socks"}}));
-        config.as_array_mut().unwrap().push(json!({"path":directory.path().join("missing/listener.sock"), "protocol":{"type":"socks"}}));
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        child.signal(libc::SIGHUP);
-        child.wait_for("Reload rejected; previous servers restored").await;
-        let mut restored = TcpStream::connect(challenge).await.unwrap();
-        restored.write_all(b"GET / HTTP/1.1\r\nHost: proxy.test\r\n\r\n").await.unwrap();
-        let mut response = String::new();
-        restored.read_to_string(&mut response).await.unwrap();
-        assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
-        config.as_array_mut().unwrap().pop();
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        child.signal(libc::SIGHUP);
-        child.wait_for("Servers ready").await;
-        let mut stream = TcpStream::connect(challenge).await.unwrap();
-        stream.write_all(&[5, 1, 0]).await.unwrap();
-        let mut reply = [0; 2];
-        stream.read_exact(&mut reply).await.unwrap();
-        assert_eq!(reply, [5, 0]);
-        drop(stream);
-
-        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        config[0]["challenge"] = json!({"type": "http01", "listen": [challenge.to_string(), occupied.local_addr().unwrap().to_string()]});
-        config.as_array_mut().unwrap().pop();
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        child.signal(libc::SIGHUP);
-        child.wait_for("Reload rejected").await;
-        let mut stream = TcpStream::connect(challenge).await.unwrap();
-        stream.write_all(&[5, 1, 0]).await.unwrap();
-        stream.read_exact(&mut reply).await.unwrap();
-        assert_eq!(reply, [5, 0], "failed deferred preparation must retain the proxy");
-        drop(stream);
-
-        config[0]["challenge"]["listen"] = json!([challenge.to_string()]);
-        config.as_array_mut().unwrap().push(json!({"path":directory.path().join("missing/listener.sock"), "protocol":{"type":"socks"}}));
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        child.signal(libc::SIGHUP);
-        child.wait_for("Reload rejected; previous servers restored").await;
-        let mut stream = TcpStream::connect(challenge).await.unwrap();
-        stream.write_all(&[5, 1, 0]).await.unwrap();
-        stream.read_exact(&mut reply).await.unwrap();
-        assert_eq!(reply, [5, 0], "failed HTTP-01 activation must restore the proxy");
-        drop(stream);
-        config.as_array_mut().unwrap().pop();
-        std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        child.signal(libc::SIGHUP);
-        child.wait_for("Servers ready").await;
-        let mut stream = TcpStream::connect(challenge).await.unwrap();
-        stream.write_all(b"GET /.well-known/acme-challenge/unknown HTTP/1.1\r\nHost: proxy.test\r\n\r\n").await.unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.unwrap();
-        assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
-        child.signal(libc::SIGTERM);
-        assert!(child.exit().await.success());
-    }).await.unwrap();
-}
-
-#[tokio::test]
 async fn unused_named_pem_rejection_recovers_from_file_creation() {
     timeout(Duration::from_secs(20), async {
         let directory = tempfile::tempdir().unwrap();
@@ -500,40 +369,4 @@ async fn reload_only_pems_debounce_recover_and_stop_watching_removed_dependencie
         child.signal(libc::SIGTERM);
         assert!(child.exit().await.success());
     }).await.unwrap();
-}
-
-#[test]
-fn managed_check_has_no_network_state_or_bind_side_effects() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.yaml");
-    let state = directory.path().join("state");
-    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    occupied.set_nonblocking(true).unwrap();
-    let challenge = occupied.local_addr().unwrap();
-    let config = json!([
-        {"certificate_source":"managed", "type":"acme", "domains":["proxy.test"], "state_dir":state,
-            "directory_url":format!("http://{challenge}/directory"),
-            "challenge":{"type":"http01", "listen":[challenge.to_string()]}},
-        {"address":available_address().to_string(), "protocol":{"type":"tls", "tls_targets":{"proxy.test":{
-            "certificate_source":"managed", "protocol":{"type":"socks"}
-        }}}}
-    ]);
-    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
-    for mode in ["check", "--dry-run"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_shoes"))
-            .args([mode, "-t", "1"])
-            .arg(&path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!state.exists());
-        assert_eq!(
-            occupied.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-    }
 }

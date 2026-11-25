@@ -13,7 +13,7 @@ use crate::resolver::Resolver;
 use crate::stream_reader::StreamReader;
 use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::util::write_all;
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::parse_user_id;
 use crate::xudp::XudpMessageStream;
 
 use super::encryption::ServerEncryption;
@@ -62,7 +62,7 @@ impl VlessTcpServerHandler {
             ));
         }
         Ok(Self {
-            user_id: parse_uuid(user_id)?.into_boxed_slice(),
+            user_id: parse_user_id(user_id)?.into_boxed_slice(),
             udp_enabled,
             proxy_selector,
             resolver,
@@ -577,7 +577,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (server_io, mut client) = tokio::io::duplex(4096);
             let mut request = vec![0];
-            request.extend_from_slice(&parse_uuid(USER_ID).unwrap());
+            request.extend_from_slice(&parse_user_id(USER_ID).unwrap());
             request.extend_from_slice(&[0, COMMAND_TCP]);
             request.extend_from_slice(&MUX_DESTINATION_PORT.to_be_bytes());
             request.extend_from_slice(&[2, MUX_DESTINATION_HOST.len() as u8]);

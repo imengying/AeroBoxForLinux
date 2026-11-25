@@ -150,6 +150,84 @@ fn configure(app: &App, node: &Server, direct: &Dns, remote: &Dns) {
     settings.ipv6 = false;
     app.service.apply_settings(settings).unwrap();
 }
+
+#[test]
+fn offline_dns_allows_start_and_recovers_without_restarting_or_bypassing_proxy() {
+    let _serial = runtime_lock();
+    let direct = Dns::new([127, 0, 0, 1]);
+    direct.reject.store(true, Ordering::Relaxed);
+    let remote = Dns::new([203, 0, 113, 2]);
+    let (node, forwarded_dns) = node(&remote);
+    let app = App::new();
+    configure(&app, &node, &direct, &remote);
+    app.service
+        .save_ruleset(rule(
+            "IP route",
+            "proxy",
+            json!([{"ip_cidr":["203.0.113.0/24"]}]),
+        ))
+        .unwrap();
+
+    // These DNS upstream names can only be resolved by our unavailable bootstrap.
+    // Preparing DoH must also work offline; no public DNS or server is contacted.
+    let mut settings = app.service.snapshot().settings;
+    settings.remote_dns = "https://offline-doh.example.test/dns-query".into();
+    app.service.apply_settings(settings.clone()).unwrap();
+    let started = std::time::Instant::now();
+    app.service.start().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(app.service.status().running);
+    assert_eq!(direct.count(), 0);
+    assert_eq!(forwarded_dns.load(Ordering::Relaxed), 0);
+    // An unused remote resolver must not block rule-based local traffic or mode changes.
+    app.service.set_routing_mode("global").unwrap();
+    app.service.set_routing_mode("rule").unwrap();
+    app.service
+        .save_ruleset(rule(
+            "local",
+            "direct",
+            json!([{"ip_cidr":["127.0.0.1/32"]}]),
+        ))
+        .unwrap();
+    let (local, _) = support::http(b"offline-local".to_vec());
+    assert_eq!(
+        support::request(&app.service, &format!("http://{}/", local.address)).unwrap(),
+        "offline-local"
+    );
+    app.service.set_routing_mode("rule").unwrap();
+    assert_eq!(direct.count(), 0);
+    app.service.stop().unwrap();
+
+    settings.remote_dns = format!(
+        "tcp://offline-dns.example.test:{}",
+        remote.server.address.port()
+    );
+    app.service.apply_settings(settings).unwrap();
+    app.service.start().unwrap();
+    assert_eq!(direct.count(), 0);
+    assert!(support::request(&app.service, "http://offline.example.test/").is_err());
+    assert!(app.service.status().running);
+    assert!(direct.count() > 0);
+    assert_eq!(remote.count(), 0);
+    assert_eq!(forwarded_dns.load(Ordering::Relaxed), 0);
+
+    // The same running service must retry bootstrap after the network recovers.
+    direct.reject.store(false, Ordering::Relaxed);
+    for scheme in ["http", "socks5h"] {
+        assert_eq!(
+            support::request_via(
+                &app.service,
+                &format!("http://recovered-{scheme}.example.test/"),
+                scheme,
+            )
+            .unwrap(),
+            "through-node"
+        );
+    }
+    assert!(remote.count() > 0);
+    assert!(forwarded_dns.load(Ordering::Relaxed) > 0);
+}
+
 fn rule(name: &str, action: &str, rules: Value) -> RuleSet {
     RuleSet {
         name: name.into(),
@@ -172,8 +250,7 @@ fn query(name: &str, kind: u16) -> Vec<u8> {
 fn ask(service: &Service, name: &str, kind: u16, udp: bool) -> Vec<u8> {
     let query = query(name, kind);
     let response = if udp {
-        let mut control =
-            TcpStream::connect(("127.0.0.1", service.snapshot().settings.mixed_port)).unwrap();
+        let mut control = TcpStream::connect(("127.0.0.1", service.local_proxy_port())).unwrap();
         control
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -243,6 +320,7 @@ fn policy_lookups_request_recursion_for_both_address_families() {
     configure(&app, &node, &direct, &remote);
     let mut settings = app.service.snapshot().settings;
     settings.ipv6 = true;
+    settings.log_level = "debug".into();
     app.service.apply_settings(settings).unwrap();
     // Force domain requests through IP-based routing, as the built-in China
     // IP rules do. The proxy must receive traffic after remote DNS succeeds.
@@ -268,18 +346,20 @@ fn policy_lookups_request_recursion_for_both_address_families() {
     }
     assert!(forwarded_dns.load(Ordering::Relaxed) > 0);
     assert_eq!(direct.count(), 0, "remote lookup leaked to direct DNS");
-    // Error-level logs must identify the failed lookup without rerouting it.
+    // NXDOMAIN remains a failed lookup without rerouting it. Its diagnostic
+    // context is available at DEBUG rather than being reported as an ERROR.
     remote.reject.store(true, Ordering::Relaxed);
     assert!(support::request(&app.service, "http://failed.recursive.example.test/").is_err());
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let logs = loop {
         let logs = app.service.logs();
-        if logs.contains("stage=dns") || std::time::Instant::now() >= deadline {
+        if logs.contains("DEBUG connection") || std::time::Instant::now() >= deadline {
             break logs;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
     for field in [
+        "DEBUG connection",
         "stage=outbound_setup",
         "stage=dns",
         "failed.recursive.example.test",
@@ -290,6 +370,7 @@ fn policy_lookups_request_recursion_for_both_address_families() {
     ] {
         assert!(logs.contains(field), "missing {field}: {logs}");
     }
+    assert!(!logs.contains("ERROR connection"), "{logs}");
     assert_eq!(
         direct.count(),
         0,
@@ -370,11 +451,7 @@ fn custom_rules_control_dns_and_traffic_before_builtin_lists() {
     app.service
         .apply_ruleset_enabled(&blocked_id, true)
         .unwrap();
-    for (mode, choice) in [
-        ("global", "proxy"),
-        ("direct", "direct"),
-        ("rule", "reject"),
-    ] {
+    for (mode, choice) in [("global", "proxy"), ("rule", "reject")] {
         app.service.set_routing_mode(mode).unwrap();
         dns_choice(&app, &direct, &remote, "blocked.example.test", choice);
     }
@@ -434,7 +511,7 @@ fn ipv6_toggle_controls_aaaa_responses_without_querying_upstream_when_disabled()
     let app = App::new();
     configure(&app, &node, &direct, &remote);
     app.service.start().unwrap();
-    for mode in ["rule", "global", "direct"] {
+    for mode in ["rule", "global"] {
         app.service.set_routing_mode(mode).unwrap();
         for ipv6 in [false, true, false] {
             let mut settings = app.service.snapshot().settings;
@@ -446,16 +523,7 @@ fn ipv6_toggle_controls_aaaa_responses_without_querying_upstream_when_disabled()
                 assert_eq!(reply[3] & 15, 0);
                 assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), u16::from(ipv6));
                 let delta = [direct.count() - before[0], remote.count() - before[1]];
-                assert_eq!(
-                    delta,
-                    if !ipv6 {
-                        [0, 0]
-                    } else if mode == "direct" {
-                        [1, 0]
-                    } else {
-                        [0, 1]
-                    }
-                );
+                assert_eq!(delta, if !ipv6 { [0, 0] } else { [0, 1] });
                 if ipv6 {
                     assert!(
                         reply.ends_with(

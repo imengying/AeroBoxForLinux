@@ -749,7 +749,7 @@ async fn unsupported_bootstrap_routes_only_fail_when_caches_are_missing() {
                 value[1]["rules"][0]["download"]["client_chain"] = serde_json::json!({"address": "127.0.0.1:1", "transport": "quic", "quic_settings": {"verify": false}, "protocol": {"type": "socks"}});
             }
             _ => {
-                let mut group = serde_json::json!({"client_group": "outbound", "type": route, "client_proxies": ["direct"]});
+                let mut group = serde_json::json!({"client_group": "outbound", "type": route, "client_chains": ["direct"]});
                 if route == "url-test" {
                     group["url"] = serde_json::json!("http://probe.invalid/");
                     group["lazy"] = serde_json::json!(true);

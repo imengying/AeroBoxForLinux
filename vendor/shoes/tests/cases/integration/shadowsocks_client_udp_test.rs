@@ -84,7 +84,7 @@ async fn test_shoes_ss_client_uot_v1() -> Result<(), Box<dyn std::error::Error>>
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks
@@ -195,7 +195,7 @@ async fn test_shoes_ss_client_udp_disabled() -> Result<(), Box<dyn std::error::E
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks
@@ -299,7 +299,7 @@ async fn test_shoes_ss_client_multiple_packets() -> Result<(), Box<dyn std::erro
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks
@@ -404,7 +404,7 @@ async fn test_shoes_ss_client_chacha20() -> Result<(), Box<dyn std::error::Error
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks
@@ -504,7 +504,7 @@ async fn test_shoes_ss_client_2022_blake3() -> Result<(), Box<dyn std::error::Er
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks

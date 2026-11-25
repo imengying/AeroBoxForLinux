@@ -465,7 +465,7 @@ mod tests {
         drop((connections, streams, memory));
 
         let configs = serde_yaml::from_str(
-            r#"- global_limits:
+            r#"- global_settings:
     max_connections: 2
     max_connections_per_ip: 1
     max_streams: 1

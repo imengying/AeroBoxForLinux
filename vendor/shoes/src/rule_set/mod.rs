@@ -468,7 +468,6 @@ pub(crate) fn validate_remote_paths(configs: &mut [Config], extra: &[PathBuf]) -
     })?;
     let mut reserved = extra.to_vec();
     reserved.extend(crate::config::pem_candidate_dependencies(configs)?);
-    let mut state_dirs = Vec::new();
     let mut reserve_state = |path: &Path| {
         if path.file_name().is_none() {
             return Err(invalid(
@@ -509,12 +508,6 @@ pub(crate) fn validate_remote_paths(configs: &mut [Config], extra: &[PathBuf]) -
                         reserve_state(cert)?;
                         reserve_state(key)?;
                     }
-                    crate::certificates::SourceConfig::Acme(acme) => {
-                        state_dirs.push(source_identity(&acme.state_dir)?);
-                        if let Some(path) = &acme.ca_cert {
-                            reserve_state(path)?;
-                        }
-                    }
                 }
                 None
             }
@@ -533,12 +526,6 @@ pub(crate) fn validate_remote_paths(configs: &mut [Config], extra: &[PathBuf]) -
                 "rule_cache_dir overlaps a configuration, PEM, socket, or state path",
             ));
         }
-    }
-    if state_dirs
-        .iter()
-        .any(|dir| dir.starts_with(&directory_identity) || directory_identity.starts_with(dir))
-    {
-        return Err(invalid("remote cache overlaps an ACME state directory"));
     }
     Ok(())
 }

@@ -22,6 +22,16 @@ type Connection =
 type SetupWaits = Mutex<Vec<Option<Connection>>>;
 type PartialAnswer = Mutex<Option<Message>>;
 
+fn retain_fallback(partial: &PartialAnswer, answer: Message) {
+    let mut saved = partial.lock();
+    if saved
+        .as_ref()
+        .is_none_or(|old| !old.metadata.truncation && answer.metadata.truncation)
+    {
+        *saved = Some(answer);
+    }
+}
+
 struct Upstream {
     server_index: usize,
     ip: IpAddr,
@@ -177,14 +187,7 @@ impl RawDnsExchange {
     }
 
     pub fn request_timeout(&self) -> std::time::Duration {
-        let options = &self.context.options;
-        options.timeout.saturating_mul(
-            options
-                .attempts
-                .max(1)
-                .saturating_add(1)
-                .min(u32::MAX as usize) as u32,
-        )
+        request_budget(self.context.options.timeout, self.context.options.attempts)
     }
 
     pub async fn exchange_with_deadline(
@@ -232,7 +235,7 @@ impl RawDnsExchange {
         let setups = Mutex::new(Vec::new());
         let expiration = ExchangeTimeout::default();
         let admitted = AtomicBool::new(false);
-        // A validated UDP partial must survive cancellation of its TCP retry.
+        // Preserve a wire response if all other configured servers fail.
         let partial = Mutex::new(None);
         let result = expiration
             .run(
@@ -346,7 +349,8 @@ impl RawDnsExchange {
             let mut answers = jobs.buffer_unordered(concurrency);
             while let Some(result) = answers.next().await {
                 match result {
-                    Ok(answer) => return Ok(answer),
+                    Ok(answer) if super::message::is_complete_answer(&answer) => return Ok(answer),
+                    Ok(answer) => retain_fallback(partial, answer),
                     Err(failure) => error = failure,
                 }
             }
@@ -377,7 +381,7 @@ impl RawDnsExchange {
                 candidate.same_endpoint(upstream)
                     && matches!(candidate.config.protocol, ProtocolConfig::Tcp)
             }) {
-                partial.lock().get_or_insert_with(|| answer.clone());
+                retain_fallback(partial, answer);
                 let answer = self
                     .send_upstream(tcp, message.clone(), setups, &timing)
                     .await?;
@@ -477,6 +481,10 @@ impl RawDnsExchange {
         }
         unreachable!()
     }
+}
+
+pub(super) fn request_budget(timeout: std::time::Duration, attempts: usize) -> std::time::Duration {
+    timeout.saturating_mul(attempts.max(1).saturating_add(1).min(u32::MAX as usize) as u32)
 }
 
 #[derive(Debug)]

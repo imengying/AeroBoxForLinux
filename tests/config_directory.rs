@@ -7,8 +7,6 @@ fn default_configuration_uses_the_user_config_directory() {
         let store = Store::open(None).unwrap();
         assert_eq!(store.dir, std::path::PathBuf::from(expected));
         assert!(store.dir.join("state.json").is_file());
-        assert_eq!(store.state.schema_version, 2);
-        assert!(!store.dir.join("sing-box").exists());
         return;
     }
     let root = tempfile::tempdir().unwrap();

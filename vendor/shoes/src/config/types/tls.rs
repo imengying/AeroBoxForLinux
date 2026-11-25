@@ -229,7 +229,6 @@ mod tests {
     fn shadowtls_cannot_silently_ignore_allowlists() {
         for yaml in [
             "type: shadowtls\npassword: password\nkey_exchange_groups: [X25519MLKEM768]\nprotocol: {type: socks}",
-            "type: tls\nshadowtls_password: password\nkey_exchange_groups: [X25519MLKEM768]\nprotocol: {type: socks}",
         ] {
             assert!(serde_yaml::from_str::<ClientProxyConfig>(yaml).is_err());
         }

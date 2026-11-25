@@ -39,13 +39,11 @@ pub struct Settings {
     /// so text and layout scale together instead of only the glyphs.
     pub font_size: u32,
     pub active_subscription: String,
-    pub mixed_port: u16,
     pub system_proxy: bool,
     pub routing_mode: String,
     pub ipv6: bool,
     pub tun_enabled: bool,
     pub tun_mtu: u32,
-    pub allow_lan: bool,
     pub sniff: bool,
     pub dns_hijack: bool,
     pub dns_cache: bool,
@@ -65,13 +63,11 @@ impl Default for Settings {
             theme: "system".into(),
             font_size: 11,
             active_subscription: String::new(),
-            mixed_port: 2080,
             system_proxy: true,
             routing_mode: "rule".into(),
             ipv6: true,
             tun_enabled: false,
             tun_mtu: 1500,
-            allow_lan: false,
             sniff: true,
             dns_hijack: true,
             dns_cache: true,
@@ -104,13 +100,12 @@ impl Settings {
             matches!(self.theme.as_str(), "system" | "light" | "dark"),
             "无效的主题"
         );
-        ensure!(self.mixed_port > 0, "本地代理端口须为非零端口");
         ensure!(
             (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
             "字体大小须在 {FONT_SIZE_MIN} 到 {FONT_SIZE_MAX} 之间"
         );
         ensure!(
-            matches!(self.routing_mode.as_str(), "rule" | "global" | "direct"),
+            matches!(self.routing_mode.as_str(), "rule" | "global"),
             "无效的出站模式"
         );
         ensure!(
@@ -285,7 +280,6 @@ pub fn builtin_seed(id: &str) -> Option<&'static [u8]> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    pub schema_version: u32,
     pub settings: Settings,
     pub subscriptions: Vec<Subscription>,
     pub rulesets: Vec<RuleSet>,
@@ -293,7 +287,6 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            schema_version: 2,
             settings: Settings::default(),
             subscriptions: vec![],
             rulesets: builtin_resources(),
@@ -330,10 +323,6 @@ impl State {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.schema_version == 2,
-            "不支持的配置版本，请备份后重置数据"
-        );
         self.settings.validate()?;
         let mut ids = HashSet::new();
         for (id, name) in self
@@ -614,7 +603,7 @@ mod tests {
         assert!(
             store
                 .update(|s| {
-                    s.settings.mixed_port = 0;
+                    s.settings.font_size = 0;
                     Ok(())
                 })
                 .is_err()

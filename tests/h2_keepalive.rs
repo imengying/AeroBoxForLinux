@@ -309,7 +309,7 @@ fn grpc_and_http2_ping_health_checks_preserve_live_streams_and_close_blackholes(
             let app = support::App::new();
             app.import("keepalive", vec![node]);
             app.service.start().unwrap();
-            let inbound = app.service.snapshot().settings.mixed_port;
+            let inbound = app.service.local_proxy_port();
             (Some(app), None, inbound)
         } else {
             node["tls"] = json!({"enabled":true, "server_name":"localhost", "certificate":certified.cert.pem(), "alpn":["h2"]});

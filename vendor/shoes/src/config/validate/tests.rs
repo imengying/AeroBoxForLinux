@@ -521,12 +521,12 @@ fn ffi_group_support_preserves_selectors_and_controller_error_precedence() {
             .validate_ffi_support()
     };
     validate(json!([{
-        "client_group": "manual", "type": "selector", "client_proxies": ["direct"]
+        "client_group": "manual", "type": "selector", "client_chains": ["direct"]
     }]))
     .unwrap();
     let automatic = json!({
         "client_group": "auto", "type": "url-test",
-        "url": "http://192.0.2.2/", "client_proxies": ["direct"]
+        "url": "http://192.0.2.2/", "client_chains": ["direct"]
     });
     let error = validate(json!([automatic.clone()])).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);

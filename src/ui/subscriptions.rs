@@ -922,6 +922,16 @@ pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
         "节点配置不可编辑"
     );
     anyhow::ensure!(
+        !descendants(&editor).iter().any(|widget| widget
+            .downcast_ref::<gtk::Button>()
+            .and_then(gtk::Button::label)
+            .is_some_and(|label| matches!(
+                label.as_str(),
+                "复制" | "导出文件" | "打开文件" | "格式化"
+            ))),
+        "节点编辑仍显示快捷工具栏"
+    );
+    anyhow::ensure!(
         ui.service.snapshot().settings.active_subscription == active,
         "编辑节点改变了订阅选择"
     );

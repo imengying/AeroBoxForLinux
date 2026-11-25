@@ -11,7 +11,6 @@ pub type ExplicitSelections = BTreeMap<String, String>;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
-    version: u32,
     selected: ExplicitSelections,
 }
 
@@ -110,7 +109,6 @@ pub fn encoded(selections: &ExplicitSelections) -> io::Result<Vec<u8>> {
         return Err(invalid("invalid selector identity in selection cache"));
     }
     let bytes = serde_json::to_vec(&Snapshot {
-        version: 1,
         selected: selections.clone(),
     })
     .map_err(io::Error::other)?;
@@ -166,9 +164,6 @@ impl SelectionStore {
                 }
                 let snapshot: Snapshot = serde_json::from_slice(&bytes)
                     .map_err(|_| invalid("invalid selection cache JSON"))?;
-                if snapshot.version != 1 {
-                    return Err(invalid("unsupported selection cache version"));
-                }
                 encoded(&snapshot.selected)?;
                 snapshot.selected
             }
@@ -317,7 +312,7 @@ mod tests {
 
     #[test]
     fn invalid_cache_is_not_overwritten() {
-        for bytes in [b"not-json".as_slice(), br#"{"version":2,"selected":{}}"#] {
+        for bytes in [b"not-json".as_slice(), br#"{"selected":null}"#] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("cache.db");
             let mut file = private_options()

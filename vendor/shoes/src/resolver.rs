@@ -210,9 +210,8 @@ pub struct RefreshPolicy {
     pub max_idle: Duration,
 }
 
-/// Resolver wrapper that rebuilds its inner resolver on idle timeout or
-/// connection-related errors. Targets stale pooled connection state in
-/// hickory-backed resolvers.
+/// Builds on the first query, then rebuilds on idle timeout or transport errors.
+/// A failed bootstrap leaves the resolver uninitialized so a later query can retry.
 #[derive(Clone)]
 pub struct RefreshingResolver {
     factory: ResolverFactory,
@@ -220,10 +219,11 @@ pub struct RefreshingResolver {
     refresh_state: Arc<Mutex<RefreshState>>,
     policy: RefreshPolicy,
     description: String,
+    request_timeout: Option<Duration>,
 }
 
 struct RefreshState {
-    current: Arc<dyn Resolver>,
+    current: Option<Arc<dyn Resolver>>,
     invalidated: bool,
     last_activity_at: Option<Instant>,
     generation: u64,
@@ -241,17 +241,17 @@ impl Debug for RefreshingResolver {
 }
 
 impl RefreshingResolver {
-    pub async fn new(
+    pub fn new(
         factory: ResolverFactory,
         policy: RefreshPolicy,
         description: String,
-    ) -> std::io::Result<Self> {
-        let inner = factory().await?;
-        Ok(Self {
+        request_timeout: Option<Duration>,
+    ) -> Self {
+        Self {
             factory,
             refresh_lock: Arc::new(AsyncMutex::new(())),
             refresh_state: Arc::new(Mutex::new(RefreshState {
-                current: inner,
+                current: None,
                 invalidated: false,
                 last_activity_at: None,
                 generation: 0,
@@ -260,7 +260,8 @@ impl RefreshingResolver {
             })),
             policy,
             description,
-        })
+            request_timeout,
+        }
     }
 
     pub(crate) fn should_refresh_for_error(err: &std::io::Error) -> bool {
@@ -291,17 +292,22 @@ impl RefreshingResolver {
         let resolver = self.clone();
 
         Box::pin(async move {
+            let started = tokio::time::Instant::now();
             let configured_deadline = resolver
-                .refresh_state
-                .lock()
-                .current
                 .request_timeout()
-                .and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+                .and_then(|timeout| started.checked_add(timeout));
             let deadline = match (deadline, configured_deadline) {
                 (Some(caller), Some(configured)) => Some(caller.min(configured)),
                 (caller, configured) => caller.or(configured),
             };
             let current = resolver.current(deadline).await?;
+            let deadline = match current
+                .request_timeout()
+                .and_then(|t| started.checked_add(t))
+            {
+                Some(configured) => Some(deadline.map_or(configured, |d| d.min(configured))),
+                None => deadline,
+            };
             let result = operation(current.clone(), deadline).await;
             match &result {
                 Ok(_) => resolver.record_success(&current),
@@ -320,7 +326,12 @@ impl RefreshingResolver {
     fn invalidate(&self, current: &Arc<dyn Resolver>, error: &std::io::Error) {
         let (generation, report) = {
             let mut state = self.refresh_state.lock();
-            if state.invalidated || !Arc::ptr_eq(&state.current, current) {
+            if state.invalidated
+                || !state
+                    .current
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, current))
+            {
                 return;
             }
             state.invalidated = true;
@@ -344,7 +355,12 @@ impl RefreshingResolver {
 
     fn record_success(&self, current: &Arc<dyn Resolver>) {
         let mut state = self.refresh_state.lock();
-        if !state.invalidated && Arc::ptr_eq(&state.current, current) {
+        if !state.invalidated
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, current))
+        {
             state.last_activity_at = Some(Instant::now());
             if state.recovering {
                 log::info!(
@@ -362,7 +378,8 @@ impl RefreshingResolver {
         deadline: Option<tokio::time::Instant>,
     ) -> std::io::Result<Arc<dyn Resolver>> {
         let needs_refresh = |state: &RefreshState| {
-            state.invalidated
+            state.current.is_none()
+                || state.invalidated
                 || state
                     .last_activity_at
                     .is_some_and(|last| last.elapsed() > self.policy.max_idle)
@@ -370,34 +387,34 @@ impl RefreshingResolver {
         {
             let state = self.refresh_state.lock();
             if !needs_refresh(&state) {
-                return Ok(state.current.clone());
+                return Ok(state.current.as_ref().unwrap().clone());
             }
         }
         let _guard = Self::refresh_wait(deadline, self.refresh_lock.lock()).await?;
         {
             let state = self.refresh_state.lock();
             if !needs_refresh(&state) {
-                return Ok(state.current.clone());
+                return Ok(state.current.as_ref().unwrap().clone());
             }
         }
         let fresh = match Self::refresh_wait(deadline, (self.factory)()).await? {
             Ok(fresh) => fresh,
             Err(error) => {
                 let state = self.refresh_state.lock();
-                if state.invalidated {
+                if state.invalidated || state.current.is_none() {
                     return Err(error);
                 }
                 log::debug!(
                     "DNS resolver {}: idle refresh failed: {error}",
                     self.description
                 );
-                return Ok(state.current.clone());
+                return Ok(state.current.as_ref().unwrap().clone());
             }
         };
         let old = {
             let mut state = self.refresh_state.lock();
-            let old = std::mem::replace(&mut state.current, fresh.clone());
-            state.last_activity_at = if state.invalidated {
+            let old = state.current.replace(fresh.clone());
+            state.last_activity_at = if state.invalidated || old.is_none() {
                 None
             } else {
                 Some(Instant::now())
@@ -434,6 +451,16 @@ impl RefreshingResolver {
 }
 
 impl Resolver for RefreshingResolver {
+    fn request_timeout(&self) -> Option<Duration> {
+        self.request_timeout.or_else(|| {
+            self.refresh_state
+                .lock()
+                .current
+                .as_ref()
+                .and_then(|r| r.request_timeout())
+        })
+    }
+
     fn resolve_location(&self, location: &NetLocation) -> ResolveFuture {
         if let Some(socket_addr) = location.to_socket_addr_nonblocking() {
             return Box::pin(async move { Ok(vec![socket_addr]) });

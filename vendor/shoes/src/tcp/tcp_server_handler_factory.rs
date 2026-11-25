@@ -32,7 +32,7 @@ use crate::tls_server_handler::{
     InnerProtocol, TlsServerHandler, TlsServerTarget, VisionVlessConfig,
 };
 use crate::trojan_handler::TrojanTcpHandler;
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::parse_user_id;
 use crate::vless::vless_server_handler::VlessTcpServerHandler;
 use crate::vmess::VmessTcpServerHandler;
 use crate::websocket::{WebsocketServerTarget, WebsocketTcpServerHandler};
@@ -447,7 +447,7 @@ fn create_vision_vless_config(
     };
 
     Ok(VisionVlessConfig {
-        user_id: parse_uuid(user_id)?.into_boxed_slice(),
+        user_id: parse_user_id(user_id)?.into_boxed_slice(),
         udp_enabled: *udp_enabled,
         fallback: fallback.clone(),
     })

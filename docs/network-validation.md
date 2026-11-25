@@ -12,15 +12,38 @@ connection peer=127.0.0.1:12345 kind=UnexpectedEof: target=example.test:443 rout
 
 - `outbound_setup`：出站连接尚未完成。
 - `dns`：包含查询名、记录类型、DNS 配置名与耗时；`dns_exchange` 进一步标明上游传输、IP 和端口。
+- `dns_bootstrap`：解析 DNS 上游自身的域名失败，保留原始错误类型和超时标记。
 - `connect`、`tls_handshake`、`reality_handshake`：连接或握手失败及耗时。
 - `relay_upload`、`relay_download`：从本地入口看上传或下载方向失败。
 - `vless_response`：VLESS 响应头收到的字节数和需要的字节数。
 
 诊断包装保留原始错误链和错误类别，DNS 建连保留、请求期限与资源上限判断仍使用原始标记。日志不添加节点密码、UUID、私钥或订阅地址；目标域名和上游地址属于排障信息，分享前可自行脱敏。
 
-本地 DNS 规则主动生成的拒绝以 DEBUG 记录；上游返回的 NXDOMAIN、SERVFAIL、超时与 TLS 非正常截断仍保留错误。不能仅凭 NXDOMAIN 判断发生了广告拦截，也不能将缺少 `close_notify` 的截断统一视为正常 EOF。
+默认日志级别为 ERROR，可以在设置中实时调整。连接结束按错误类型和阶段分级，系统代理入口和 TUN TCP 使用同一规则：
+
+| 情况 | 级别 |
+| --- | --- |
+| 主动取消连接、规则拦截、DNS NXDOMAIN / 无地址回答 | DEBUG |
+| 已进入转发阶段的连接重置、断管、对端断开 | DEBUG |
+| DNS SERVFAIL、请求超时、连接拒绝或网络不可达 | WARN |
+| 用户态 TLS 已建立后缺少 `close_notify` 的截断 | WARN |
+| 证书 / 认证失败、损坏的协议数据、VLESS 响应头不完整、其他未分类故障 | ERROR |
+
+参考 [sing-box 的连接关闭分级](https://github.com/SagerNet/sing-box/blob/testing/route/conn.go)及 [Mihomo 的连接诊断](https://github.com/MetaCubeX/mihomo/blob/Meta/tunnel/tunnel.go)，避免把取消或普通连接结束全记为 ERROR。判断使用错误类型与上下文，不匹配日志字符串；握手阶段的重置仍保留为 ERROR。NXDOMAIN 是否来自广告拦截无法仅凭响应码判断。
+
+降低日志级别不改变失败结果、超时或重试语义。TLS 异常关闭前已经读取的有效载荷先转发、刷新，再返回原始错误；缺少关闭通知不会被转换成成功 EOF，VLESS 头截断仍为 ERROR。主动取消立即终止转发。双栈 DNS 查询都未得到地址时，保留较严重的失败，避免另一个地址族的空回答掩盖超时或 SERVFAIL。
+
+`tests/diagnostics.rs` 使用真实本地 DNS/TLS/代理连接检查分级、设置即时生效和响应数据；组件测试另外检查错误链及反压下的转发。排查具体节点时可临时使用 WARN 或 DEBUG；ERROR 默认不显示上表中的警告和调试事件。
 
 首页出口检测同时查询 IPv4 和已启用的 IPv6，每种地址族依次尝试自己的服务，成功后立即更新界面。IPv6 较慢或失败不会阻止 IPv4 显示。单次请求及连接最长 12 秒，总预算 30 秒。启动连接后检测使用当前代理入口，失败不会绕过代理直连。回归测试使用本地 CONNECT + TLS 服务模拟超过 5 秒的首次建连，以及 IPv6 等待时 IPv4 先行显示，不需要真实订阅或公共检测接口。
+
+## 网络不可用时启动
+
+参考 [Mihomo 的 DoH 客户端](https://github.com/MetaCubeX/mihomo/blob/Meta/dns/doh.go)，配置准备与联网查询分离。启动时校验 DNS 地址、依赖关系和出站配置，首次查询再解析上游域名并建立连接；没有网络不会仅因远程 DNS 域名暂时无法解析而阻止本地服务启动。
+
+首次解析与连接重建共用请求时限和串行初始化锁。超时或取消释放初始化锁，之后的请求可重试；成功后复用连接。不同域名的上游独立初始化，某个域名解析失败时仍可尝试其他已配置的上游。不会绕过所选代理或额外改用未配置的公共 DNS。移除了附加到所有 DNS 准备错误上的 QUIC 内存上限提示，资源耗尽仍通过原始错误报告。
+
+`tests/routing_dns.rs` 验证不可用 DNS 下启动、恢复后不重启即可通过所选节点访问，以及 HTTP / SOCKS 入口的一致性。组件测试覆盖首次初始化的时限、并发等待与取消、多个上游、无效配置和 QUIC 资源约束。首次使用且尚无缓存的远程规则仍需成功下载后才能启用，避免缺少规则时悄悄改变分流。
 
 ## 任务归属检查
 

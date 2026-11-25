@@ -1,6 +1,3 @@
-#[path = "acme_unavailable.rs"]
-mod acme;
-mod challenge;
 mod quic;
 mod runtime;
 #[cfg(test)]
@@ -16,7 +13,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, PemSource, ServerProxyConfig, Transport};
+use crate::config::{Config, PemSource, ServerProxyConfig};
 
 pub(crate) use quic::quic_config;
 #[allow(unused_imports)]
@@ -35,7 +32,6 @@ pub struct NamedSource {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourceConfig {
     Files { cert: PathBuf, key: PathBuf },
-    Acme(AcmeConfig),
 }
 
 impl NamedSource {
@@ -55,36 +51,9 @@ impl NamedSource {
                 validate("cert", cert)?;
                 validate("key", key)?;
             }
-            SourceConfig::Acme(config) => {
-                if let Some(path) = &config.ca_cert {
-                    validate("ca_cert", path)?;
-                }
-            }
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AcmeConfig {
-    pub domains: Vec<String>,
-    pub directory_url: String,
-    pub state_dir: PathBuf,
-    /// Exact CA terms URL accepted by the operator, not blanket future acceptance.
-    pub terms_of_service: Option<String>,
-    #[serde(default)]
-    pub contacts: Vec<String>,
-    pub challenge: ChallengeConfig,
-    #[serde(default)]
-    pub ca_cert: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ChallengeConfig {
-    Http01 { listen: Vec<std::net::SocketAddr> },
-    TlsAlpn01,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -115,17 +84,15 @@ impl Input {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-enum Spec {
-    Files { cert: Input, key: Input },
-    Acme(AcmeConfig),
+struct Spec {
+    cert: Input,
+    key: Input,
 }
 
 pub struct Source {
     name: String,
     spec: Spec,
-    trust_digest: Option<Vec<u8>>,
     material: RwLock<Option<Material>>,
-    challenges: RwLock<Vec<challenge::Pending>>,
 }
 
 impl std::fmt::Debug for Source {
@@ -165,7 +132,7 @@ fn read_text(path: &Path) -> io::Result<String> {
 }
 
 impl Material {
-    fn parse(cert: &str, key: &str, domains: &[String]) -> io::Result<Self> {
+    fn parse(cert: &str, key: &str) -> io::Result<Self> {
         let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| invalid("invalid certificate PEM"))?;
@@ -211,33 +178,20 @@ impl Material {
                 return Err(invalid("invalid certificate chain signature or order"));
             }
         }
-        if !domains.is_empty() {
-            let san = parsed_certs[0]
-                .subject_alternative_name()
-                .map_err(|_| invalid("invalid certificate SAN"))?
-                .ok_or_else(|| invalid("certificate has no SAN"))?;
-            for domain in domains {
-                if !san.value.general_names.iter().any(|name| matches!(name,
-                    x509_parser::extensions::GeneralName::DNSName(name) if name.eq_ignore_ascii_case(domain))) {
-                    return Err(invalid("certificate does not cover every configured ACME domain"));
-                }
-            }
-        }
         if now() < not_before || now() >= not_after {
             return Err(invalid("certificate is not currently valid"));
         }
         let private_key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key.as_bytes())
             .map_err(|_| invalid("invalid private key PEM"))?;
-        let key = CertifiedKey::from_der(
-            certs,
-            private_key,
-            &aerobox_crypto::provider(),
-        )
-        .map_err(|_| invalid("invalid or mismatched certificate/private key"))?;
+        let key = CertifiedKey::from_der(certs, private_key, &aerobox_crypto::provider())
+            .map_err(|_| invalid("invalid or mismatched certificate/private key"))?;
         // Hash the public chain only; a matching private key cannot change independently.
-        let digest = aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, cert.as_bytes())
-            .as_ref()
-            .to_vec();
+        let digest = aerobox_primitives::digest::digest(
+            &aerobox_primitives::digest::SHA256,
+            cert.as_bytes(),
+        )
+        .as_ref()
+        .to_vec();
         Ok(Self {
             key: Arc::new(key),
             not_before,
@@ -268,53 +222,23 @@ fn algorithm_matches(
 
 impl Source {
     fn new(name: String, spec: Spec) -> io::Result<Arc<Self>> {
-        let trust_digest = match &spec {
-            Spec::Acme(config) => config
-                .ca_cert
-                .as_ref()
-                .map(|path| {
-                    read_text(path)
-                        .map_err(|error| {
-                            io::Error::new(
-                                error.kind(),
-                                format!(
-                                    "certificate source {name}, ACME ca_cert '{}': {error}",
-                                    path.display()
-                                ),
-                            )
-                        })
-                        .map(|pem| {
-                            aerobox_primitives::digest::digest(&aerobox_primitives::digest::SHA256, pem.as_bytes())
-                                .as_ref()
-                                .to_vec()
-                        })
-                })
-                .transpose()?,
-            Spec::Files { .. } => None,
-        };
         let source = Arc::new(Self {
             name,
             spec,
-            trust_digest,
             material: RwLock::new(None),
-            challenges: RwLock::new(Vec::new()),
         });
-        if matches!(source.spec, Spec::Files { .. }) {
-            source.refresh_files().map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("certificate source {}: {error}", source.name),
-                )
-            })?;
-        }
+        source.refresh_files().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("certificate source {}: {error}", source.name),
+            )
+        })?;
         Ok(source)
     }
 
     fn refresh_files(&self) -> io::Result<bool> {
-        let Spec::Files { cert, key, .. } = &self.spec else {
-            return Ok(false);
-        };
-        let material = Material::parse(&cert.read("certificate")?, &key.read("private key")?, &[])
+        let Spec { cert, key } = &self.spec;
+        let material = Material::parse(&cert.read("certificate")?, &key.read("private key")?)
             .map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -360,19 +284,6 @@ impl Source {
             inner: base.session_storage.clone(),
         });
         Arc::new(config)
-    }
-
-    pub(crate) fn challenge_config(&self, sni: Option<&str>) -> Option<Arc<rustls::ServerConfig>> {
-        let sni = sni?;
-        self.challenges.read().iter().find_map(|pending| {
-            if pending.domain.eq_ignore_ascii_case(sni)
-                && pending.expires > std::time::Instant::now()
-            {
-                pending.tls.clone()
-            } else {
-                None
-            }
-        })
     }
 }
 
@@ -422,63 +333,6 @@ impl rustls::server::StoresServerSessions for SessionCache {
     fn can_cache(&self) -> bool {
         self.key(&[]).is_some() && self.inner.can_cache()
     }
-}
-
-fn validate_acme(config: &AcmeConfig) -> io::Result<()> {
-    acme::validate_url(&config.directory_url)?;
-    if config.state_dir.as_os_str().is_empty()
-        || config
-            .terms_of_service
-            .as_ref()
-            .is_some_and(String::is_empty)
-    {
-        return Err(invalid(
-            "ACME requires state_dir; terms_of_service must not be empty when specified",
-        ));
-    }
-    if config.domains.is_empty() || config.domains.len() > 100 {
-        return Err(invalid("ACME requires 1 to 100 explicit domains"));
-    }
-    let mut domains = HashSet::new();
-    for domain in &config.domains {
-        if domain.len() > 253
-            || !domain.contains('.')
-            || domain.parse::<std::net::IpAddr>().is_ok()
-            || domain.split('.').any(|label| {
-                label.is_empty()
-                    || label.len() > 63
-                    || label.starts_with('-')
-                    || label.ends_with('-')
-                    || !label
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            })
-            || !domains.insert(domain)
-        {
-            return Err(invalid(
-                "ACME domains must be unique lowercase ASCII DNS names; wildcards and IPs are not supported",
-            ));
-        }
-    }
-    if config
-        .contacts
-        .iter()
-        .any(|contact| !contact.starts_with("mailto:") || contact.contains(['\r', '\n']))
-    {
-        return Err(invalid("ACME contacts must be mailto: URLs"));
-    }
-    if let ChallengeConfig::Http01 { listen } = &config.challenge
-        && (listen.is_empty() || listen.len() > 16 || listen.iter().any(|addr| addr.port() == 0))
-    {
-        return Err(invalid(
-            "HTTP-01 requires explicit listen addresses with nonzero ports",
-        ));
-    }
-    if let Some(path) = &config.ca_cert {
-        acme::client_tls(Some(path))?;
-    }
-    acme::validate_state(config)?;
-    Ok(())
 }
 
 type Visitor<'a> = dyn FnMut(&mut Option<Arc<Source>>, Option<&str>, &str, &str, Option<&str>) -> io::Result<()>
@@ -622,8 +476,7 @@ fn visit_resolved(
     Ok(())
 }
 
-/// Attach resolvers before legacy PEM expansion erases file identity. Also called by
-/// synchronous validation, so inline-only and managed configurations need no async setup.
+/// Attach certificate sources before PEM expansion erases file identity.
 pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> {
     let mut sources: HashMap<String, Arc<Source>> = HashMap::new();
     visit(configs, &mut |binding, _, _, _, _| {
@@ -634,8 +487,6 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
     })?;
     let mut names = HashSet::new();
     let mut pems = HashMap::new();
-    let mut http_addresses = Vec::new();
-    let mut state_dirs = HashSet::new();
     for config in configs.iter() {
         match config {
             Config::NamedPem(pem) => {
@@ -662,25 +513,10 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
                         if cert.as_os_str().is_empty() || key.as_os_str().is_empty() {
                             return Err(invalid("file source requires cert/key paths"));
                         }
-                        Spec::Files {
+                        Spec {
                             cert: Input::File(cert.clone()),
                             key: Input::File(key.clone()),
                         }
-                    }
-                    SourceConfig::Acme(acme) => {
-                        validate_acme(acme).map_err(|error| {
-                            io::Error::new(
-                                error.kind(),
-                                format!("certificate source {name}: {error}"),
-                            )
-                        })?;
-                        if !state_dirs.insert(acme.state_dir.clone()) {
-                            return Err(invalid("ACME sources must have distinct state_dir paths"));
-                        }
-                        if let ChallengeConfig::Http01 { listen } = &acme.challenge {
-                            http_addresses.extend(listen);
-                        }
-                        Spec::Acme(acme.clone())
                     }
                 };
                 if !sources.contains_key(name) {
@@ -688,26 +524,6 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
                 }
             }
             _ => {}
-        }
-    }
-    for (i, address) in http_addresses.iter().enumerate() {
-        if http_addresses[..i]
-            .iter()
-            .any(|other| addresses_overlap(address, other))
-        {
-            return Err(invalid("HTTP-01 listen addresses overlap"));
-        }
-        for config in configs.iter() {
-            if let Config::Server(server) = config
-                && server.transport == Transport::Tcp
-                && let crate::config::BindLocation::Address(addresses) = &server.bind_location
-            {
-                for bound in addresses.iter() {
-                    if bound.may_overlap_socket(*address) {
-                        return Err(invalid("HTTP-01 address conflicts with a TCP listener"));
-                    }
-                }
-            }
         }
     }
     let resolve = |value: &str| -> Input {
@@ -718,7 +534,7 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
             None => Input::Inline(value.into()),
         }
     };
-    visit(configs, &mut |binding, name, cert, key, sni| {
+    visit(configs, &mut |binding, name, cert, key, _| {
         if let Some(name) = name {
             if !cert.is_empty() || !key.is_empty() {
                 return Err(invalid(
@@ -742,7 +558,7 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
             let cert = resolve(cert);
             let key = resolve(key);
             if matches!(cert, Input::File(_)) || matches!(key, Input::File(_)) {
-                let spec = Spec::Files { cert, key };
+                let spec = Spec { cert, key };
                 let source = sources.values().find(|source| source.spec == spec).cloned();
                 let source = match source {
                     Some(source) => source,
@@ -756,64 +572,7 @@ pub(crate) fn configure(configs: &mut [Config]) -> io::Result<Vec<Arc<Source>>> 
                 *binding = Some(source);
             }
         }
-        if let Some(source) = binding
-            && let Spec::Acme(acme) = &source.spec
-            && let Some(sni) = sni
-            && !acme.domains.iter().any(|domain| domain == sni)
-        {
-            return Err(invalid(
-                "TLS target SNI is not in certificate_source ACME domains",
-            ));
-        }
         Ok(())
     })?;
-    for source in sources.values() {
-        if let Spec::Acme(acme) = &source.spec
-            && acme.challenge == ChallengeConfig::TlsAlpn01
-            && !acme.domains.iter().all(|domain| {
-                configs.iter().any(|config| {
-                    let Config::Server(server) = config else {
-                        return false;
-                    };
-                    if server.transport != Transport::Tcp
-                        || !matches!(
-                            server.bind_location,
-                            crate::config::BindLocation::Address(_)
-                        )
-                    {
-                        return false;
-                    }
-                    let ServerProxyConfig::Tls {
-                        tls_targets,
-                        default_tls_target,
-                        shadowtls_targets,
-                        reality_targets,
-                        ..
-                    } = &server.protocol
-                    else {
-                        return false;
-                    };
-                    if shadowtls_targets.contains_key(domain)
-                        || reality_targets.contains_key(domain)
-                    {
-                        return false;
-                    }
-                    tls_targets
-                        .get(domain)
-                        .or(default_tls_target.as_deref())
-                        .and_then(|target| target.certificate_binding.as_ref())
-                        .is_some_and(|binding| binding.name == source.name)
-                })
-            })
-        {
-            return Err(invalid(
-                "TLS-ALPN-01 requires an outer TCP TLS target covering every ACME domain",
-            ));
-        }
-    }
     Ok(sources.into_values().collect())
-}
-
-fn addresses_overlap(a: &std::net::SocketAddr, b: &std::net::SocketAddr) -> bool {
-    a.port() == b.port() && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified())
 }

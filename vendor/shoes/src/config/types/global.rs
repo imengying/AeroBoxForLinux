@@ -159,13 +159,7 @@ mod tests {
 
     #[test]
     fn omitted_and_empty_limits_are_unlimited() {
-        for yaml in [
-            "[]",
-            "- global_settings:",
-            "- global_settings: {}",
-            "- global_limits:",
-            "- global_limits: {}",
-        ] {
+        for yaml in ["[]", "- global_settings:", "- global_settings: {}"] {
             let configs = serde_yaml::from_str(yaml).unwrap();
             let result = create_server_configs(configs).unwrap();
             assert!(result.configs.is_empty());
@@ -211,10 +205,7 @@ mod tests {
     fn duplicate_entries_are_rejected_even_when_empty() {
         for yaml in [
             "- global_settings:\n- global_settings:",
-            "- global_settings: {}\n- global_limits: {max_connections: 2}",
-            "- global_limits:\n- global_settings:",
-            "- global_limits:\n- global_limits:",
-            "- global_limits: {}\n- global_limits: {max_connections: 2}",
+            "- global_settings: {}\n- global_settings: {max_connections: 2}",
         ] {
             let error = create_server_configs(serde_yaml::from_str(yaml).unwrap())
                 .err()
@@ -222,7 +213,7 @@ mod tests {
             assert!(error.to_string().contains("only be specified once"));
         }
         let mut configs: Vec<Config> = serde_yaml::from_str("- global_settings: {}").unwrap();
-        configs.extend(serde_yaml::from_str::<Vec<Config>>("- global_limits: {}").unwrap());
+        configs.extend(serde_yaml::from_str::<Vec<Config>>("- global_settings: {}").unwrap());
         assert!(create_server_configs(configs).is_err());
     }
 
@@ -239,78 +230,60 @@ mod tests {
             "quic_socket_buffer: 16777217",
             "reload_grace_secs: 86401",
         ] {
-            for name in ["global_settings", "global_limits"] {
-                let configs = serde_yaml::from_str(&format!("- {name}: {{{fields}}}")).unwrap();
-                assert!(create_server_configs(configs).is_err(), "accepted {fields}");
-            }
+            let configs =
+                serde_yaml::from_str(&format!("- global_settings: {{{fields}}}")).unwrap();
+            assert!(create_server_configs(configs).is_err(), "accepted {fields}");
         }
-        for name in ["global_settings", "global_limits"] {
-            for fields in [
-                "{unknown: 2}",
-                "{rule_cache_dir: ./cache, unknown: 2}",
-                "{limits: {max_connections: 2}}",
-                "{rule_cache_dir: []}",
-                "{}\n  address: '0.0.0.0:1080'",
-                "false",
-                "[]",
-                "{}\n  global_settings: null",
-                "{}\n  global_limits: null",
-                "null\n  global_settings: {}",
-                "null\n  global_limits: {}",
-            ] {
-                let yaml = format!("- {name}: {fields}");
-                assert!(
-                    serde_yaml::from_str::<Vec<Config>>(&yaml).is_err(),
-                    "{yaml}"
-                );
-            }
+        for fields in [
+            "{unknown: 2}",
+            "{rule_cache_dir: ./cache, unknown: 2}",
+            "{limits: {max_connections: 2}}",
+            "{rule_cache_dir: []}",
+            "{}\n  address: '0.0.0.0:1080'",
+            "false",
+            "[]",
+            "{}\n  global_settings: null",
+            "null\n  global_settings: {}",
+        ] {
+            let yaml = format!("- global_settings: {fields}");
+            assert!(
+                serde_yaml::from_str::<Vec<Config>>(&yaml).is_err(),
+                "{yaml}"
+            );
         }
     }
 
     #[test]
-    fn alias_round_trips_as_flat_global_settings() {
-        for name in ["global_settings", "global_limits"] {
-            for cache in ["null", "./cache"] {
-                let yaml = format!(
-                    "- {name}: {{max_connections: 42, reload_grace_secs: 7, rule_cache_dir: {cache}, default_dns: {{servers: system, fake_ip: false}}}}"
-                );
-                let configs: Vec<Config> = serde_yaml::from_str(&yaml).unwrap();
-                let Config::GlobalSettings(settings) = &configs[0] else {
-                    panic!("expected global settings");
-                };
-                assert_eq!(settings.limits.max_connections, Some(42));
-                assert_eq!(settings.limits.reload_grace_secs, 7);
-                assert_eq!(settings.limits.quic_socket_buffer, 8 << 20);
-                assert_eq!(
-                    settings.rule_cache_dir,
-                    (cache != "null").then(|| cache.into())
-                );
-                let json = serde_json::to_value(&configs).unwrap();
-                assert!(json[0].get("global_limits").is_none());
-                assert!(json[0]["global_settings"].get("limits").is_none());
-                assert_eq!(json[0]["global_settings"]["max_connections"], 42);
-                assert_eq!(
-                    json[0]["global_settings"]["default_dns"]["servers"],
-                    "system"
-                );
-                assert_eq!(json[0]["global_settings"]["default_dns"]["fake_ip"], false);
-                let decoded: Vec<Config> = serde_json::from_value(json.clone()).unwrap();
-                assert_eq!(serde_json::to_value(decoded).unwrap(), json);
-                let serialized = serde_yaml::to_string(&configs).unwrap();
-                let decoded: Vec<Config> = serde_yaml::from_str(&serialized).unwrap();
-                assert_eq!(serde_json::to_value(decoded).unwrap(), json);
-            }
+    fn global_settings_round_trip() {
+        for cache in ["null", "./cache"] {
+            let yaml = format!(
+                "- global_settings: {{max_connections: 42, reload_grace_secs: 7, rule_cache_dir: {cache}, default_dns: {{servers: system, fake_ip: false}}}}"
+            );
+            let configs: Vec<Config> = serde_yaml::from_str(&yaml).unwrap();
+            let Config::GlobalSettings(settings) = &configs[0] else {
+                panic!("expected global settings");
+            };
+            assert_eq!(settings.limits.max_connections, Some(42));
+            assert_eq!(settings.limits.reload_grace_secs, 7);
+            assert_eq!(settings.limits.quic_socket_buffer, 8 << 20);
+            assert_eq!(
+                settings.rule_cache_dir,
+                (cache != "null").then(|| cache.into())
+            );
+            let json = serde_json::to_value(&configs).unwrap();
+            assert!(json[0]["global_settings"].get("limits").is_none());
+            assert_eq!(json[0]["global_settings"]["max_connections"], 42);
+            assert_eq!(
+                json[0]["global_settings"]["default_dns"]["servers"],
+                "system"
+            );
+            assert_eq!(json[0]["global_settings"]["default_dns"]["fake_ip"], false);
+            let decoded: Vec<Config> = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+            let serialized = serde_yaml::to_string(&configs).unwrap();
+            let decoded: Vec<Config> = serde_yaml::from_str(&serialized).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
         }
-    }
-
-    #[test]
-    fn standalone_cache_directory_has_migration_error() {
-        let error = serde_yaml::from_str::<Vec<Config>>("- rule_cache_dir: ./cache").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("rule_cache_dir must be inside global_settings")
-        );
     }
 
     #[cfg(unix)]
@@ -319,33 +292,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("config.yaml");
         let cache = dir.path().join("cache");
-        for name in ["global_settings", "global_limits"] {
-            std::fs::write(
-                &file,
-                format!("- {name}: {{max_connections: 42, rule_cache_dir: ./cache}}"),
-            )
-            .unwrap();
-            let configs = crate::config::load_configs(&[file.to_str().unwrap().into()])
-                .await
-                .unwrap();
-            let validated = create_server_configs(configs).unwrap();
-            assert_eq!(validated.rule_cache_dir.as_ref(), Some(&cache));
-            assert_eq!(validated.global_limits.max_connections, Some(42));
-            assert!(!cache.exists());
-
-            let other = dir.path().join("other.yaml");
-            std::fs::write(&other, "- global_settings: {}").unwrap();
-            let error = crate::config::load_configs(&[
-                file.to_str().unwrap().into(),
-                other.to_str().unwrap().into(),
-            ])
+        std::fs::write(
+            &file,
+            format!("- global_settings: {{max_connections: 42, rule_cache_dir: ./cache}}"),
+        )
+        .unwrap();
+        let configs = crate::config::load_configs(&[file.to_str().unwrap().into()])
             .await
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("only be specified once"),
-                "{error}"
-            );
-            assert!(!cache.exists());
-        }
+            .unwrap();
+        let validated = create_server_configs(configs).unwrap();
+        assert_eq!(validated.rule_cache_dir.as_ref(), Some(&cache));
+        assert_eq!(validated.global_limits.max_connections, Some(42));
+        assert!(!cache.exists());
+
+        let other = dir.path().join("other.yaml");
+        std::fs::write(&other, "- global_settings: {}").unwrap();
+        let error = crate::config::load_configs(&[
+            file.to_str().unwrap().into(),
+            other.to_str().unwrap().into(),
+        ])
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("only be specified once"),
+            "{error}"
+        );
+        assert!(!cache.exists());
     }
 }

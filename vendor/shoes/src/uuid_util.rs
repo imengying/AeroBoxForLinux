@@ -2,9 +2,31 @@ use std::fmt::Write;
 
 use aerobox_primitives::rand::{SecureRandom, SystemRandom};
 
+/// VMess and VLESS map non-UUID user IDs to UUID v5 in the nil namespace.
+/// Hash the exact UTF-8 bytes, including case and whitespace.
+pub fn parse_user_id(user_id: &str) -> std::io::Result<Vec<u8>> {
+    use aerobox_primitives::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
+
+    if user_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "VMess/VLESS UUID or user name must not be empty",
+        ));
+    }
+    if let Ok(id) = uuid::Uuid::parse_str(user_id) {
+        return Ok(id.as_bytes().to_vec());
+    }
+    let mut hash = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
+    hash.update(&[0; 16]);
+    hash.update(user_id.as_bytes());
+    let mut id = hash.finish().as_ref()[..16].to_vec();
+    id[6] = (id[6] & 0x0f) | 0x50;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    Ok(id)
+}
+
 /// Parse a protocol's 128-bit identity in compact or canonical UUID notation.
-/// VMess/VLESS identifiers need not have v4 or RFC variant bits. Reject syntax
-/// errors without including the credential in diagnostics.
+/// Reject syntax errors without including the credential in diagnostics.
 #[inline]
 pub fn parse_uuid(uuid_str: &str) -> std::io::Result<Vec<u8>> {
     let invalid = || {

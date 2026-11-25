@@ -22,14 +22,13 @@ fn service() -> (tempfile::TempDir, Arc<Service>) {
     store
         .update(|state| {
             state.settings.system_proxy = false;
-            state.settings.mixed_port = support::free_port();
             state.settings.bypass_lan = false;
             state.settings.sniff = false;
             state.rulesets.clear();
             Ok(())
         })
         .unwrap();
-    (dir, Service::new(store))
+    (dir, support::service(store))
 }
 
 #[test]
@@ -525,7 +524,7 @@ fn isolated_autostart_form_failure_helper() {
     let Ok(directory) = std::env::var("AEROBOX_TEST_AUTOSTART_DIRECTORY") else {
         return;
     };
-    let service = Service::new(Store::open(Some(directory.clone().into())).unwrap());
+    let service = support::service(Store::open(Some(directory.clone().into())).unwrap());
     let previous = service.snapshot().settings;
     let mut next = previous.clone();
     next.font_size = 15;
@@ -556,7 +555,7 @@ fn autostart_form_failures_do_not_change_application_state() {
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
     fs::write(config.join("autostart"), b"not a directory").unwrap();
-    let service = Service::new(Store::open(Some(data.clone())).unwrap());
+    let service = support::service(Store::open(Some(data.clone())).unwrap());
     service
         .update(|state| {
             state.settings.system_proxy = false;
@@ -620,7 +619,7 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
     assert_eq!(request(&app.service, &url).unwrap(), "direct");
     app.service.apply_ruleset_enabled(&rule_id, false).unwrap();
     assert_eq!(request(&app.service, &url).unwrap(), "node B");
-    app.service.set_routing_mode("direct").unwrap();
+    app.service.apply_ruleset_enabled(&rule_id, true).unwrap();
     app.service.select_subscription_node(&first, "A").unwrap();
     assert_eq!(request(&app.service, &url).unwrap(), "direct");
     app.service.set_routing_mode("global").unwrap();
@@ -642,7 +641,7 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
     assert!(hits_b.load(Ordering::Relaxed) >= 3);
     assert_eq!(direct_hits.load(Ordering::Relaxed), 2);
     app.service.stop().unwrap();
-    let reopened = Service::new(Store::open(Some(app.dir.path().into())).unwrap());
+    let reopened = support::service(Store::open(Some(app.dir.path().into())).unwrap());
     assert_eq!(reopened.snapshot().settings.active_subscription, second);
     assert_eq!(reopened.runtime_mode().unwrap(), "global");
     reopened.start().unwrap();
@@ -673,12 +672,12 @@ fn failed_persistence_restores_runtime_selection_modes_and_settings() {
     let saved = fs::read(app.dir.path().join("state.json")).unwrap();
     let blocked = BlockStateWrite::new(app.dir.path());
     let mut settings = before.settings.clone();
-    settings.mixed_port = support::free_port();
-    settings.routing_mode = "direct".into();
+    settings.sniff = !before.settings.sniff;
+    settings.routing_mode = "rule".into();
     for operation in 0..4 {
         let result = match operation {
             0 => app.service.select_subscription_node(&first, "B"),
-            1 => app.service.set_routing_mode("direct"),
+            1 => app.service.set_routing_mode("rule"),
             2 => app.service.select_subscription(&second),
             _ => app.service.apply_settings(settings.clone()),
         };
@@ -759,9 +758,9 @@ fn closing_connections_and_stopping_releases_live_tunnels_and_the_proxy_port() {
         "fixture",
         vec![socks_node("unused", "127.0.0.1:9".parse().unwrap())],
     );
-    app.service.set_routing_mode("direct").unwrap();
+    support::route_all_direct(&app);
     let origin = support::echo_server();
-    let port = app.service.snapshot().settings.mixed_port;
+    let port = app.service.local_proxy_port();
     let mut previous_generation = None;
     for cycle in 0..3 {
         app.service.start().unwrap();

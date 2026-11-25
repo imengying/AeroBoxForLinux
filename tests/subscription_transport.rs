@@ -63,7 +63,7 @@ fn imported_websocket_links_send_default_path_and_server_host() {
             let app = support::App::new();
             app.import("link", subscription::parse(&source).unwrap());
             app.service.start().unwrap();
-            let port = app.service.snapshot().settings.mixed_port;
+            let port = app.service.local_proxy_port();
             let client = reqwest::blocking::Client::builder()
                 .no_proxy()
                 .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}")).unwrap())

@@ -13,16 +13,17 @@
           address: example.com:443
           # optionally, use a client proxy for the handshake server connection.
           # specify multiple proxies to load balance.
-          client_proxies:
-            # direct connection
-            - protocol:
-                type: direct
-            # connect through socks
-            - address: 127.0.0.1:5555
-              protocol:
-                type: socks
-                username: internal-socks-user
-                password: internal-socks-pass
+          client_chain:
+            - pool:
+                # direct connection
+                - protocol:
+                    type: direct
+                # connect through socks
+                - address: 127.0.0.1:5555
+                  protocol:
+                    type: socks
+                    username: internal-socks-user
+                    password: internal-socks-pass
         protocol:
           type: socks
           username: socks-user

@@ -76,7 +76,7 @@ async fn test_vless_server_to_ss_client_cross_protocol() -> Result<(), Box<dyn s
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks
@@ -188,7 +188,7 @@ async fn test_ss_server_to_vless_client_cross_protocol() -> Result<(), Box<dyn s
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: vless
@@ -297,7 +297,7 @@ async fn test_ss_to_ss_chain() -> Result<(), Box<dyn std::error::Error>> {
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{}:{}"
         protocol:
           type: shadowsocks

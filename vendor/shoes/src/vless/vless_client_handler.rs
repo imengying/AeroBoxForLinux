@@ -8,7 +8,7 @@ use crate::async_stream::AsyncStream;
 use crate::config::client::PacketEncoding;
 use crate::tcp::tcp_handler::{TcpClientHandler, TcpClientSetupResult};
 use crate::util::{allocate_vec, write_all};
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::parse_user_id;
 
 use super::encryption::ClientEncryption;
 use super::vision_stream::{VisionStream, VisionWriteErrorPolicy};
@@ -49,7 +49,7 @@ impl VlessTcpClientHandler {
             ));
         }
         Ok(Self {
-            user_id: parse_uuid(user_id)?.into_boxed_slice(),
+            user_id: parse_user_id(user_id)?.into_boxed_slice(),
             udp_enabled,
             encryption,
             vision,

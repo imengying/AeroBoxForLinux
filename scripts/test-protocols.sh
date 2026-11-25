@@ -35,11 +35,11 @@ fi
 run_unit_tests() {
     cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml -- --test-threads=1
     cargo test --manifest-path vendor/shoes/Cargo.toml --lib -- \
-        diagnostics:: copy_bidirectional:: network_tasks:: vless::vless_response_stream:: vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
+        diagnostics:: copy_bidirectional:: network_tasks:: resolver::tests:: vless::vless_response_stream:: vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
         quic_client::tuic_uot_tests quic_client::hop:: quic_client::hysteria2:: \
         quic_client::early_tests ech:: tls_fragment:: tcp::fast_open:: dial_options:: crypto:: \
-        config::types::quic_client:: config::types::tls:: config::validate:: \
-        dns::builder::tests dns::parsed:: dns::routing:: dns::exchange:: dns::recovery_tests:: vless::encryption:: vless::vision_unpad:: vless::vision_stream:: rustls_config_util:: reality:: \
+        config:: uuid_util:: \
+        dns::builder::tests dns::composite_resolver:: dns::parsed:: dns::routing:: dns::exchange:: dns::recovery_tests:: vless::encryption:: vless::vision_unpad:: vless::vision_stream:: rustls_config_util:: reality:: \
         tcp::socket_connector_impl::tests::configured_quic_handshake_timeout --test-threads=1
 }
 if [ "$mode" = --unit ]; then
@@ -58,7 +58,7 @@ test_output=$CARGO_TARGET_DIR/protocol-peers
 mkdir -p "$test_output"
 test_output=$(cd "$test_output" && pwd)
 
-for peer in vmess obfs tuic ech tls-profile; do
+for peer in vmess obfs tuic ech tls-profile naive; do
     (cd "vendor/shoes/tests/fixtures/$peer-peer" &&
         CGO_ENABLED=0 GOMAXPROCS=1 go build -mod=readonly -p 1 -o "$test_output/$peer-peer" .)
 done
@@ -67,6 +67,7 @@ export AEROBOX_OBFS_PEER="$test_output/obfs-peer"
 export AEROBOX_TUIC_PEER="$test_output/tuic-peer"
 export AEROBOX_ECH_PEER="$test_output/ech-peer"
 export AEROBOX_TLS_PROFILE_PEER="$test_output/tls-profile-peer"
+export AEROBOX_NAIVE_PEER="$test_output/naive-peer"
 python3 vendor/shoes/tests/fixtures/tls12-renegotiation-peer/build.py
 export AEROBOX_TLS12_RENEGOTIATION_PEER="$test_output/tls12-renegotiation-peer"
 (cd vendor/support/aerobox-crypto/tests/fixtures/cbc-peer &&
@@ -92,6 +93,7 @@ if [ "${AEROBOX_TEST_KTLS_REKEY:-0}" = 1 ]; then
         crypto::ktls::tests::linux_tls13_key_updates -- --ignored --nocapture
 fi
 cargo test --locked --test ss_plugin_interop -- --ignored --nocapture
+cargo test --locked --test naive_interop -- --ignored --nocapture
 if [ -n "${AEROBOX_TEST_PEER:-}" ]; then
     cargo test --manifest-path vendor/shoes/Cargo.toml --lib \
         dns::recovery_tests::proxy::recursive_doh_over_reality_with_and_without_vision_uses_inner_tls \

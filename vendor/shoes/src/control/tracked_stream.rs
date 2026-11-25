@@ -36,7 +36,10 @@ impl TrackedStream {
 }
 
 pub fn cancelled() -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionAborted, "flow cancelled")
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        crate::diagnostics::FlowCancelled,
+    )
 }
 
 pub async fn wait_cancel(flow: Option<&FlowEntry>) {

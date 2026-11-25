@@ -28,6 +28,10 @@ impl Peer {
         let log = directory.join("naive-peer.log");
         let mut child = Command::new(executable)
             .current_dir(directory)
+            .env(
+                "AEROBOX_NAIVE_PARAMETERS",
+                directory.join("parameters.jsonl"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(fs::File::create(&log).unwrap())
@@ -179,12 +183,18 @@ fn service_naive_http2_and_http3_preserve_large_payloads_and_half_close() {
                 // UoT availability must not override the selected payload network,
                 // including the HTTP/3 connector which bypasses the TCP factory.
                 node["udp_over_tcp"] = json!({"enabled":true,"version":2});
+                if quic {
+                    // Stream credit can exceed connection credit; QUIC enforces
+                    // each independently, including replenishment under load.
+                    node["stream_receive_window"] = (512 * 1024).into();
+                    node["quic_session_receive_window"] = (128 * 1024).into();
+                }
             }
             app.import(&description, vec![node]);
             app.service
                 .start()
                 .unwrap_or_else(|error| panic!("{description} start: {error:#}"));
-            let inbound = app.service.snapshot().settings.mixed_port;
+            let inbound = app.service.local_proxy_port();
             // A small stream and a larger stream exercise reuse and cross many
             // HTTP flow-control windows; EOF must propagate after half-close.
             for length in [4097, 512 * 1024] {
@@ -213,5 +223,24 @@ fn service_naive_http2_and_http3_preserve_large_payloads_and_half_close() {
             let _available = TcpListener::bind(("127.0.0.1", inbound)).unwrap();
             eprintln!("independent Naive {description}: Service TCP payload and half-close passed");
         }
+    }
+    let parameters = fs::read_to_string(directory.path().join("parameters.jsonl")).unwrap();
+    let parameters: Vec<Value> = parameters
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (stream, connection) in [
+        (6 * 1024 * 1024, 15 * 1024 * 1024),
+        (512 * 1024, 128 * 1024),
+    ] {
+        assert!(
+            parameters
+                .iter()
+                .any(|value| value["connection"] == connection
+                    && ["bidi_local", "bidi_remote", "uni"]
+                        .iter()
+                        .all(|key| value[key] == stream)),
+            "missing stream={stream} connection={connection} transport parameters: {parameters:?}"
+        );
     }
 }

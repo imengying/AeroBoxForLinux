@@ -3,20 +3,16 @@
 use crate::model::{RuleSet, Settings, State, Subscription};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{collections::HashMap, fs, path::Path};
 
 const FORMAT: &str = "aerobox-linux-backup";
-const VERSION: u32 = 2;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Backup {
     format: String,
-    version: u32,
     settings: Settings,
-    active_subscription: String,
     subscriptions: Vec<Subscription>,
     rulesets: Vec<BackupRule>,
 }
@@ -58,9 +54,7 @@ pub fn export(
         .collect::<Result<Vec<_>>>()?;
     let backup = Backup {
         format: FORMAT.into(),
-        version: VERSION,
         settings: state.settings.clone(),
-        active_subscription: state.settings.active_subscription.clone(),
         subscriptions: state.subscriptions.clone(),
         rulesets,
     };
@@ -73,19 +67,12 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
     ensure!(metadata.is_file(), "备份必须是普通文件");
     ensure!(metadata.len() <= MAX_BYTES, "备份文件不能超过 32 MiB");
     let bytes = fs::read(path).context("无法读取备份")?;
-    let value: Value = serde_json::from_slice(&bytes).context("不是有效的 AeroBox JSON 备份")?;
-    ensure!(value["format"] == FORMAT, "不是 AeroBox Linux 备份文件");
-    ensure!(value["version"] == VERSION, "不支持的备份版本");
-    let backup: Backup = serde_json::from_value(value).context("备份字段不完整或类型错误")?;
-    ensure!(
-        backup.active_subscription == backup.settings.active_subscription,
-        "备份中的当前订阅不一致"
-    );
+    let backup: Backup = serde_json::from_slice(&bytes).context("备份数据无效")?;
+    ensure!(backup.format == FORMAT, "不是 AeroBox Linux 备份文件");
     ensure!(backup.subscriptions.len() <= 5000, "备份中的订阅过多");
     ensure!(backup.rulesets.len() <= 5000, "备份中的规则集过多");
     let mut files = HashMap::new();
     let state = State {
-        schema_version: 2,
         settings: backup.settings,
         subscriptions: backup.subscriptions,
         rulesets: backup

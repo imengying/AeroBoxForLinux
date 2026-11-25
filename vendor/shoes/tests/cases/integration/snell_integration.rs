@@ -114,7 +114,7 @@ async fn test_snell_udp_basic() -> Result<(), Box<dyn std::error::Error + Send +
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -179,7 +179,7 @@ async fn test_snell_udp_multiple_packets() -> Result<(), Box<dyn std::error::Err
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -244,7 +244,7 @@ async fn test_snell_udp_chacha20() -> Result<(), Box<dyn std::error::Error + Sen
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -303,7 +303,7 @@ async fn test_snell_udp_various_sizes() -> Result<(), Box<dyn std::error::Error 
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -386,7 +386,7 @@ async fn test_snell_udp_multi_destination() -> Result<(), Box<dyn std::error::Er
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -486,7 +486,7 @@ async fn test_snell_udp_rapid_destination_switching()
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell
@@ -563,7 +563,7 @@ async fn test_snell_udp_hostname_destination()
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: "{snell_ip}:{snell_port}"
         protocol:
           type: snell

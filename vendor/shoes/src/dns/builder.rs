@@ -443,17 +443,22 @@ impl HickoryResolverPlan {
                     .bootstrap_resolver
                     .resolve_location(&location)
                     .await
-                    .map_err(|e| {
-                        std::io::Error::other(format!(
-                            "failed to resolve DNS server hostname '{}': {}",
-                            hostname, e
-                        ))
+                    .map_err(|error| {
+                        crate::diagnostics::stage_context(
+                            "dns_bootstrap",
+                            format!("hostname={hostname}"),
+                            error,
+                        )
                     })?;
                 if addrs.is_empty() {
-                    return Err(std::io::Error::other(format!(
-                        "bootstrap lookup returned no addresses for '{}'",
-                        hostname
-                    )));
+                    return Err(crate::diagnostics::stage_context(
+                        "dns_bootstrap",
+                        format!("hostname={hostname}"),
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            crate::diagnostics::DnsNoData,
+                        ),
+                    ));
                 }
 
                 let mut ips = Vec::with_capacity(addrs.len());
@@ -854,8 +859,8 @@ fn try_build_hickory_pool(
 /// Groups must be in topological order (bootstrap dependencies first).
 /// This function:
 /// - Builds client chain groups from expanded client chains
-/// - Resolves hostnames in DNS URLs using bootstrap resolvers
-/// - Creates HickoryResolver instances
+/// - Prepares DNS transports without contacting upstreams
+/// - Defers hostname bootstrap to the first query
 #[allow(dead_code)] // Public library entry point; the binary prepares with explicit limits.
 pub async fn build_dns_registry(groups: Vec<ExpandedDnsGroup>) -> std::io::Result<DnsRegistry> {
     build_dns_registry_with_limits(groups, crate::resources::limits()).await
@@ -977,7 +982,7 @@ pub async fn build_dns_registry_for_runtime(
         } else if group.use_default_resolver {
             registry.get_or_create_default()
         } else {
-            build_resolver_from_specs(&group.specs, &registry, &group.name, &mut bootstraps).await?
+            build_resolver_from_specs(&group.specs, &registry, &group.name, &mut bootstraps)?
         };
         let hosts = Arc::new(group.hosts);
         let real = real_only(
@@ -1037,7 +1042,7 @@ pub async fn build_dns_registry_for_runtime(
 
 /// Build a resolver from expanded DNS specs, wrapping hickory-backed groups
 /// in RefreshingResolver for stale connection mitigation.
-async fn build_resolver_from_specs(
+fn build_resolver_from_specs(
     specs: &[ExpandedDnsSpec],
     registry: &DnsRegistry,
     group_name: &str,
@@ -1047,50 +1052,77 @@ async fn build_resolver_from_specs(
         return Err(std::io::Error::other("no DNS servers configured"));
     }
 
-    let mut entries: Vec<ParsedDnsServerEntry> = Vec::with_capacity(specs.len());
-    let mut plans: Vec<HickoryResolverPlan> = Vec::new();
-    let mut has_system = false;
-
+    let mut prepared = Vec::with_capacity(specs.len());
     for spec in specs {
-        let (entry, plan) = build_entry_and_plan(spec, registry, bootstraps).await?;
-        if matches!(entry.server, ParsedDnsServer::System) {
-            has_system = true;
-        }
-        if let Some(p) = plan {
-            plans.push(p);
-        }
-        entries.push(entry);
+        prepared.push(build_plan(spec, registry, bootstraps)?);
     }
-
-    // Wrap in RefreshingResolver only if we have hickory-backed resolvers
-    // and no system resolver (mixed groups stay as-is for simplicity).
-    let resolver: Arc<dyn Resolver> = if !plans.is_empty() && !has_system {
-        let description = group_name.to_string();
-        let plans = plans.clone();
-        let factory: ResolverFactory = Arc::new(move || {
-            let plans = plans.clone();
-            Box::pin(async move { build_hickory_resolver_group(&plans).await })
+    // Literal endpoints can share one pool. Hostname endpoints bootstrap independently:
+    // a failed hostname must not prevent another configured DNS server from answering.
+    if prepared.iter().all(
+        |plan| matches!(plan, DnsResolverPlan::Hickory(plan) if !plan.parsed_url.has_hostname()),
+    ) {
+        let plans = prepared
+            .into_iter()
+            .map(|plan| match plan {
+                DnsResolverPlan::Hickory(plan) => plan,
+                DnsResolverPlan::System(_) => unreachable!(),
+            })
+            .collect();
+        return Ok(refreshing_plans(plans, group_name.to_string()));
+    }
+    let mut resolvers = Vec::with_capacity(prepared.len());
+    for plan in prepared {
+        resolvers.push(match plan {
+            DnsResolverPlan::System(resolver) => resolver,
+            DnsResolverPlan::Hickory(plan) => {
+                let description = plan.description.clone();
+                refreshing_plans(vec![plan], description)
+            }
         });
-
-        let policy = RefreshPolicy {
-            max_idle: Duration::from_secs(60),
-        };
-
-        let refreshing = RefreshingResolver::new(factory, policy, description).await?;
-        Arc::new(refreshing)
+    }
+    if resolvers.len() == 1 {
+        Ok(resolvers.pop().unwrap())
     } else {
-        build_resolver_with_limits(entries, registry.limits, registry.forbidden.clone())?
-    };
-    Ok(resolver)
+        Ok(Arc::new(CompositeResolver::new(resolvers)))
+    }
 }
 
-/// Build a ParsedDnsServerEntry and optionally a HickoryResolverPlan from an expanded spec.
-/// The plan is returned for non-system resolvers so they can be rebuilt on refresh.
-async fn build_entry_and_plan(
+fn refreshing_plans(plans: Vec<HickoryResolverPlan>, description: String) -> Arc<dyn Resolver> {
+    let request_timeout = if plans
+        .iter()
+        .all(|plan| plan.is_pool_compatible_with(&plans[0]))
+    {
+        plans[0].options.request_budget()
+    } else {
+        plans.iter().fold(Duration::ZERO, |total, plan| {
+            total.saturating_add(plan.options.request_budget())
+        })
+    };
+    let factory: ResolverFactory = Arc::new(move || {
+        let plans = plans.clone();
+        Box::pin(async move { build_hickory_resolver_group(&plans).await })
+    });
+    Arc::new(RefreshingResolver::new(
+        factory,
+        RefreshPolicy {
+            max_idle: Duration::from_secs(60),
+        },
+        description,
+        Some(request_timeout),
+    ))
+}
+
+enum DnsResolverPlan {
+    System(Arc<dyn Resolver>),
+    Hickory(HickoryResolverPlan),
+}
+
+/// Validate and prepare a DNS spec without doing network I/O.
+fn build_plan(
     spec: &ExpandedDnsSpec,
     registry: &DnsRegistry,
     bootstraps: &mut FxHashMap<Option<String>, Arc<dyn Resolver>>,
-) -> std::io::Result<(ParsedDnsServerEntry, Option<HickoryResolverPlan>)> {
+) -> std::io::Result<DnsResolverPlan> {
     // Parse URL
     let parsed_url = ParsedDnsUrl::parse_with_server_name(&spec.url, spec.server_name.as_deref())
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -1153,12 +1185,19 @@ async fn build_entry_and_plan(
         quic_socket_buffer: registry.limits.quic_socket_buffer,
     };
 
-    // Build plan for hickory-backed resolvers (not system)
-    let plan = if !matches!(parsed_url, ParsedDnsUrl::System) {
-        Some(HickoryResolverPlan {
-            parsed_url: parsed_url.clone(),
-            chain_group: chain_group.clone(),
-            bootstrap_resolver: bootstrap_resolver.clone(),
+    if !matches!(parsed_url, ParsedDnsUrl::System) {
+        if !parsed_url.has_hostname() && chain_group.may_connect_directly() {
+            let server = parsed_url
+                .to_parsed_server(None)
+                .map_err(std::io::Error::other)?;
+            if let Some((ip, _)) = server_to_ns_config(&server) {
+                crate::socket_policy::check_dns_endpoint(ip)?;
+            }
+        }
+        return Ok(DnsResolverPlan::Hickory(HickoryResolverPlan {
+            parsed_url,
+            chain_group,
+            bootstrap_resolver,
             chain_key: serde_yaml::to_string(&(
                 &spec.client_chains,
                 crate::control::catalog::chain_selection_key(&spec.client_chains),
@@ -1169,41 +1208,11 @@ async fn build_entry_and_plan(
             bootstrap_key: spec.bootstrap_url.clone(),
             options,
             description: spec.url.clone(),
-        })
-    } else {
-        None
-    };
-
-    // Resolve hostname if URL contains one
-    let resolved_ip = match parsed_url.hostname() {
-        Some(hostname) => {
-            let location = crate::address::NetLocation::new(
-                crate::address::Address::Hostname(hostname.to_string()),
-                0,
-            );
-
-            let addrs = bootstrap_resolver
-                .resolve_location(&location)
-                .await
-                .map_err(|e| {
-                    std::io::Error::other(format!(
-                        "failed to resolve DNS server hostname '{}': {}",
-                        hostname, e
-                    ))
-                })?;
-
-            Some(addrs[0].ip())
-        }
-        None => None,
-    };
-
-    // Convert to ParsedDnsServer with resolved IP
-    let server = parsed_url
-        .to_parsed_server(resolved_ip)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }));
+    }
 
     let mut entry = ParsedDnsServerEntry::new(
-        server,
+        ParsedDnsServer::System,
         chain_group,
         bootstrap_resolver,
         spec.ip_strategy,
@@ -1213,7 +1222,11 @@ async fn build_entry_and_plan(
     );
     entry.native_cache_secs = spec.native_cache_secs;
 
-    Ok((entry, plan))
+    Ok(DnsResolverPlan::System(build_resolver_with_limits(
+        vec![entry],
+        registry.limits,
+        registry.forbidden.clone(),
+    )?))
 }
 
 #[cfg(test)]

@@ -141,7 +141,7 @@ fn stopping_during_first_rule_download_cancels_without_waiting_for_the_server() 
     assert!(started.is_err(), "a cancelled startup reported success");
     assert!(!app.service.status().running);
     assert!(!app.service.status().proxy);
-    let port = app.service.snapshot().settings.mixed_port;
+    let port = app.service.local_proxy_port();
     let _available = TcpListener::bind(("127.0.0.1", port)).unwrap();
 }
 
@@ -153,8 +153,8 @@ fn occupied_proxy_port_fails_cleanly_then_can_start_and_shutdown() {
         "unused",
         vec![socks_node("unused", "127.0.0.1:9".parse().unwrap())],
     );
-    app.service.set_routing_mode("direct").unwrap();
-    let port = app.service.snapshot().settings.mixed_port;
+    support::route_all_direct(&app);
+    let port = app.service.local_proxy_port();
     let occupied = TcpListener::bind(("127.0.0.1", port)).unwrap();
     assert!(app.service.start().is_err());
     assert!(!app.service.status().running);
@@ -291,8 +291,7 @@ fn stopping_cancels_an_online_rule_edit_and_keeps_the_saved_rules() {
         std::fs::read(app.dir.path().join("state.json")).unwrap(),
         saved
     );
-    let _port =
-        TcpListener::bind(("127.0.0.1", app.service.snapshot().settings.mixed_port)).unwrap();
+    let _port = TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
 }
 
 #[test]
@@ -305,7 +304,7 @@ fn checking_a_new_online_rule_fetches_it_without_starting_the_proxy() {
     app.service.check_current().unwrap();
     assert!(!app.service.status().running);
     assert!(!app.service.status().proxy);
-    let port = app.service.snapshot().settings.mixed_port;
+    let port = app.service.local_proxy_port();
     let _available = TcpListener::bind(("127.0.0.1", port)).unwrap();
     let id = app.service.snapshot().rulesets[0].id.clone();
     assert!(app.service.rule_source(&id).unwrap().contains("ip_cidr"));

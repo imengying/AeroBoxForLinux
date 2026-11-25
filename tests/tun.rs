@@ -121,7 +121,6 @@ fn store(directory: &Path, peer: &Peer, bootstrap: &BootstrapDns) -> Store {
             s.settings.log_level = "warn".into();
             s.settings.direct_dns = format!("udp://{}", bootstrap.address());
             s.settings.remote_dns = format!("udp://resolver-{}.example.test", uuid::Uuid::new_v4());
-            s.settings.mixed_port = support::free_port();
             s.rulesets.clear();
             s.settings.active_subscription = sub.id.clone();
             s.subscriptions.push(sub);
@@ -170,7 +169,7 @@ fn udp(ipv6: bool) {
     }
 }
 
-fn dns(peer: &Peer, ipv6: bool, tcp: bool, onlink: bool) {
+fn dns_response(ipv6: bool, tcp: bool, onlink: bool) -> Vec<u8> {
     let target: SocketAddr = match (ipv6, onlink) {
         (false, false) => "203.0.113.53:53",
         (false, true) => "198.51.100.254:53",
@@ -180,7 +179,6 @@ fn dns(peer: &Peer, ipv6: bool, tcp: bool, onlink: bool) {
     .parse()
     .unwrap();
     let query = tun_peer::dns_query(ipv6);
-    let before = peer.dns_targets().len();
     let response = if tcp {
         let mut stream = TcpStream::connect_timeout(&target, Duration::from_secs(2)).unwrap();
         stream
@@ -207,6 +205,12 @@ fn dns(peer: &Peer, ipv6: bool, tcp: bool, onlink: bool) {
         buffer[..n].to_vec()
     };
     assert_eq!(&response[..2], &query[..2], "DNS transaction ID changed");
+    response
+}
+
+fn dns(peer: &Peer, ipv6: bool, tcp: bool, onlink: bool) {
+    let before = peer.dns_targets().len();
+    let response = dns_response(ipv6, tcp, onlink);
     assert_eq!(response[3] & 15, 0, "DNS query failed");
     assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
     let answer = if ipv6 {
@@ -306,11 +310,8 @@ fn recover_network(service: &Service, peer: &Peer, bootstrap: &BootstrapDns) {
     wait_until("old flow closing while offline", || closed(&mut existing));
     let client = reqwest::blocking::Client::builder()
         .proxy(
-            reqwest::Proxy::http(format!(
-                "http://127.0.0.1:{}",
-                service.snapshot().settings.mixed_port
-            ))
-            .unwrap(),
+            reqwest::Proxy::http(format!("http://127.0.0.1:{}", service.local_proxy_port()))
+                .unwrap(),
         )
         .timeout(Duration::from_millis(500))
         .build()
@@ -324,15 +325,18 @@ fn recover_network(service: &Service, peer: &Peer, bootstrap: &BootstrapDns) {
         original,
         "capture was removed during network loss"
     );
-    // A transient DNS failure must retry even while the homepage continuously
-    // requests traffic counters. A new relative sleep on each command starves
-    // recovery, so keep polling more frequently than the retry interval.
+    // DNS is initialized on demand. A failed bootstrap must not prevent network
+    // recovery; subsequent queries must recover while the homepage polls stats.
     bootstrap.set_failed(true);
-    service.clear_logs();
     defaults("add", "198.51.100.254", "2001:db8:1::fe");
-    wait_until("retryable recovery error", || {
-        service.logs().contains("Network recovery deferred")
+    wait_until("IP traffic while DNS bootstrap fails", || {
+        http(false).is_ok_and(|s| s == "through-tun")
     });
+    assert_eq!(
+        dns_response(false, false, true)[3] & 15,
+        2,
+        "unavailable DNS bootstrap did not return SERVFAIL"
+    );
     let stop_polling = AtomicBool::new(false);
     thread::scope(|scope| {
         scope.spawn(|| {
@@ -343,8 +347,8 @@ fn recover_network(service: &Service, peer: &Peer, bootstrap: &BootstrapDns) {
             }
         });
         bootstrap.set_failed(false);
-        wait_until("network recovery while polling stats", || {
-            http(false).is_ok_and(|s| s == "through-tun")
+        wait_until("DNS recovery while polling stats", || {
+            dns_response(false, false, true)[3] & 15 == 0
         });
         stop_polling.store(true, Ordering::Relaxed);
     });
@@ -420,7 +424,7 @@ fn recover_crash(peer: &Peer, bootstrap: &BootstrapDns, initial_rules: &[String;
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     assert_eq!(firewall(), stale, "crash did not leave rules to recover");
-    let service = Service::new(Store::open(Some(dir.path().into())).unwrap());
+    let service = support::service(Store::open(Some(dir.path().into())).unwrap());
     service
         .start()
         .unwrap_or_else(|e| panic!("restart after SIGKILL: {e:#}\n{}", service.logs()));
@@ -441,7 +445,7 @@ fn tun_crash_worker() {
     );
     let directory =
         std::path::PathBuf::from(std::env::var_os("AEROBOX_TUN_CRASH_DIRECTORY").unwrap());
-    let service = Service::new(Store::open(Some(directory.clone())).unwrap());
+    let service = support::service(Store::open(Some(directory.clone())).unwrap());
     service.start().unwrap();
     std::fs::write(directory.join("ready"), b"ready").unwrap();
     loop {
@@ -478,7 +482,7 @@ fn tun_namespace_worker() {
     let peer = Peer::new();
     let bootstrap = BootstrapDns::new();
     let dir = tempfile::tempdir().unwrap();
-    let service: Arc<Service> = Service::new(store(dir.path(), &peer, &bootstrap));
+    let service: Arc<Service> = support::service(store(dir.path(), &peer, &bootstrap));
     assert!(service.tun_available().unwrap());
     for ipv6 in [false, true] {
         let mut settings = service.snapshot().settings;

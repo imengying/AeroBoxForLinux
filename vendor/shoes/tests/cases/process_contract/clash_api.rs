@@ -620,7 +620,7 @@ async fn chain_choices_route_probe_and_restore_as_whole_paths() {
         .1;
     assert_eq!(node["type"], "Relay");
     assert_eq!(node["all"], json!(["prefix", "west"]));
-    assert_eq!(node["udp"], false);
+    assert_eq!(node["udp"], true);
     let probe = api(
         fixture.api,
         "GET",
@@ -1686,7 +1686,8 @@ async fn layered_and_multiplexed_tcp_counts_payload_and_cancels_only_one_stream(
             exercise_udp: false,
         },
     ];
-    for (name, exercise_udp) in [("shadowsocks", true), ("snell", true), ("trojan", false)] {
+    // This fixture opens stream listeners; native SS UDP is covered against sing-box.
+    for (name, exercise_udp) in [("shadowsocks", false), ("snell", true), ("trojan", true)] {
         let mut protocol = json!({"type":name, "password":"test-secret"});
         if name != "trojan" {
             protocol["cipher"] = json!("chacha20-ietf-poly1305");

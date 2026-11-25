@@ -164,14 +164,14 @@ impl Resolver for RoutingResolver {
                                 crate::diagnostics::DnsPolicyRejection(code)));
                         }
                         return Err(io::Error::new(io::ErrorKind::NotFound,
-                            format!("DNS response {}", message.metadata.response_code)));
+                            crate::diagnostics::DnsResponse(message.metadata.response_code)));
                     }
                     let addresses: Vec<_> = super::message::addresses(&message)
                         .filter(|ip| ip.is_ipv6() == (kind == RecordType::AAAA))
                         .map(|ip| SocketAddr::new(ip, port)).collect();
                     if addresses.is_empty() {
                         return Err(io::Error::new(io::ErrorKind::NotFound,
-                            "DNS returned no usable IP addresses"));
+                            crate::diagnostics::DnsNoData));
                     }
                     Ok(addresses)
                 });
@@ -203,15 +203,21 @@ impl Resolver for RoutingResolver {
                             }
                         }
                     }
-                    Err(e) => error = Some(e),
+                    Err(e) => {
+                        // An empty AAAA/NXDOMAIN answer must not hide an A
+                        // timeout or SERVFAIL (or the reverse) in diagnostics.
+                        if error.as_ref().is_none_or(|previous| {
+                            crate::diagnostics::connection_level(&e)
+                                < crate::diagnostics::connection_level(previous)
+                        }) {
+                            error = Some(e);
+                        }
+                    }
                 }
             }
             if addresses.is_empty() {
                 Err(error.unwrap_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "DNS returned no usable IP addresses",
-                    )
+                    io::Error::new(io::ErrorKind::NotFound, crate::diagnostics::DnsNoData)
                 }))
             } else {
                 Ok(addresses)
@@ -312,7 +318,7 @@ impl Resolver for Strategy {
             if addresses.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "domain resolver returned no address in the requested family",
+                    crate::diagnostics::DnsNoData,
                 ));
             }
             Ok(addresses)
@@ -336,6 +342,73 @@ mod tests {
                 answer.metadata.response_code = ResponseCode::NXDomain;
                 answer.to_vec().map_err(io::Error::other)
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PartialFailure {
+        failed: RecordType,
+        timeout: bool,
+    }
+    impl Resolver for PartialFailure {
+        fn resolve_location(&self, _: &NetLocation) -> ResolveFuture {
+            unreachable!()
+        }
+        fn exchange(&self, request: Vec<u8>) -> DnsExchangeFuture {
+            let failed = self.failed;
+            let timeout = self.timeout;
+            Box::pin(async move {
+                let mut answer = super::super::message::decode(&request)?.into_response();
+                if answer.queries[0].query_type() == failed {
+                    if timeout {
+                        return Err(io::ErrorKind::TimedOut.into());
+                    }
+                    answer.metadata.response_code = ResponseCode::ServFail;
+                }
+                answer.to_vec().map_err(io::Error::other)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_address_family_does_not_mask_the_other_familys_failure() {
+        for strategy in ["ipv4_then_ipv6", "ipv6_then_ipv4"] {
+            for failed in [RecordType::A, RecordType::AAAA] {
+                for timeout in [false, true] {
+                    let config: DnsRoutingConfig = serde_json::from_value(serde_json::json!({
+                        "final_server":"test-upstream", "ip_strategy":strategy, "rules":[]
+                    }))
+                    .unwrap();
+                    let resolver = RoutingResolver::new(config, |_| {
+                        Some(Arc::new(PartialFailure { failed, timeout }))
+                    })
+                    .unwrap();
+                    let error = resolver
+                        .resolve_location(
+                            &NetLocation::from_str("absent.example:443", None).unwrap(),
+                        )
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        crate::diagnostics::connection_level(&error),
+                        log::Level::Warn,
+                        "{error}"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        if timeout {
+                            io::ErrorKind::TimedOut
+                        } else {
+                            io::ErrorKind::NotFound
+                        }
+                    );
+                    assert!(
+                        error.to_string().contains(&format!("qtype={failed}")),
+                        "{error}"
+                    );
+                    assert!(!crate::diagnostics::contains::<crate::diagnostics::DnsNoData>(&error));
+                }
+            }
         }
     }
 

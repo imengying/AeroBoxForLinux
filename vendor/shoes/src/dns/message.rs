@@ -1,11 +1,19 @@
 use std::io;
 
-use hickory_resolver::proto::op::Message;
+use hickory_resolver::proto::op::{Message, ResponseCode};
 use hickory_resolver::proto::rr::rdata::svcb::SvcParamValue;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::proto::serialize::binary::{BinDecodable, BinDecoder};
 
 pub(super) const UDP_PAYLOAD_LIMIT: u16 = 1232;
+
+pub(super) fn is_complete_answer(message: &Message) -> bool {
+    !message.metadata.truncation
+        && matches!(
+            message.metadata.response_code,
+            ResponseCode::NoError | ResponseCode::NXDomain
+        )
+}
 
 pub(super) fn addresses(message: &Message) -> impl Iterator<Item = std::net::IpAddr> + '_ {
     message.all_sections().flat_map(|record| {

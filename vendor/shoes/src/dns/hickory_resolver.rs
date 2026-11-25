@@ -47,6 +47,16 @@ impl Default for HickoryResolverOptions {
     }
 }
 
+impl HickoryResolverOptions {
+    pub(super) fn request_budget(self) -> Duration {
+        super::exchange::request_budget(
+            self.request_timeout
+                .unwrap_or_else(|| hickory_resolver::config::ResolverOpts::default().timeout),
+            self.attempts,
+        )
+    }
+}
+
 /// Resolver implementation using hickory-dns.
 /// Uses ProxyRuntimeProvider for all connections (both direct and proxied).
 pub struct HickoryResolver {
@@ -248,7 +258,9 @@ impl HickoryResolver {
 
         let mut builder = Resolver::builder_with_config(config, provider.clone());
         let resolver_opts = builder.options_mut();
-        if !crate::embedding::dns_cache_enabled() { resolver_opts.cache_size = 0; }
+        if !crate::embedding::dns_cache_enabled() {
+            resolver_opts.cache_size = 0;
+        }
         resolver_opts.ip_strategy = options.ip_strategy.to_hickory();
         if let Some(timeout) = options.request_timeout {
             resolver_opts.timeout = timeout;
@@ -337,9 +349,10 @@ impl ShoesResolver for HickoryResolver {
                 .collect();
 
             if addrs.is_empty() {
-                return Err(std::io::Error::other(format!(
-                    "DNS lookup returned no addresses for {name}"
-                )));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    crate::diagnostics::DnsNoData,
+                ));
             }
 
             let elapsed = started.elapsed();
@@ -591,9 +604,8 @@ mod tests {
                     max_idle: Duration::from_secs(3600),
                 },
                 "hostname refresh regression".into(),
-            )
-            .await
-            .unwrap();
+                None,
+            );
             let result =
                 tokio::time::timeout(Duration::from_secs(3), resolver.resolve_location(&location))
                     .await

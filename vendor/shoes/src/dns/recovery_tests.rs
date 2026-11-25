@@ -52,14 +52,17 @@ impl DohFixture {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert.cert.der().clone()).unwrap();
-        let mut tls = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert.cert.der().clone()],
-                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
-                    .into(),
-            )
-            .unwrap();
+        let mut tls =
+            rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
+                        .into(),
+                )
+                .unwrap();
         tls.alpn_protocols = vec![b"h2".to_vec()];
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -71,7 +74,11 @@ impl DohFixture {
         let recursion_rejections = Arc::new(AtomicUsize::new(0));
         let reply = Arc::new(AtomicU8::new(Reply::Answer as u8));
         let state = (stall.clone(), connections.clone(), live.clone());
-        let responses = (requests.clone(), reply.clone(), recursion_rejections.clone());
+        let responses = (
+            requests.clone(),
+            reply.clone(),
+            recursion_rejections.clone(),
+        );
         let server = AbortOnDropHandle::new(tokio::spawn(async move {
             let (stall, connections, live) = state;
             let (requests, reply, recursion_rejections) = responses;
@@ -260,9 +267,8 @@ impl DohFixture {
                 max_idle: Duration::from_secs(60),
             },
             "local DoH".into(),
+            None,
         )
-        .await
-        .unwrap()
     }
 }
 
@@ -302,6 +308,81 @@ fn query(sequence: usize) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn doh_hostname_bootstrap_recovers_after_offline_start_without_rebuilding_registry() {
+    let fixture = DohFixture::start().await;
+    let bootstrap = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bootstrap_address = bootstrap.local_addr().unwrap();
+    let online = Arc::new(AtomicBool::new(false));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let online = online.clone();
+        let requests = requests.clone();
+        AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut packet = [0; 2048];
+            loop {
+                let (n, peer) = bootstrap.recv_from(&mut packet).await.unwrap();
+                requests.fetch_add(1, Ordering::SeqCst);
+                if !online.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let mut reply = Message::from_vec(&packet[..n]).unwrap().into_response();
+                if reply.queries[0].query_type == RecordType::A {
+                    reply.add_answer(Record::from_rdata(
+                        reply.queries[0].name.clone(),
+                        0,
+                        RData::A(A(std::net::Ipv4Addr::LOCALHOST)),
+                    ));
+                }
+                bootstrap
+                    .send_to(&reply.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        }))
+    };
+    let config = crate::config::create_server_configs(serde_json::from_value(serde_json::json!([
+        {"dns_group":"remote", "dns_servers":[{
+            "url":format!("https://bootstrap.example.test:{}/dns-query", fixture.address.port()),
+            "server_name":"localhost", "bootstrap_url":format!("udp://{bootstrap_address}"),
+            "ip_strategy":"ipv4_only", "timeout_secs":1, "attempts":1,
+        }]}
+    ])).unwrap()).unwrap();
+    let registry = super::builder::build_dns_registry(config.dns_groups)
+        .await
+        .unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.connections.load(Ordering::SeqCst), 0);
+    let resolver = registry.get_by_name("remote").unwrap();
+    let error = resolver
+        .exchange_with_deadline(
+            query(0),
+            tokio::time::Instant::now() + Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+    assert!(crate::resolver::dns_caller_deadline(&error), "{error:?}");
+    assert!(requests.load(Ordering::SeqCst) > 0);
+    assert_eq!(fixture.connections.load(Ordering::SeqCst), 0);
+
+    online.store(true, Ordering::SeqCst);
+    for sequence in [1, 2] {
+        let mut exchange = resolver.exchange(query(sequence));
+        // Apply fixture trust only while the lazy resolver is polled on this thread.
+        let reply = std::future::poll_fn(|cx| {
+            crate::rustls_config_util::with_test_roots(fixture.roots.clone(), || {
+                exchange.as_mut().poll(cx)
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(Message::from_vec(&reply).unwrap().answers.len(), 1);
+    }
+    assert_eq!(fixture.connections.load(Ordering::SeqCst), 1);
+    drop((resolver, registry, server));
+    fixture.wait_closed().await;
+}
+
+#[tokio::test]
 async fn doh_composite_short_deadline_preserves_healthy_transports() {
     let fixture = DohFixture::start().await;
     let first = Arc::new(fixture.resolver());
@@ -321,9 +402,8 @@ async fn doh_composite_short_deadline_preserves_healthy_transports() {
             max_idle: Duration::from_secs(60),
         },
         "composite DoH".into(),
-    )
-    .await
-    .unwrap();
+        None,
+    );
     fixture.reply.store(Reply::Slow as u8, Ordering::SeqCst);
     for duration in [Duration::from_millis(10), Duration::ZERO] {
         let error = resolver

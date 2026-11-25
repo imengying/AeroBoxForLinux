@@ -340,11 +340,6 @@ impl Ui {
         network.add(&proxy);
         let ipv6 = switch_row("IPv6", "", settings.ipv6);
         network.add(&ipv6);
-        let lan = switch_row("允许局域网访问", "", settings.allow_lan);
-        lan.set_tooltip_text(Some("允许同一网络的设备使用本地代理端口"));
-        network.add(&lan);
-        let mixed_port = number_entry("代理端口", &settings.mixed_port.to_string());
-        network.add(&mixed_port.root);
         form.append(&network);
         let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
@@ -671,8 +666,6 @@ impl Ui {
                     .into(),
                     system_proxy: proxy.is_active(),
                     ipv6: ipv6.is_active(),
-                    allow_lan: lan.is_active(),
-                    mixed_port: mixed_port.text().trim().parse().unwrap_or(0),
                     bypass_lan: bypass.is_active(),
                     sniff: sniff.is_active(),
                     dns_hijack: hijack.is_active(),
@@ -877,16 +870,11 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             let backup: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
             ensure!(
                 backup["format"] == "aerobox-linux-backup"
-                    && backup["version"] == 2
                     && backup["settings"]["remote_dns"] == settings.remote_dns
                     && backup["subscriptions"]
                         .as_array()
                         .is_some_and(|items| !items.is_empty()),
                 "保存并导出没有生成有效备份"
-            );
-            ensure!(
-                backup["format"] != "aerobox-android-backup",
-                "不应读取旧项目备份"
             );
         }
         2 => {
@@ -1324,7 +1312,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ensure!(
             !settings.ipv6
                 && settings.font_size == model::FONT_SIZE_MAX
-                && settings.allow_lan
                 && !settings.dns_cache
                 && !settings.tun_enabled
                 && settings.tun_mtu == 1400
@@ -1344,11 +1331,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         return Ok(());
     }
     let body = descendants(&ui.body);
-    for (title, value) in [
-        ("IPv6", false),
-        ("允许局域网访问", true),
-        ("DNS 缓存", false),
-    ] {
+    for (title, value) in [("IPv6", false), ("DNS 缓存", false)] {
         let row = body
             .iter()
             .filter_map(|w| w.clone().downcast::<adw::SwitchRow>().ok())

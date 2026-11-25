@@ -23,6 +23,7 @@ pub(crate) const MAX_COPY_BYTES_PER_POLL: usize = 1024 * 1024;
 #[derive(Debug)]
 struct CopyBuffer {
     read_done: bool,
+    read_error: Option<io::Error>,
     need_flush: bool,
     need_write_ping: bool,
     start_index: usize,
@@ -41,6 +42,7 @@ impl CopyBuffer {
         let buf = allocate_vec(size);
         Self {
             read_done: false,
+            read_error: None,
             need_flush: need_initial_flush,
             need_write_ping: false,
             start_index: 0,
@@ -87,8 +89,18 @@ impl CopyBuffer {
                 let mut buf =
                     ReadBuf::new(&mut me.buf[unused_start_index..unused_end_index_exclusive]);
                 match reader.as_mut().poll_read(cx, &mut buf) {
-                    Poll::Ready(val) => {
-                        val?;
+                    Poll::Ready(Err(error)) => {
+                        if crate::diagnostics::contains::<crate::diagnostics::FlowCancelled>(&error)
+                        {
+                            return Poll::Ready(Err(error));
+                        }
+                        // Preserve bytes already accepted by the protocol reader.
+                        // A peer can send its final payload and close without a
+                        // TLS close_notify in the same readiness notification.
+                        self.read_done = true;
+                        self.read_error = Some(error);
+                    }
+                    Poll::Ready(Ok(())) => {
                         let n = buf.filled().len();
                         if n == 0 {
                             self.read_done = true;
@@ -176,7 +188,7 @@ impl CopyBuffer {
 
             // If we've written all the data and we've seen EOF, finish the transfer.
             if self.read_done && self.cache_length == 0 {
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(self.read_error.take().map_or(Ok(()), Err));
             }
 
             // Return Pending to prevent task starvation
@@ -376,9 +388,9 @@ where
 ///
 /// # Errors
 ///
-/// The future will immediately return an error if any IO operation on `a`
-/// or `b` returns an error. Some data read from either stream may be lost (not
-/// written to the other stream) in this case.
+/// A read error is returned after flushing bytes already read in that direction.
+/// It remains an error, not a successful EOF. Cancellation and write failures
+/// return immediately; pending bytes in the other direction may also be lost.
 ///
 pub async fn copy_bidirectional<A, B>(
     a: &mut A,

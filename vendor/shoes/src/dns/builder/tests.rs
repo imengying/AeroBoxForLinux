@@ -45,6 +45,140 @@ fn make_spec(url: &str) -> ExpandedDnsSpec {
 }
 
 #[tokio::test]
+async fn failed_hostname_bootstrap_keeps_other_configured_dns_upstreams_usable() {
+    use crate::address::NetLocation;
+    use hickory_resolver::proto::{
+        op::{Message, Query},
+        rr::{Name, RData, Record, RecordType, rdata::A},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug)]
+    struct Bootstrap {
+        online: AtomicBool,
+        calls: AtomicUsize,
+    }
+    impl Resolver for Bootstrap {
+        fn resolve_location(&self, location: &NetLocation) -> crate::resolver::ResolveFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let online = self.online.load(Ordering::SeqCst);
+            let port = location.port();
+            Box::pin(async move {
+                if online {
+                    Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))])
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NetworkUnreachable,
+                        "offline",
+                    ))
+                }
+            })
+        }
+    }
+    let bootstrap = Arc::new(Bootstrap {
+        online: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+    });
+    let mut registry = DnsRegistry::new();
+    registry.register("bootstrap".into(), bootstrap.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            clients.spawn(async move {
+                while let Ok(len) = stream.read_u16().await {
+                    let mut bytes = vec![0; usize::from(len)];
+                    if stream.read_exact(&mut bytes).await.is_err() {
+                        break;
+                    }
+                    let mut reply = Message::from_vec(&bytes).unwrap().into_response();
+                    reply.add_answer(Record::from_rdata(
+                        reply.queries[0].name.clone(),
+                        0,
+                        RData::A(A("192.0.2.8".parse().unwrap())),
+                    ));
+                    let bytes = reply.to_vec().unwrap();
+                    if stream.write_u16(bytes.len() as u16).await.is_err()
+                        || stream.write_all(&bytes).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+    }));
+    let mut hostname = make_spec(&format!("tcp://dns.example.test:{}", addr.port()));
+    hostname.bootstrap_url = Some("bootstrap".into());
+    let literal = make_spec(&format!("tcp://{addr}"));
+    let mut query = Message::query();
+    query.add_query(Query::query(
+        Name::from_ascii("destination.test").unwrap(),
+        RecordType::A,
+    ));
+
+    for specs in [vec![hostname.clone()], vec![hostname.clone(), literal]] {
+        bootstrap.online.store(false, Ordering::SeqCst);
+        let previous = bootstrap.calls.load(Ordering::SeqCst);
+        let resolver =
+            build_resolver_from_specs(&specs, &registry, "offline", &mut FxHashMap::default())
+                .unwrap();
+        assert_eq!(bootstrap.calls.load(Ordering::SeqCst), previous);
+        let result = resolver.exchange(query.to_vec().unwrap()).await;
+        if specs.len() == 1 {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NetworkUnreachable);
+            assert!(
+                error
+                    .to_string()
+                    .contains("stage=dns_bootstrap hostname=dns.example.test")
+            );
+            assert_eq!(
+                crate::diagnostics::connection_level(&error),
+                log::Level::Warn
+            );
+        } else {
+            assert_eq!(
+                Message::from_vec(&result.unwrap()).unwrap().answers.len(),
+                1
+            );
+        }
+        bootstrap.online.store(true, Ordering::SeqCst);
+        assert_eq!(
+            Message::from_vec(&resolver.exchange(query.to_vec().unwrap()).await.unwrap())
+                .unwrap()
+                .answers
+                .len(),
+            1
+        );
+    }
+    drop(server);
+}
+
+#[tokio::test]
+async fn offline_preparation_still_rejects_invalid_dns_configuration() {
+    let registry = DnsRegistry::new();
+    for (url, bootstrap) in [
+        ("https:///", None),
+        ("ftp://dns.test/query", None),
+        (
+            "https://dns.test/dns-query",
+            Some("quic://needs-bootstrap.test"),
+        ),
+    ] {
+        let mut spec = make_spec(url);
+        spec.bootstrap_url = bootstrap.map(str::to_owned);
+        assert!(
+            build_resolver_from_specs(&[spec], &registry, "invalid", &mut FxHashMap::default())
+                .is_err(),
+            "{url}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn dns_client_chain_resolves_proxy_through_configured_bootstrap() {
     use hickory_resolver::net::runtime::RuntimeProvider;
 
@@ -87,10 +221,11 @@ async fn dns_client_chain_resolves_proxy_through_configured_bootstrap() {
         .find(|group| group.name == "dns")
         .unwrap()
         .specs[0];
-    let (_, plan) = build_entry_and_plan(spec, &registry, &mut FxHashMap::default())
-        .await
-        .unwrap();
-    let plan = plan.unwrap();
+    let DnsResolverPlan::Hickory(plan) =
+        build_plan(spec, &registry, &mut FxHashMap::default()).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
     let provider = crate::dns::proxy_runtime::ProxyRuntimeProvider::with_bootstrap(
         plan.chain_group,
         plan.bootstrap_resolver,
@@ -833,10 +968,10 @@ async fn heterogeneous_group_retries_truncated_udp_over_configured_tcp() {
 }
 
 #[tokio::test]
-async fn dns_bootstrap_uses_live_quic_admission_before_activation() {
+async fn lazy_dns_bootstrap_uses_active_quic_admission_on_query() {
     if std::env::var_os("SHOES_DNS_ADMISSION_TEST_CHILD").is_none() {
         shoes_test_support::isolated::run_isolated(
-            "dns::builder::tests::dns_bootstrap_uses_live_quic_admission_before_activation",
+            "dns::builder::tests::lazy_dns_bootstrap_uses_active_quic_admission_on_query",
             "SHOES_DNS_ADMISSION_TEST_CHILD",
             "1",
         );
@@ -865,15 +1000,26 @@ async fn dns_bootstrap_uses_live_quic_admission_before_activation() {
         let validated =
             crate::config::create_server_configs(serde_yaml::from_str(&config).unwrap()).unwrap();
         let rejected = crate::resources::snapshot().quic_buffer_bytes.rejected;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                build_dns_registry_with_limits(validated.dns_groups, candidate)
-            )
-            .await
-            .unwrap()
-            .is_err()
+        let registry = tokio::time::timeout(
+            Duration::from_secs(1),
+            build_dns_registry_with_limits(validated.dns_groups, candidate),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            crate::resources::snapshot().quic_buffer_bytes.rejected,
+            rejected
         );
+        assert!(blackhole.try_recv(&mut [0; 1500]).is_err());
+        let resolver = registry.get_by_name("candidate").unwrap();
+        let target = crate::address::NetLocation::from_str("destination.test:80", None).unwrap();
+        let error =
+            tokio::time::timeout(Duration::from_secs(5), resolver.resolve_location(&target))
+                .await
+                .unwrap()
+                .unwrap_err();
+        assert!(crate::resources::is_exhausted(&error), "{error:?}");
         assert!(crate::resources::snapshot().quic_buffer_bytes.rejected > rejected);
         assert_eq!(crate::resources::snapshot().quic_buffer_bytes.active, 0);
         assert_eq!(
@@ -1263,13 +1409,15 @@ async fn test_plan_group_pools_equivalent_specs_with_distinct_runtime_objects() 
     let spec_b = make_spec("udp://8.8.4.4");
 
     let mut bootstraps = FxHashMap::default();
-    let (_, plan_a) = build_entry_and_plan(&spec_a, &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let (_, plan_b) = build_entry_and_plan(&spec_b, &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let plans = vec![plan_a.unwrap(), plan_b.unwrap()];
+    let DnsResolverPlan::Hickory(plan_a) = build_plan(&spec_a, &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let DnsResolverPlan::Hickory(plan_b) = build_plan(&spec_b, &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let plans = vec![plan_a, plan_b];
 
     let resolver = build_hickory_resolver_group(&plans).await.unwrap();
     let debug = format!("{:?}", resolver);
@@ -1317,13 +1465,17 @@ async fn selector_identity_prevents_dns_pooling_of_identical_members() {
     );
     let registry = DnsRegistry::new();
     let mut bootstraps = FxHashMap::default();
-    let (_, first) = build_entry_and_plan(&specs[0], &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let (_, second) = build_entry_and_plan(&specs[1], &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let plans = [first.unwrap(), second.unwrap()];
+    let DnsResolverPlan::Hickory(first) =
+        build_plan(&specs[0], &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let DnsResolverPlan::Hickory(second) =
+        build_plan(&specs[1], &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let plans = [first, second];
     assert!(!plans[0].is_pool_compatible_with(&plans[1]));
     assert!(
         try_build_hickory_pool_from_plans(&plans)
@@ -1397,13 +1549,15 @@ async fn test_plan_group_falls_back_for_incompatible_specs() {
     spec_b.attempts = 3;
 
     let mut bootstraps = FxHashMap::default();
-    let (_, plan_a) = build_entry_and_plan(&spec_a, &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let (_, plan_b) = build_entry_and_plan(&spec_b, &registry, &mut bootstraps)
-        .await
-        .unwrap();
-    let plans = vec![plan_a.unwrap(), plan_b.unwrap()];
+    let DnsResolverPlan::Hickory(plan_a) = build_plan(&spec_a, &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let DnsResolverPlan::Hickory(plan_b) = build_plan(&spec_b, &registry, &mut bootstraps).unwrap()
+    else {
+        panic!("expected Hickory plan");
+    };
+    let plans = vec![plan_a, plan_b];
 
     let resolver = build_hickory_resolver_group(&plans).await.unwrap();
     let debug = format!("{:?}", resolver);

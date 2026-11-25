@@ -30,7 +30,7 @@ use crate::tcp::tcp_handler::{
     TcpClientHandler, TcpClientSetupResult, TcpServerHandler, TcpServerSetupResult,
 };
 use crate::util::{allocate_vec, write_all};
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::parse_user_id;
 use crate::xudp::XudpMessageStream;
 
 const TAG_LEN: usize = 16;
@@ -109,7 +109,7 @@ impl VmessTcpServerHandler {
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
     ) -> std::io::Result<Self> {
-        let mut user_id_bytes = parse_uuid(user_id)?;
+        let mut user_id_bytes = parse_user_id(user_id)?;
         user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
         let instruction_key: [u8; 16] = compute_md5(&user_id_bytes);
 
@@ -826,7 +826,7 @@ impl VmessTcpClientHandler {
         global_padding: bool,
         authenticated_length: bool,
     ) -> std::io::Result<Self> {
-        let mut user_id_bytes = parse_uuid(user_id)?;
+        let mut user_id_bytes = parse_user_id(user_id)?;
         let alter_key = super::legacy::alter_id(user_id_bytes.as_slice().try_into().unwrap());
         user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
         let instruction_key: [u8; 16] = compute_md5(&user_id_bytes);

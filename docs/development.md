@@ -17,11 +17,14 @@ make package  # 生成 target/packages/*.tar.gz
 make clean
 ```
 
-普通集成测试使用临时目录、回环地址和临时端口，验证实际流量、节点与模式切换、回滚、下载、测速和启停，不依赖外部内核，不启动特权 TUN。慢规则下载测试同时持续查询状态，验证在线更新不会被首页轮询打断；传输测试检查分享链接缺省路径、Host 和免认证 SOCKS 的实际请求。
+应用的本机代理入口固定为 `127.0.0.1:2080`，设置中不保存监听端口或局域网开关。普通集成测试通过独立服务实例使用临时目录、回环地址和临时端口，验证实际流量、节点与模式切换、回滚、下载、测速和启停，不依赖外部内核，不启动特权 TUN。慢规则下载测试同时持续查询状态，验证在线更新不会被首页轮询打断；传输测试检查分享链接缺省路径、Host 和免认证 SOCKS 的实际请求。
 
 `make test` 和 GitHub Actions 还运行 `scripts/test-protocols.sh --unit`，覆盖内置传输、DNS、TLS 与密码组件的回归测试。这个模式无需 Go、独立协议服务端或内核 kTLS 支持。组件测试以主项目的 `Cargo.lock` 为基础解析测试依赖，结束时清理临时锁文件。
 
 `scripts/check-network.sh` 检查网络任务的归属，并验证 Vision 分帧状态机和基准工具。持续模糊测试、性能对比与连接日志说明见 [网络诊断与验证](network-validation.md)。这些开发工具不随应用安装。
+
+
+`Protocol interoperability` 工作流由构建流程在 main 推送、标签及 pull request 时调用，也支持每周和手动触发。使用 ubuntu-latest、固定 Go 工具链和依赖，以及经过 SHA256 校验的 sing-box 1.14.4。覆盖 Naive HTTP/2 / HTTP/3、VMess、SS 插件、TUIC、ECH、TLS 与应用协议互通；发布任务同时等待应用检查和协议互通通过。参考服务端仅用于测试，不打包进 Release。kTLS 和特权 TUN 环境测试仍单独运行。
 
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 
@@ -35,17 +38,17 @@ AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
 # Naive HTTP/2、HTTP/3 的独立 Go 回显服务端
 (cd vendor/shoes/tests/fixtures/naive-peer && go build -o /tmp/aerobox-naive-peer .)
 AEROBOX_NAIVE_PEER=/tmp/aerobox-naive-peer cargo test --test naive_interop -- --ignored
-# VMess、SS 插件、TUIC 0-RTT/UoT、ECH 与 TLS 分片：独立 Go 服务互通
+# VMess、SS 插件、TUIC 0-RTT/UoT、Naive、ECH 与 TLS 分片：独立 Go 服务互通
 scripts/test-protocols.sh
 # 还可同时加入 sing-box 作为独立服务端
 AEROBOX_TEST_PEER=/path/to/sing-box scripts/test-protocols.sh
-# Linux 6.14+ 且启用 kTLS：增加 TLS 1.3 密钥更新测试
+# Linux 6.14+ 且启用 kTLS：增加 ECH/kTLS 组合与 TLS 1.3 密钥更新测试
 AEROBOX_TEST_KTLS_REKEY=1 scripts/test-protocols.sh
 # 单独验证 kTLS 的密码套件、收发方向、半关闭、异常 EOF 与密钥更新
 scripts/test-protocols.sh --ktls
 ```
 
-独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；Vision / REALITY 还验证经 HTTP 和 SOCKS 入口传输的 HTTPS 大载荷，REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片、kTLS 的组合，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
+独立服务端的传输测试包含 Chrome / Firefox 配置下的 VLESS WebSocket（含 early data）、gRPC、HTTP Upgrade、HTTP/2、Vision、REALITY Vision 和 AnyTLS，检查 TCP 大载荷、回传和 UDP；Vision / REALITY 还验证经 HTTP 和 SOCKS 入口传输的 HTTPS 大载荷，REALITY 额外覆盖空 short-id、显式 ALPN 和 TLS 1.3 密码套件。ECH 测试另外覆盖 Chrome / Firefox、TLS 分片，以及强制 HelloRetryRequest、配置轮换和拒绝早期数据后的重发；kTLS 组合通过 `AEROBOX_TEST_KTLS_REKEY=1` 显式启用，启用后失败不会自动降级。测试使用临时证书与合成凭据。TLS 测试直接检查发出的 ClientHello，并完成混合密钥交换、Brotli 证书解压、握手重试和会话恢复。
 
 设置 `AEROBOX_TEST_PEER` 运行协议脚本时，还验证应用的 DNS 查询经独立 sing-box REALITY 服务端到达本地 DoH 服务，覆盖 Chrome / Firefox 和有无 Vision；递归查询必须成功，原始非递归查询仍保留原标志。这些测试不访问公共 DNS 或真实订阅。
 
@@ -76,7 +79,7 @@ kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / Cha
 
 AeroBox 作为一个应用构建、测试和发布；连接管理和界面共用同一份状态，没有独立内核的安装或升级流程。
 
-安装包使用明确的文件清单，只包含正式程序、安装与卸载脚本、图标、使用文档和许可声明。开发文档、源码、测试、截图、基准工具及已嵌入程序的规则数据不重复打包。`scripts/check-package.py` 在 CI 中检查归档内容，并在临时目录验证安装与卸载。
+安装包使用明确的文件清单，只包含正式程序、安装与卸载脚本、图标和许可声明。使用与开发文档保留在仓库，源码、测试、截图、基准工具及已嵌入程序的规则数据不重复打包。`scripts/check-package.py` 在 CI 中检查归档内容，并在临时目录验证安装与卸载。
 
 界面参考 [Material 3 色彩角色](https://m3.material.io/styles/color/roles)，使用 GTK 原生控件及桌面字体渲染；配色、卡片、选中状态和间距统一在 `resources/styles/` 管理。
 

@@ -332,9 +332,8 @@ async fn truncated_fallback_survives_deadlines_without_bypassing_guards() {
                 max_idle: Duration::from_secs(60),
             },
             "partial deadline".into(),
-        )
-        .await
-        .unwrap();
+            None,
+        );
         let real = crate::dns::guard::real_only(
             Arc::new(TimeoutResolver::with_timeout(
                 refreshing,

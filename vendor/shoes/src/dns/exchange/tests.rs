@@ -350,14 +350,17 @@ async fn fake_dns_raw_forwarding_over_verified_tls_preserves_and_guards_answers(
         let cert = rcgen::generate_simple_self_signed(vec!["dns.example".into()]).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert.cert.der().clone()).unwrap();
-        let mut server_tls = rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert.cert.der().clone()],
-                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
-                    .into(),
-            )
-            .unwrap();
+        let mut server_tls =
+            rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())
+                        .into(),
+                )
+                .unwrap();
         server_tls.alpn_protocols = vec![b"dot".to_vec()];
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_tls));
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -370,9 +373,13 @@ async fn fake_dns_raw_forwarding_over_verified_tls_preserves_and_guards_answers(
         raw.context = PoolContext::new(
             ResolverOpts::default(),
             TlsConfig {
-                config: rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
+                config: rustls::ClientConfig::builder_with_provider(
+                    aerobox_crypto::shared_provider(),
+                )
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
             },
         );
         let calls = Arc::new(AtomicUsize::new(0));
@@ -634,13 +641,20 @@ async fn separately_configured_tcp_remains_a_primary_when_udp_is_silent() {
 }
 
 #[tokio::test]
-async fn silent_first_server_does_not_starve_healthy_second_server() {
-    for (system_pair, extra_silent) in [(false, false), (true, false), (true, true)] {
+async fn failed_first_server_does_not_starve_healthy_second_server() {
+    for (system_pair, extra_silent, code) in [
+        (false, false, None),
+        (true, false, None),
+        (true, true, None),
+        (false, false, Some(ResponseCode::ServFail)),
+        (true, false, Some(ResponseCode::Refused)),
+    ] {
         let silent = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let second_silent = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let healthy = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
         let mut raw = exchange(silent.local_addr().unwrap(), false);
         raw.context.options.timeout = Duration::from_millis(200);
+        raw.context.options.num_concurrent_reqs = 1;
         if system_pair {
             let mut config = ConnectionConfig::tcp();
             config.port = silent.local_addr().unwrap().port();
@@ -670,6 +684,22 @@ async fn silent_first_server_does_not_starve_healthy_second_server() {
             config,
             connection: Mutex::new(None),
         });
+        let _failed = if let Some(code) = code {
+            Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    let mut bytes = [0; 2048];
+                    let (len, peer) = silent.recv_from(&mut bytes).await.unwrap();
+                    let mut reply = Message::from_vec(&bytes[..len]).unwrap().into_response();
+                    reply.metadata.response_code = code;
+                    silent
+                        .send_to(&reply.to_vec().unwrap(), peer)
+                        .await
+                        .unwrap();
+                },
+            )))
+        } else {
+            None
+        };
         let server = tokio::spawn(async move {
             let mut bytes = [0; 2048];
             let (len, peer) = healthy.recv_from(&mut bytes).await.unwrap();
@@ -680,7 +710,9 @@ async fn silent_first_server_does_not_starve_healthy_second_server() {
                 .unwrap();
         });
         let answer = raw.exchange(request().to_vec().unwrap()).await.unwrap();
-        assert_eq!(Message::from_vec(&answer).unwrap().metadata.id, 17);
+        let answer = Message::from_vec(&answer).unwrap();
+        assert_eq!(answer.metadata.id, 17);
+        assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
         server.await.unwrap();
     }
 }
@@ -808,9 +840,8 @@ async fn assert_slow_setup_survives(concurrent: bool, fail_last: bool) {
             max_idle: Duration::from_secs(60),
         },
         "slow multi-upstream setup".into(),
-    )
-    .await
-    .unwrap();
+        None,
+    );
     let requests = async {
         let error = resolver
             .exchange(request().to_vec().unwrap())

@@ -1471,7 +1471,9 @@ async fn explicit_empty_rule_list_replaces_old_rules_but_empty_body_is_rejected(
     write_rule(&path, OLD);
     let empty = br#"{"version":1,"rules":[]}"#;
     let (url, fixture) = serve(response(200, "", empty)).await;
-    update(&source(&url, &path), Limits::default()).await.unwrap();
+    update(&source(&url, &path), Limits::default())
+        .await
+        .unwrap();
     fixture.await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), empty);
     let original = std::fs::metadata(&path).unwrap();
@@ -2124,9 +2126,9 @@ async fn named_download_chain_is_used_and_failure_never_falls_back_to_direct() {
                 serde_json::from_value(serde_json::json!({"cache_file_path": store})).unwrap(),
             );
         }
-        config.insert(0, serde_json::from_value(serde_json::json!({"client_group": "fetch", "type": "selector", "default": if persisted { "DIRECT" } else { "working" }, "client_proxies": [
-        "direct",
-        {"name": "working", "address": proxy_address.to_string(), "protocol": {"type": "socks"}}
+        config.insert(0, serde_json::from_value(serde_json::json!({"client_group": "fetch", "type": "selector", "default": if persisted { "DIRECT" } else { "working" }, "client_chains": [
+        {"chain": ["direct"]},
+        {"name": "working", "chain": [{"address": proxy_address.to_string(), "protocol": {"type": "socks"}}]}
     ]})).unwrap());
         let mut validated = crate::config::compile_configs(config.clone())
             .await
@@ -2175,7 +2177,7 @@ async fn url_test_downloads_stay_background_after_success_and_failure() {
         0,
         serde_json::from_value(serde_json::json!({
             "client_group": "auto", "type": "url-test", "lazy": true, "interval": 60,
-            "url": "http://probe.invalid/", "client_proxies": [{
+            "url": "http://probe.invalid/", "client_chains": [{
                 "name": "working", "address": proxy.local_addr().unwrap().to_string(),
                 "protocol": {"type": "socks"}
             }]
@@ -3187,10 +3189,14 @@ fn local_source_reuse_accepts_valid_empty_json_and_srs_but_not_empty_text() {
         for shared in [false, true] {
             let mut compiler = crate::rules::Compiler::default();
             if shared {
-                crate::rule_set::load_source(&RuleSource::from_path(path.clone()), &mut compiler).unwrap();
+                crate::rule_set::load_source(&RuleSource::from_path(path.clone()), &mut compiler)
+                    .unwrap();
             }
             let predicate = crate::rule_set::load_source(&remote, &mut compiler).unwrap();
-            assert!(matches!(predicate.kind, crate::rules::Kind::Constant(false)));
+            assert!(matches!(
+                predicate.kind,
+                crate::rules::Kind::Constant(false)
+            ));
         }
     }
     let path = dir.path().join("rules.txt");
@@ -3289,9 +3295,6 @@ async fn namespace_preflight_rejects_unresolved_parent_traversal_before_creating
     let alias = missing.join("../cache");
     let path = dir.path().join("config.json");
     for extra in [
-        serde_json::json!({"certificate_source": "acme", "type": "acme", "domains": ["example.com"],
-            "directory_url": "https://ca.invalid/directory", "state_dir": alias.join("acme"),
-            "challenge": {"type": "tls_alpn01"}}),
         serde_json::json!({"cache_file_path": alias.join("state")}),
         serde_json::json!({"dns_group": "dns", "dns_servers": "system", "fake_ip": {"state_file": alias.join("fake")}}),
         serde_json::json!({"path": alias.join("socket"), "protocol": {"type": "socks"}}),
@@ -3428,26 +3431,6 @@ fn remote_declarations_require_one_root_and_direct_unreserved_children() {
     })
     .unwrap();
     crate::rule_set::validate_remote_paths(&mut config, &[]).unwrap();
-}
-
-#[test]
-fn managed_root_cannot_intersect_acme_state_in_either_direction() {
-    let dir = directory();
-    let root = dir.path().join("cache");
-    for state in [dir.path().to_path_buf(), root.clone(), root.join("acme")] {
-        let mut configs: Vec<Config> = serde_json::from_value(serde_json::json!([
-            {"global_settings": {"rule_cache_dir": root}},
-            {"certificate_source": "acme", "type": "acme", "domains": ["example.com"],
-             "directory_url": "https://ca.invalid/directory", "state_dir": state,
-             "challenge": {"type": "tls_alpn01"}}
-        ]))
-        .unwrap();
-        let error = crate::rule_set::validate_remote_paths(&mut configs, &[]).unwrap_err();
-        assert!(
-            error.to_string().contains("ACME state directory"),
-            "{error}"
-        );
-    }
 }
 
 #[tokio::test]

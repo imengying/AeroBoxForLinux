@@ -219,39 +219,6 @@ impl Serialize for ClientChain {
     }
 }
 
-fn convert_legacy_proxies(
-    proxies: NoneOrSome<ConfigSelection<ClientConfig>>,
-    chains: NoneOrSome<ClientChain>,
-) -> Result<NoneOrSome<ClientChain>, &'static str> {
-    if proxies.is_empty() {
-        return Ok(if chains.is_empty() {
-            NoneOrSome::Unspecified
-        } else {
-            chains
-        });
-    }
-    if !chains.is_empty() {
-        return Err(
-            "cannot specify both 'client_proxies' and 'client_chains'/'client_chain' in the same rule. \
-             'client_proxies' is deprecated - please use 'client_chains' instead.",
-        );
-    }
-    log::warn!(
-        "client_proxy/client_proxies is deprecated; use client_chain/client_chains. \
-         Preserve a proxy list's alternatives with {{chain: [{{pool: [a, b]}}]}}; \
-         a bare [a, b] specifies sequential hops."
-    );
-    let proxies = proxies.into_vec();
-    let hop = if proxies.len() == 1 {
-        ClientChainHop::Single(proxies.into_iter().next().unwrap())
-    } else {
-        ClientChainHop::Pool(OneOrSome::Some(proxies))
-    };
-    Ok(NoneOrSome::One(ClientChain {
-        hops: OneOrSome::One(hop),
-    }))
-}
-
 impl<'de> Deserialize<'de> for RuleConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -273,11 +240,8 @@ impl<'de> Deserialize<'de> for RuleConfig {
             action: Option<String>,
             #[serde(default)]
             override_address: Option<String>,
-            /// Legacy field - will be converted to client_chains
-            #[serde(alias = "client_proxy", default)]
-            client_proxies: NoneOrSome<ConfigSelection<ClientConfig>>,
             /// New field: multiple chains for round-robin selection
-            /// Alias: client_chain (singular) for backward compatibility
+            /// The singular spelling also accepts a single chain.
             #[serde(alias = "client_chain", default)]
             client_chains: NoneOrSome<ClientChain>,
         }
@@ -347,12 +311,9 @@ impl<'de> Deserialize<'de> for RuleConfig {
                     None
                 };
 
-                let client_chains = convert_legacy_proxies(temp.client_proxies, temp.client_chains)
-                    .map_err(D::Error::custom)?;
-
                 RuleActionConfig::Allow {
                     override_address,
-                    client_chains,
+                    client_chains: temp.client_chains,
                 }
             }
             other => {
@@ -577,7 +538,7 @@ pub enum RuleActionRecord<C> {
 
         /// Multiple proxy chains for round-robin selection.
         /// Each chain is a sequence of hops.
-        /// Field name: `client_chains` (alias: `client_chain` for backward compatibility)
+        /// Field name: `client_chains` (singular alias: `client_chain`)
         ///
         /// - `NoneOrSome::Unspecified` → Default to single chain with direct hop
         /// - `NoneOrSome::None` → Error (validated later)
@@ -597,7 +558,6 @@ impl<'de> Deserialize<'de> for RuleActionConfig {
     {
         use serde::de::Error;
 
-        // Temporary struct to capture all possible fields including deprecated ones
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RuleActionTemp {
@@ -605,11 +565,8 @@ impl<'de> Deserialize<'de> for RuleActionConfig {
             action: Option<String>,
             #[serde(default)]
             override_address: Option<String>,
-            /// Legacy field - will be converted to client_chains
-            #[serde(alias = "client_proxy", default)]
-            client_proxies: NoneOrSome<ConfigSelection<ClientConfig>>,
             /// New field: multiple chains for round-robin selection
-            /// Alias: client_chain (singular) for backward compatibility
+            /// The singular spelling also accepts a single chain.
             #[serde(alias = "client_chain", default)]
             client_chains: NoneOrSome<ClientChain>,
         }
@@ -633,12 +590,9 @@ impl<'de> Deserialize<'de> for RuleActionConfig {
                     None
                 };
 
-                let client_chains = convert_legacy_proxies(temp.client_proxies, temp.client_chains)
-                    .map_err(D::Error::custom)?;
-
                 Ok(RuleActionConfig::Allow {
                     override_address,
-                    client_chains,
+                    client_chains: temp.client_chains,
                 })
             }
             other => Err(D::Error::custom(format!(

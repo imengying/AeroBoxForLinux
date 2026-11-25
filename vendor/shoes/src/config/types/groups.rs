@@ -147,31 +147,13 @@ struct RawClientGroup {
     #[serde(rename = "type", default = "default_group_type")]
     kind: String,
     default: Option<String>,
-    #[serde(
-        default,
-        alias = "client_chain",
-        deserialize_with = "deserialize_present"
-    )]
-    client_chains: Option<OneOrSome<ClientGroupMember>>,
-    #[serde(
-        default,
-        alias = "client_proxy",
-        deserialize_with = "deserialize_present"
-    )]
-    client_proxies: Option<OneOrSome<ConfigSelection<ClientConfig>>>,
+    #[serde(alias = "client_chain")]
+    client_chains: OneOrSome<ClientGroupMember>,
     url: Option<String>,
     interval: Option<u64>,
     timeout: Option<u64>,
     tolerance: Option<u16>,
     lazy: Option<bool>,
-}
-
-fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
 }
 
 fn default_group_type() -> String {
@@ -182,26 +164,7 @@ impl TryFrom<RawClientGroup> for ClientConfigGroup {
     type Error = String;
 
     fn try_from(raw: RawClientGroup) -> Result<Self, Self::Error> {
-        let client_chains = match (raw.client_chains, raw.client_proxies) {
-            (Some(_), Some(_)) => {
-                return Err("cannot specify both client_proxy/client_proxies and client_chain/client_chains in a client group".into());
-            }
-            (Some(chains), None) => chains,
-            (None, Some(proxies)) => {
-                log::warn!(
-                    "client_proxy/client_proxies is deprecated; use client_chain/client_chains. \
-                     Preserve group alternatives with explicit wrappers: [{{chain: [a]}}, {{chain: [b]}}]; \
-                     a bare [a, b] now specifies sequential hops."
-                );
-                match proxies {
-                    OneOrSome::One(proxy) => OneOrSome::One(ClientGroupMember::Client(proxy)),
-                    OneOrSome::Some(proxies) => OneOrSome::Some(
-                        proxies.into_iter().map(ClientGroupMember::Client).collect(),
-                    ),
-                }
-            }
-            (None, None) => return Err("client group requires client_chain/client_chains".into()),
-        };
+        let client_chains = raw.client_chains;
         let kind = raw.kind.as_str();
         if kind != "selector" && raw.default.is_some() {
             return Err("default is only valid for selector groups".into());
@@ -285,49 +248,6 @@ mod group_type_tests {
     }
 
     #[test]
-    fn removed_fallback_type_and_health_check_are_rejected() {
-        let base = json!({"client_group":"out", "type":"fallback", "client_proxies":["direct"]});
-        let error = serde_json::from_value::<ClientConfigGroup>(base.clone()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unknown client group type: fallback")
-        );
-        for kind in ["fallback", "round-robin", "selector", "url-test"] {
-            for check in [
-                None,
-                Some(json!(null)),
-                Some(json!({
-                    "url":"https://probe.invalid/", "interval_secs":30
-                })),
-            ] {
-                let mut raw = base.clone();
-                raw["type"] = json!(kind);
-                if kind == "url-test" {
-                    raw["url"] = json!("https://probe.invalid/");
-                }
-                let rejected = kind == "fallback" || check.is_some();
-                if let Some(check) = check {
-                    raw["health_check"] = check;
-                }
-                assert_eq!(
-                    serde_json::from_value::<ClientConfigGroup>(raw.clone()).is_err(),
-                    rejected,
-                    "JSON {raw}"
-                );
-                assert_eq!(
-                    serde_yaml::from_str::<ClientConfigGroup>(
-                        &serde_yaml::to_string(&raw).unwrap()
-                    )
-                    .is_err(),
-                    rejected,
-                    "YAML {raw}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn url_test_defaults_and_serialization_use_only_type() {
         let raw = json!({"client_group":"auto", "type":"url-test", "url":"http://probe.invalid/", "client_chains":["direct"]});
         let group: ClientConfigGroup = serde_json::from_value(raw).unwrap();
@@ -357,21 +277,7 @@ mod group_type_tests {
     }
 
     #[test]
-    fn legacy_group_fields_keep_alternatives_and_serialize_unambiguously() {
-        for field in ["client_proxy", "client_proxies"] {
-            let group: ClientConfigGroup = serde_json::from_value(json!({
-                "client_group": "rr", field: ["a", "b"]
-            }))
-            .unwrap();
-            assert_eq!(group.client_chains.len(), 2);
-            let encoded = serde_json::to_value(&group).unwrap();
-            assert!(encoded.get(field).is_none());
-            let decoded: ClientConfigGroup = serde_json::from_value(encoded).unwrap();
-            assert_eq!(decoded.client_chains.len(), 2);
-            for (member, expected) in decoded.client_chains.iter().zip(["a", "b"]) {
-                assert_eq!(member.explicit_name(), Some(expected));
-            }
-        }
+    fn group_chain_serialization_is_unambiguous() {
         let group: ClientConfigGroup = serde_json::from_value(json!({
             "client_group": "rr",
             "client_chains": ["direct"]
@@ -390,7 +296,7 @@ mod group_type_tests {
     }
 
     #[test]
-    fn url_test_rejects_removed_unknown_and_incompatible_group_settings() {
+    fn url_test_rejects_invalid_group_settings() {
         let base = json!({"client_group":"auto", "type":"url-test", "url":"http://probe.invalid/", "client_chains":["direct"]});
         for (field, value) in [
             ("strategy", json!("url-test")),
@@ -487,13 +393,7 @@ fn policy_rules<'de, D: serde::Deserializer<'de>>(
                 D::Error::custom(format!("rules: {error}"))
             }
         };
-        let policy = if value.is_string() {
-            Err(serde_yaml::Error::custom(
-                "action-free file sources moved to rule_source_group; rule_group requires policy objects",
-            ))
-        } else {
-            serde_yaml::from_value(value)
-        };
+        let policy = serde_yaml::from_value(value);
         policies.push(policy.map_err(context)?);
     }
     Ok(if is_list {
@@ -704,26 +604,14 @@ impl<'de> serde::de::Deserialize<'de> for Config {
             Error::custom("Expected a YAML mapping for Config, but found a different type")
         })?;
 
-        if map.contains_key("rule_cache_dir") {
-            return Err(Error::custom(
-                "rule_cache_dir must be inside global_settings",
-            ));
-        }
-        if map.contains_key("global_settings") || map.contains_key("global_limits") {
+        if map.contains_key("global_settings") {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct GlobalSettingsEntry {
-                #[serde(alias = "global_limits")]
                 global_settings: Option<GlobalSettings>,
             }
-            let legacy = map.contains_key("global_limits");
             let entry = serde_yaml::from_value::<GlobalSettingsEntry>(value)
                 .map_err(|e| Error::custom(format!("invalid global settings: {e}")))?;
-            if legacy {
-                log::warn!(
-                    "global_limits will be deprecated in the next version; rename it to global_settings"
-                );
-            }
             return Ok(Config::GlobalSettings(
                 entry.global_settings.unwrap_or_default(),
             ));
@@ -756,11 +644,7 @@ impl<'de> serde::de::Deserialize<'de> for Config {
         let is_tun_config = has_device_name || has_device_fd;
 
         // Try to determine which variant based on fields
-        if map.contains_key(Value::String("rule_set".to_string())) {
-            Err(Error::custom(
-                "rule_set was replaced by rule_source_group with file paths in rules",
-            ))
-        } else if map.contains_key("certificate_source") {
+        if map.contains_key("certificate_source") {
             serde_yaml::from_value(value)
                 .map(Config::CertificateSource)
                 .map_err(|e| {

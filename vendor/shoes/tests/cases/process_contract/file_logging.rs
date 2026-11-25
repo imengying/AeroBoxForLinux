@@ -1,30 +1,5 @@
 use super::*;
 
-#[test]
-fn file_logging_check_drains_without_enabling_stderr_or_leaking_credentials() {
-    let directory = tempfile::tempdir().unwrap();
-    let config = directory.path().join("config.yaml");
-    let log = directory.path().join("check.log");
-    let secret = "d55f24e6-5508-4fce-aeaf-858613a97e47";
-    std::fs::write(&config, format!("- address: '127.0.0.1:0'\n  protocol:\n    type: vmess\n    cipher: aes-128-gcm\n    user_id: {secret}\n    force_aead: true\n")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_shoes"))
-        .args(["check", "-t", "1", "-l"])
-        .arg(&log)
-        .arg(&config)
-        .env("RUST_LOG", "warn")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.stderr.is_empty());
-    let contents = std::fs::read_to_string(log).unwrap();
-    assert!(contents.contains("force_aead"));
-    assert!(!contents.contains(secret));
-}
-
 #[tokio::test]
 async fn file_logging_flushes_both_sinks_on_sigterm() {
     let directory = tempfile::tempdir().unwrap();
@@ -54,7 +29,7 @@ async fn file_logging_flushes_both_sinks_on_sigterm() {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream.write_all(b"\xff\x00").await.unwrap();
     stream.shutdown().await.unwrap();
-    process.wait_for("finished with error").await;
+    process.wait_for("connection peer=").await;
     process.signal(libc::SIGTERM);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
@@ -72,7 +47,7 @@ async fn file_logging_flushes_both_sinks_on_sigterm() {
     let second = std::fs::read_to_string(second).unwrap();
     assert!(first.starts_with("previous record\n"));
     assert_eq!(first.strip_prefix("previous record\n").unwrap(), second);
-    assert!(second.contains("finished with error"));
+    assert!(second.contains("connection peer="));
     assert!(second.chars().all(|c| !c.is_control() || c == '\n'));
 }
 

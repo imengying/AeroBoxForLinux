@@ -50,22 +50,11 @@ pub(crate) fn proxy_url(config: &Value) -> Result<url::Url> {
         .as_str()
         .context("入站缺少地址")?
         .parse()?;
-    let host = if address.ip().is_unspecified() {
-        if address.is_ipv4() {
-            "127.0.0.1"
-        } else {
-            "[::1]"
-        }
-        .to_owned()
-    } else if address.is_ipv4() {
-        address.ip().to_string()
-    } else {
-        format!("[{}]", address.ip())
-    };
-    Ok(url::Url::parse(&format!(
-        "http://{host}:{}",
-        address.port()
-    ))?)
+    ensure!(
+        address.ip().is_loopback() && address.port() > 0,
+        "代理入口必须是本机地址"
+    );
+    Ok(url::Url::parse(&format!("http://{address}"))?)
 }
 
 fn client_builder(config: Option<&Value>) -> Result<reqwest::blocking::ClientBuilder> {
@@ -313,13 +302,21 @@ mod tests {
     #[test]
     fn resolves_ipv4_and_ipv6_native_listeners() {
         for (address, expected) in [
-            ("0.0.0.0:2080", "http://127.0.0.1:2080/"),
-            ("[::]:2080", "http://[::1]:2080/"),
+            ("127.0.0.1:2080", "http://127.0.0.1:2080/"),
+            ("[::1]:2080", "http://[::1]:2080/"),
         ] {
             let config = json!([{"name":"mixed-in","address":address,"protocol":{"type":"mixed"}}]);
             assert_eq!(proxy_url(&config).unwrap().as_str(), expected);
         }
         assert!(proxy_url(&json!([])).is_err());
+        for address in [
+            "0.0.0.0:2080",
+            "[::]:2080",
+            "192.168.1.1:2080",
+            "127.0.0.1:0",
+        ] {
+            assert!(proxy_url(&json!([{"name":"mixed-in","address":address}])).is_err());
+        }
     }
 
     #[test]

@@ -70,7 +70,7 @@ fn uuid_imports(kind: &str, identity: &str, aid: u16) -> [String; 3] {
 }
 
 #[test]
-fn vmess_and_vless_accept_uuid_identity_bytes_without_version_or_variant_restrictions() {
+fn vmess_and_vless_import_uuid_and_named_identities() {
     for identity in [
         "6ba7b810-9dad-11d1-80b4-00c04fd430c8", // Version 1.
         "6ba7b810-9dad-31d1-80b4-00c04fd430c8", // Version 3, common in subscriptions.
@@ -78,6 +78,8 @@ fn vmess_and_vless_accept_uuid_identity_bytes_without_version_or_variant_restric
         "6ba7b810-9dad-31d1-c0b4-00c04fd430c8", // Non-RFC variant.
         "00000000-0000-0000-0000-000000000000", // Nil is still a 16-byte identity.
         "6BA7B8109DAD31D180B400C04FD430C8",     // Compact uppercase form.
+        "AeroBox-user",                         // Named identity mapped to UUID v5.
+        "c0ffee00-9dad-31d1-80b4-00c04fd430zz", // Non-UUID strings use the same mapping.
     ] {
         for (kind, aid) in [("vmess", 0), ("vmess", 64), ("vless", 0)] {
             for source in uuid_imports(kind, identity, aid) {
@@ -88,35 +90,6 @@ fn vmess_and_vless_accept_uuid_identity_bytes_without_version_or_variant_restric
                     converted["client_chains"][0]["chain"][0]["protocol"]["user_id"],
                     identity
                 );
-            }
-        }
-    }
-}
-
-#[test]
-fn malformed_uuid_spellings_are_rejected_without_exposing_credentials() {
-    for identity in [
-        "c0ffee0-09dad-31d1-80b4-00c04fd430c8", // Four dashes in the wrong positions.
-        "c0ffee00--9dad-31d1-80b4-00c04fd430c8",
-        "c0ffee00-9dad-31d1-80b4-00c04fd430c", // Missing hex digit.
-        "c0ffee009dad31d180b400c04fd430",      // Missing byte.
-        "c0ffee009dad31d180b400c04fd430c800",  // Extra byte.
-        "c0ffee00-9dad-31d1-80b4-00c04fd430zz", // Non-hex digits.
-    ] {
-        for kind in ["vmess", "vless"] {
-            for source in uuid_imports(kind, identity, 64) {
-                for error in [
-                    subscription::parse(&source).unwrap_err(),
-                    subscription::parse_with_skips(&source).unwrap_err(),
-                ] {
-                    let message = format!("{error:#}");
-                    assert!(message.to_ascii_lowercase().contains("uuid"), "{message}");
-                    assert!(
-                        !message.contains(identity),
-                        "error exposed the UUID credential"
-                    );
-                    assert!(!message.contains("c0ffee"), "error exposed a UUID prefix");
-                }
             }
         }
     }

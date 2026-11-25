@@ -48,8 +48,6 @@ impl Ui {
         };
         let subscription_id = subscription.id.clone();
         let test = floating_button("aerobox-bolt-symbolic", "测速全部");
-        test.remove_css_class("suggested-action");
-        test.add_css_class("secondary-action");
         test.set_halign(gtk::Align::End);
         test.set_valign(gtk::Align::End);
         test.set_margin_end(30);
@@ -71,7 +69,7 @@ impl Ui {
         grid.set_column_spacing(8);
         grid.set_row_spacing(8);
         grid.set_valign(gtk::Align::Start);
-        follow_width(&grid, 180, 8, 8, true);
+        follow_width(&grid, 148, 8, 8, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -149,9 +147,7 @@ impl NodesPanel {
                 let name = label(&node.name, "node-name");
                 name.set_hexpand(true);
                 name.set_valign(gtk::Align::Start);
-                name.set_wrap(true);
-                name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-                name.set_lines(2);
+                name.set_wrap(false);
                 name.set_width_chars(1);
                 name.set_max_width_chars(18);
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -169,14 +165,15 @@ impl NodesPanel {
                 title.append(&indicator);
                 content.append(&title);
                 let protocol = label(&node.protocol, "muted node-protocol");
+                protocol.set_hexpand(true);
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                content.append(&protocol);
                 let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 footer.add_css_class("node-card-footer");
-                let delay = label("未测速", "muted node-delay");
-                delay.set_hexpand(true);
-                footer.append(&delay);
+                footer.append(&protocol);
+                let delay = label("", "node-delay");
+                delay.set_xalign(0.5);
+                delay.set_width_chars(7);
                 let test = gtk::Button::new();
                 test.add_css_class("flat");
                 test.add_css_class("node-test-button");
@@ -190,6 +187,7 @@ impl NodesPanel {
                 let test_indicator = gtk::Stack::new();
                 test_indicator.set_size_request(16, 16);
                 test_indicator.add_named(&bolt(), Some("icon"));
+                test_indicator.add_named(&delay, Some("result"));
                 let test_spinner = gtk::Spinner::new();
                 test_indicator.add_named(&test_spinner, Some("busy"));
                 test.set_child(Some(&test_indicator));
@@ -249,7 +247,7 @@ impl NodesPanel {
                     .find(|old| old.node_tag == node.node_tag)
                     .and_then(|old| old.delay_ms);
             }
-            update_delay(&card.delay, node.delay_ms);
+            update_delay(card, node.delay_ms);
         }
         drop(previous);
         self.grid.set_visible(!nodes.is_empty());
@@ -277,8 +275,13 @@ impl NodesPanel {
                 "启动后测速"
             }));
             card.test_spinner.set_spinning(busy);
-            card.test_indicator
-                .set_visible_child_name(if busy { "busy" } else { "icon" });
+            card.test_indicator.set_visible_child_name(if busy {
+                "busy"
+            } else if card.delay.text().is_empty() {
+                "icon"
+            } else {
+                "result"
+            });
         }
     }
 
@@ -401,13 +404,14 @@ impl NodesPanel {
             match result {
                 Ok(delay) => {
                     node.delay_ms = Some(delay);
-                    update_delay(&card.delay, Some(delay));
+                    update_delay(card, Some(delay));
                     card.delay.set_tooltip_text(None);
                 }
                 Err(error) => {
                     node.delay_ms = None;
-                    update_delay(&card.delay, None);
+                    update_delay(card, None);
                     card.delay.set_text(if stopped { "未启动" } else { "失败" });
+                    card.test_indicator.set_visible_child_name("result");
                     card.delay.add_css_class("latency-bad");
                     card.delay.set_tooltip_text(Some(&format!("{error:#}")));
                 }
@@ -489,8 +493,11 @@ impl NodesPanel {
     }
 }
 
-fn update_delay(label: &gtk::Label, delay: Option<u64>) {
+fn update_delay(card: &NodeCard, delay: Option<u64>) {
+    let label = &card.delay;
     label.set_text(&delay_text(delay));
+    card.test_indicator
+        .set_visible_child_name(if delay.is_some() { "result" } else { "icon" });
     label.remove_css_class("latency-good");
     label.remove_css_class("latency-medium");
     label.remove_css_class("latency-bad");
@@ -509,7 +516,7 @@ fn delay_text(delay: Option<u64>) -> String {
     match delay {
         Some(0) => "超时".into(),
         Some(ms) => format!("{ms} ms"),
-        None => "未测速".into(),
+        None => String::new(),
     }
 }
 
@@ -523,8 +530,13 @@ pub(super) fn smoke_delay_colors(ui: &Rc<Ui>) -> Result<()> {
         (&cards[0], Some(180), "latency-good"),
         (&cards[1], Some(420), "latency-medium"),
     ] {
-        update_delay(&card.delay, delay);
+        update_delay(card, delay);
         ensure!(card.delay.has_css_class(class), "延迟没有分级着色");
+        ensure!(
+            card.test_indicator.visible_child_name().as_deref() == Some("result")
+                && card.delay.is_ancestor(&card.test),
+            "测速结果没有显示在测试按钮内"
+        );
         ensure!(!card.delay.has_css_class("muted"), "延迟仍是次要文字色");
     }
     Ok(())
@@ -539,7 +551,7 @@ pub(super) fn smoke_delay_failure(ui: &Rc<Ui>) -> Result<()> {
         (&cards[0], Some(920), "latency-bad"),
         (&cards[1], Some(0), "latency-bad"),
     ] {
-        update_delay(&card.delay, delay);
+        update_delay(card, delay);
         ensure!(card.delay.has_css_class(class), "高延迟或超时没有警示色");
     }
     Ok(())
@@ -631,7 +643,7 @@ pub(super) fn smoke_fullscreen(ui: &Rc<Ui>) -> Result<()> {
     ensure!(columns > 3, "全屏节点没有扩展列数: {columns}");
     ensure!(
         cards.iter().all(|card| {
-            card.child.width() > 180
+            card.child.width() > 148
                 && card.child.width() < 330
                 && card.test.width() >= 28
                 && card.test.height() >= 28
@@ -685,13 +697,19 @@ pub(super) fn smoke_nodes(
             .take_while(|card| card.child.allocation().y() == first_y)
             .count();
         ensure!(
-            first_row == 3,
+            first_row == 4,
             "常规窗口第一行显示了 {first_row} 个节点: grid={} max={}",
             panel.grid.width(),
             panel.grid.max_children_per_line()
         );
     }
     for card in cards.iter() {
+        ensure!(
+            !descendants(&card.child).iter().any(|widget| widget
+                .downcast_ref::<gtk::Label>()
+                .is_some_and(|label| label.text() == "未测速")),
+            "未测速节点仍显示占位说明"
+        );
         ensure!(
             !descendants(&card.child)
                 .iter()

@@ -9,7 +9,7 @@ use crate::dns::ParsedDnsUrl;
 use crate::option_util::{NoneOrOne, NoneOrSome, OneOrSome};
 use crate::reality::{decode_private_key, decode_short_id};
 use crate::thread_util::get_num_threads;
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::{parse_user_id, parse_uuid};
 
 use super::compiler::{self, DraftClient};
 use super::plan_ops;
@@ -2036,7 +2036,7 @@ fn validate_client_proxy_config(
         ClientProxyConfig::Vmess {
             user_id, cipher, ..
         } => {
-            parse_uuid(user_id)?;
+            parse_user_id(user_id)?;
             validate_vmess_cipher(cipher)?;
         }
         ClientProxyConfig::Vless {
@@ -2046,7 +2046,7 @@ fn validate_client_proxy_config(
             h2mux,
             ..
         } => {
-            parse_uuid(user_id)?;
+            parse_user_id(user_id)?;
             if encryption.is_disabled() {
                 if *vision {
                     return Err(std::io::Error::new(
@@ -2443,12 +2443,12 @@ fn validate_server_proxy_scalars(
             fallback,
             ..
         } => {
-            parse_uuid(user_id)?;
+            parse_user_id(user_id)?;
             if decryption.is_disabled() {
                 if *vision || encryption_limits.is_some() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "VLESS-level vision and encryption_limits require native decryption; for legacy Vision move vision: true to TLS/REALITY (older versions ignored it on VLESS)",
+                        "VLESS vision and encryption_limits require native decryption; TLS/REALITY Vision is configured on its transport",
                     ));
                 }
             } else {
@@ -2467,7 +2467,7 @@ fn validate_server_proxy_scalars(
         ServerProxyConfig::Vmess {
             user_id, cipher, ..
         } => {
-            parse_uuid(user_id)?;
+            parse_user_id(user_id)?;
             validate_vmess_cipher(cipher)?;
         }
         ServerProxyConfig::TuicV5 { uuid, .. } => {

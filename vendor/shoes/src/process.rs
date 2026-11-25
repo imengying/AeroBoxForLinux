@@ -313,30 +313,12 @@ async fn prepare_tracking_mode(
     }
     validated.refresh_catalog()?;
     dns::check_interception(&validated.configs, &validated.dns_groups).await?;
-    let mut dns = build_runtime_dns(&validated, previous)
-        .await
-        .map_err(|error| {
-            let live = resources::limits().quic_memory_bytes;
-            let candidate = validated.global_limits.quic_memory_bytes;
-            if live == candidate {
-                error
-            } else {
-                io::Error::new(error.kind(), format!(
-                    "{error}; DNS preparation uses the live QUIC cap {live:?}, not the candidate cap {candidate:?}"
-                ))
-            }
-        })?;
-    let certificates = match previous_servers {
-        Some(previous) => {
-            crate::certificates::Registry::prepare_with_retiring(
-                &mut validated,
-                Some(&previous.certificates),
-                &previous.validated.configs,
-            )
-            .await?
-        }
-        None => crate::certificates::Registry::prepare(&mut validated, None).await?,
-    };
+    let mut dns = build_runtime_dns(&validated, previous).await?;
+    let certificates = crate::certificates::Registry::prepare(
+        &mut validated,
+        previous_servers.map(|previous| &previous.certificates),
+    )
+    .await?;
     let generation = if let (Some((id, rules)), Some(catalog)) =
         (control_generation, validated.catalog.take())
     {
@@ -545,9 +527,8 @@ impl RunningServers {
     }
 
     async fn start(&mut self, prepared: &mut PreparedServers) -> io::Result<()> {
-        // Synchronize before retryable binds, including deferred HTTP-01 listeners.
+        // Synchronize before binding listeners.
         self.configure_runtime(prepared).await?;
-        prepared.certificates.bind_pending().await?;
         self.reporter = Some(resources::ResourceReporter::start());
         self.dns_snapshots = Some(prepared.dns.snapshot_task());
         #[cfg(unix)]
@@ -666,7 +647,7 @@ impl RunningServers {
         if let Some(control) = control {
             control.runtime.resume().await?;
         }
-        // Workers can update durable ACME state, so activation starts them last.
+        // Activate certificate watchers after the listeners are ready.
         prepared.certificates.start().await;
         prepared.tcp.activate();
         Ok(())
@@ -1190,17 +1171,14 @@ async fn run_inner(
                 return Err(error);
             }
         };
-        candidate.tcp = match TcpListeners::prepare(
-            &candidate.validated.configs,
-            &prepared.tcp,
-            &prepared.certificates.listener_addresses(),
-        ) {
-            Ok(listeners) => listeners,
-            Err(error) => {
-                report_reload_rejection(&error, reconnecting);
-                continue;
-            }
-        };
+        candidate.tcp =
+            match TcpListeners::prepare(&candidate.validated.configs, &prepared.tcp, &[]) {
+                Ok(listeners) => listeners,
+                Err(error) => {
+                    report_reload_rejection(&error, reconnecting);
+                    continue;
+                }
+            };
         if let (Some(control), Some(generation)) = (control.as_ref(), candidate.generation.as_ref())
             && let Err(error) = control.runtime.begin_activation(generation).await
         {
@@ -1458,7 +1436,10 @@ impl EmbeddedProcess {
         };
         if cancelled.is_cancelled() {
             process.shutdown().await?;
-            return Err(io::Error::new(io::ErrorKind::Interrupted,"startup cancelled"));
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "startup cancelled",
+            ));
         }
         let activate = process
             .lifetime
@@ -1516,11 +1497,8 @@ impl EmbeddedProcess {
             .await?;
         #[cfg(unix)]
         candidate.tun_fds.extend(descriptors);
-        candidate.tcp = TcpListeners::prepare(
-            &candidate.validated.configs,
-            &self.prepared.tcp,
-            &self.prepared.certificates.listener_addresses(),
-        )?;
+        candidate.tcp =
+            TcpListeners::prepare(&candidate.validated.configs, &self.prepared.tcp, &[])?;
         if let (Some(control), Some(generation)) = (&self.control, &candidate.generation) {
             control.runtime.begin_activation(generation).await?;
         }
@@ -1757,12 +1735,14 @@ impl EmbeddedProcess {
                     };
                     match event {
                         Event::Command(Some(command)) => {
-                            if let Some(command) = Self::query(command, self.control.as_ref(), &self.lifetime) {
+                            if let Some(command) =
+                                Self::query(command, self.control.as_ref(), &self.lifetime)
+                            {
                                 break Event::Command(Some(command));
                             }
                         }
                         Event::Network => match self.network.reconcile().await {
-                            Ok(false) => {},
+                            Ok(false) => {}
                             Ok(true) => break Event::Network,
                             Err(error) => break Event::Failed(error),
                         },
@@ -1815,10 +1795,14 @@ impl EmbeddedProcess {
                 }
                 Event::Command(Some(Command::Select(group, member, reply))) => {
                     let result = async {
-                        let control = self.control.as_ref().ok_or_else(|| io::Error::other("controller unavailable"))?;
+                        let control = self
+                            .control
+                            .as_ref()
+                            .ok_or_else(|| io::Error::other("controller unavailable"))?;
                         let generation = control.runtime.generation()?;
                         control.runtime.select(generation.id, group, member).await
-                    }.await;
+                    }
+                    .await;
                     let _ = reply.send(result);
                 }
                 Event::Command(Some(_)) => unreachable!("query commands handled while polling"),

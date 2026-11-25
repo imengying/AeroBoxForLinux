@@ -397,12 +397,7 @@ impl SocketConnectorImpl {
                         + settings.session_receive_window as usize;
                     transport_config
                         .receive_window(settings.session_receive_window.into())
-                        .stream_receive_window(
-                            settings
-                                .stream_receive_window
-                                .min(settings.session_receive_window)
-                                .into(),
-                        )
+                        .stream_receive_window(settings.stream_receive_window.into())
                         .datagram_receive_buffer_size(None)
                         .datagram_send_buffer_size(0);
                 }

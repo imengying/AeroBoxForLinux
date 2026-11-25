@@ -162,9 +162,6 @@ fn pem_dependencies(
                 {
                     paths.extend([cert.clone(), key.clone()]);
                 }
-                crate::certificates::SourceConfig::Acme(acme) => {
-                    paths.extend(acme.ca_cert.iter().cloned());
-                }
                 _ => {}
             }
         }
@@ -830,9 +827,6 @@ mod tests {
             {"dns_group": "dns", "dns_servers": [{"url": "udp://127.0.0.1:53", "client_chain": [client("dns")]}]},
             {"device_fd": 42, "rules": [{"masks": "0.0.0.0/0", "action": "allow", "client_chain": [client("tun")]}]},
             {"rule_group": "rules", "rules": [{"masks": "0.0.0.0/0", "action": "allow", "client_chain": [client("group")]}]},
-            {"certificate_source": "acme", "type": "acme", "domains": ["proxy.test"],
-                "directory_url": "http://127.0.0.1:9/directory", "state_dir": "unused", "ca_cert": "acme-ca.crt",
-                "challenge": {"type": "http01", "listen": ["127.0.0.1:18080"]}}
         ]);
         let mut configs: Vec<Config> =
             serde_yaml::from_value(serde_yaml::to_value(value).unwrap()).unwrap();
@@ -858,7 +852,6 @@ mod tests {
             "tun.key",
             "group.crt",
             "group.key",
-            "acme-ca.crt",
         ]
         .into_iter()
         .map(PathBuf::from)

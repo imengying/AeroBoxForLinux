@@ -62,7 +62,6 @@ impl Ui {
         toggle.set_margin_end(30);
         toggle.set_margin_bottom(24);
         if status.running {
-            toggle.remove_css_class("suggested-action");
             toggle.add_css_class("destructive-action");
         }
         toggle.set_sensitive(
@@ -136,16 +135,16 @@ impl Ui {
         let exit_ip = label("—", "exit-ip");
         exit_ip.set_hexpand(true);
         exit_ip.set_vexpand(true);
-        exit_ip.set_xalign(0.5);
-        exit_ip.set_justify(gtk::Justification::Center);
+        exit_ip.set_xalign(0.0);
+        exit_ip.set_justify(gtk::Justification::Left);
         exit_ip.set_wrap(true);
         exit_ip.set_wrap_mode(gtk::pango::WrapMode::Char);
         exit_ip.set_width_chars(1);
         exit_ip.set_max_width_chars(39);
         content.append(&exit_ip);
         let exit_ipv6 = label("", "exit-ip-secondary muted");
-        exit_ipv6.set_xalign(0.5);
-        exit_ipv6.set_justify(gtk::Justification::Center);
+        exit_ipv6.set_xalign(0.0);
+        exit_ipv6.set_justify(gtk::Justification::Left);
         exit_ipv6.set_wrap(true);
         exit_ipv6.set_wrap_mode(gtk::pango::WrapMode::Char);
         exit_ipv6.set_width_chars(1);
@@ -185,7 +184,7 @@ impl Ui {
         modes.add_css_class("mode-selector");
         let mut first: Option<gtk::ToggleButton> = None;
         let mut mode_buttons = Vec::new();
-        for (title, value) in [("规则", "rule"), ("全局", "global"), ("直连", "direct")] {
+        for (title, value) in [("规则", "rule"), ("全局", "global")] {
             let button = gtk::ToggleButton::with_label(title);
             if let Some(first) = &first {
                 button.set_group(Some(first));
@@ -443,8 +442,8 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
     let (text_x, _) = dashboard.exit_ip.layout_offsets();
     let (_, logical) = dashboard.exit_ip.layout().pixel_extents();
     anyhow::ensure!(
-        ((text_x + logical.x()) * 2 + logical.width() - dashboard.exit_ip.width()).abs() <= 2,
-        "出口 IP 未水平居中: offset={text_x}, logical=({}, {}), width={}",
+        (text_x + logical.x()).abs() <= 2 && dashboard.exit_ipv6.xalign() == 0.0,
+        "出口 IP 未左对齐: offset={text_x}, logical=({}, {}), width={}",
         logical.x(),
         logical.width(),
         dashboard.exit_ip.width()
@@ -461,7 +460,8 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
     let content = ui.body.first_child().context("首页没有内容")?;
     let scroll = ui.scroll.vadjustment().value();
-    for mode in ["global", "direct", "rule"] {
+    anyhow::ensure!(dashboard.modes.len() == 2, "出站模式应只有规则与全局");
+    for mode in ["global", "rule"] {
         let button = dashboard
             .modes
             .iter()
@@ -710,15 +710,10 @@ impl Dashboard {
             );
             // A running child can be stopped while startup waits for rules or API readiness.
             button.set_sensitive(status.running);
-            for (class, active) in [
-                ("suggested-action", !status.running),
-                ("destructive-action", status.running),
-            ] {
-                if active {
-                    button.add_css_class(class);
-                } else {
-                    button.remove_css_class(class);
-                }
+            if status.running {
+                button.add_css_class("destructive-action");
+            } else {
+                button.remove_css_class("destructive-action");
             }
         }
         if ui.jobs.get() > 0 {

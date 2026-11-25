@@ -12,6 +12,7 @@ use std::{
     fs,
     io::Read,
     mem::DropGuard,
+    num::NonZeroU16,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -48,6 +49,7 @@ struct Running {
 }
 pub struct Service {
     pub store: Mutex<Store>,
+    local_port: NonZeroU16,
     running: Mutex<Running>,
     operation: Mutex<()>,
     logs: Arc<Mutex<VecDeque<String>>>,
@@ -67,8 +69,14 @@ struct SubscriptionAttempt {
 }
 impl Service {
     pub fn new(store: Store) -> Arc<Self> {
+        Self::with_local_port(store, NonZeroU16::new(2080).unwrap())
+    }
+    /// Isolated service instances and benchmarks can select a private local
+    /// endpoint. This is not a persisted preference or an application option.
+    pub fn with_local_port(store: Store, local_port: NonZeroU16) -> Arc<Self> {
         Arc::new(Self {
             store: Mutex::new(store),
+            local_port,
             running: Mutex::new(Running::default()),
             operation: Mutex::new(()),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -81,6 +89,9 @@ impl Service {
             next_generation: AtomicU64::new(1),
             starting: Mutex::new(None),
         })
+    }
+    pub fn local_proxy_port(&self) -> u16 {
+        self.local_port.get()
     }
     pub fn shutdown(&self) -> Result<()> {
         self.closing.store(true, Ordering::SeqCst);
@@ -152,7 +163,7 @@ impl Service {
         Ok(self.prepare_current(&self.snapshot())?.config)
     }
     fn prepare_current(&self, state: &State) -> Result<Prepared> {
-        runtime::prepare(state, &self.dir())
+        runtime::prepare(state, &self.dir(), self.local_port)
     }
     pub fn check_current(&self) -> Result<()> {
         let _op = self.operation.lock().unwrap();
@@ -280,8 +291,8 @@ impl Service {
             return self.restore_proxy();
         }
         let mut saved = self.proxy.lock().unwrap();
-        let prepared = self.running_config()?;
-        let server = format!("127.0.0.1:{}", prepared.settings.mixed_port);
+        ensure!(self.status().running, "请先启动连接");
+        let server = format!("127.0.0.1:{}", self.local_port);
         if saved.is_some() && platform::verify_proxy(&server, "mixed")? {
             return Ok(());
         }
@@ -319,10 +330,7 @@ impl Service {
             .unwrap_or_else(|| self.snapshot().settings.routing_mode))
     }
     pub fn set_routing_mode(&self, mode: &str) -> Result<()> {
-        ensure!(
-            matches!(mode, "rule" | "global" | "direct"),
-            "无效的出站模式"
-        );
+        ensure!(matches!(mode, "rule" | "global"), "无效的出站模式");
         let _op = self.operation.lock().unwrap();
         let before = self.snapshot();
         let mut candidate = before.clone();
@@ -624,7 +632,7 @@ impl Service {
     pub fn diagnose_connection(&self) -> Result<String> {
         let generation = self.status().generation.context("请先启动连接")?;
         let prepared = self.running_config()?;
-        let server = format!("127.0.0.1:{}", prepared.settings.mixed_port);
+        let server = format!("127.0.0.1:{}", self.local_port);
         let reachable =
             std::net::TcpStream::connect_timeout(&server.parse()?, Duration::from_secs(2)).is_ok();
         let mut lines = vec![
@@ -1516,16 +1524,15 @@ mod tun_activation_tests {
         store
             .update(|state| {
                 state.settings.system_proxy = false;
-                state.settings.mixed_port = port;
                 state.settings.ipv6 = false;
-                state.settings.routing_mode = "direct".into();
+                state.settings.routing_mode = "global".into();
                 state.settings.direct_dns = "udp://127.0.0.1:9".into();
                 state.settings.remote_dns = "tcp://127.0.0.1:9".into();
                 state.rulesets.clear();
                 Ok(())
             })
             .unwrap();
-        let service = Service::new(store);
+        let service = Service::with_local_port(store, NonZeroU16::new(port).unwrap());
         service.import_subscription(model::Subscription {
             nodes: vec![serde_json::json!({"type":"socks", "tag":"test", "server":"127.0.0.1", "server_port":9})],
             ..Default::default()

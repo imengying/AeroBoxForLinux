@@ -103,18 +103,9 @@ impl TcpServerHandler for TlsServerHandler {
         let parsed_client_hello = read_client_hello(&mut server_stream).await?;
 
         let name = parsed_client_hello.requested_server_name.as_deref();
-        let mut target = name
+        let target = name
             .and_then(|name| self.sni_targets.get(name))
             .or(self.default_target.as_ref());
-        // Case-insensitive ACME lookup must not change REALITY/ShadowTLS routing.
-        if parsed_client_hello.acme_alpn
-            && target.is_none_or(|target| matches!(target, TlsServerTarget::Tls { .. }))
-        {
-            target = name
-                .and_then(|name| self.sni_targets.get(&name.to_ascii_lowercase()))
-                .filter(|target| matches!(target, TlsServerTarget::Tls { .. }))
-                .or(target);
-        }
         let target = target.ok_or_else(|| match name {
             Some(name) => {
                 std::io::Error::other(format!("No default target for unknown SNI: {name}"))
@@ -129,43 +120,6 @@ impl TcpServerHandler for TlsServerHandler {
                 effective_selector,
                 inner_protocol,
             } => {
-                if parsed_client_hello.acme_alpn {
-                    let config = certificate_source
-                        .as_ref()
-                        .and_then(|source| {
-                            source.challenge_config(
-                                parsed_client_hello.requested_server_name.as_deref(),
-                            )
-                        })
-                        .ok_or_else(|| {
-                            std::io::Error::other("no pending TLS-ALPN-01 challenge for this SNI")
-                        })?;
-                    let mut connection =
-                        rustls::ServerConnection::new(config).map_err(std::io::Error::other)?;
-                    feed_rustls_server_connection(
-                        &mut connection,
-                        &parsed_client_hello.client_hello_frame,
-                    )?;
-                    connection
-                        .process_new_packets()
-                        .map_err(std::io::Error::other)?;
-                    let mut stream = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        CryptoTlsStream::handshake(
-                            server_stream,
-                            TlsConnection::new(connection),
-                            TlsReadMode::Stream,
-                            parsed_client_hello.client_reader.unparsed_data(),
-                        ),
-                    )
-                    .await??;
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        tokio::io::AsyncWriteExt::shutdown(&mut stream),
-                    )
-                    .await??;
-                    return Ok(TcpServerSetupResult::Session(Box::pin(async {})));
-                }
                 let ParsedClientHello {
                     client_hello_frame,
                     client_reader,
@@ -272,7 +226,9 @@ mod tests {
     use crate::port_forward_handler::PortForwardServerHandler;
 
     fn server_config(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> rustls::ServerConfig {
-        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
             .with_no_client_auth()
             .with_single_cert(
                 vec![cert.cert.der().clone()],
@@ -302,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acme_offers_preserve_reality_forwarding_and_case_sensitive_routing() {
+    async fn unrecognized_alpn_preserves_reality_forwarding_and_case_sensitive_routing() {
         use crate::client_proxy_chain::{ClientProxyChain, InitialHopEntry};
         use crate::tcp::socket_connector_impl::SocketConnectorImpl;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -366,12 +322,13 @@ mod tests {
                     None,
                     Arc::new(crate::resolver::NativeResolver::new()),
                 );
-                let mut config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_protocol_versions(&[
-                    &rustls::version::TLS12,
-                ]).unwrap()
-                .with_root_certificates(rustls::RootCertStore::empty())
-                .with_no_client_auth();
-                config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
+                let mut config =
+                    rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                        .with_protocol_versions(&[&rustls::version::TLS12])
+                        .unwrap()
+                        .with_root_certificates(rustls::RootCertStore::empty())
+                        .with_no_client_auth();
+                config.alpn_protocols = vec![b"unrecognized/1".to_vec()];
                 if !uppercase {
                     config.alpn_protocols.push(b"h2".to_vec());
                 }
@@ -427,9 +384,12 @@ mod tests {
         );
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert.cert.der().clone()).unwrap();
-        let mut client_config = rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider()).with_safe_default_protocol_versions().unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut client_config =
+            rustls::ClientConfig::builder_with_provider(aerobox_crypto::shared_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         // The smallest fragment rustls allows splits the ClientHello across many records.
         client_config.max_fragment_size = Some(32);
         let (server_io, client_io) = tokio::io::duplex(65536);

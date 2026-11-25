@@ -1,0 +1,51 @@
+name: Protocol interoperability
+
+on:
+  workflow_call:
+  schedule:
+    - cron: "37 3 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-interop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  independent-peers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.100.0"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.3"
+          cache-dependency-path: "vendor/**/go.sum"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev pkg-config
+      - name: Prepare pinned independent sing-box server
+        run: |
+          mkdir -p target/protocol-reference
+          cd target/protocol-reference
+          curl --fail --location --retry 3 --output peer.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz
+          echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  peer.tar.gz' | sha256sum --check --strict
+          tar -xzf peer.tar.gz --strip-components=1 sing-box-1.14.4-linux-amd64/sing-box
+          echo "AEROBOX_TEST_PEER=$PWD/sing-box" >> "$GITHUB_ENV"
+      - name: Test against independent protocol implementations
+        run: |
+          set -o pipefail
+          scripts/test-protocols.sh 2>&1 | tee target/protocol-interop.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: protocol-interop-log
+          path: target/protocol-interop.log
+          if-no-files-found: ignore

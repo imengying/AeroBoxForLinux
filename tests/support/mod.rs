@@ -33,6 +33,10 @@ pub fn free_port() -> u16 {
         .port()
 }
 
+pub fn service(store: Store) -> Arc<Service> {
+    Service::with_local_port(store, free_port().try_into().unwrap())
+}
+
 pub struct App {
     pub dir: tempfile::TempDir,
     pub service: Arc<Service>,
@@ -54,14 +58,13 @@ impl App {
                 state.settings.direct_dns = "udp://127.0.0.1:9".into();
                 state.settings.remote_dns = "tcp://127.0.0.1:9".into();
                 state.settings.routing_mode = "global".into();
-                state.settings.mixed_port = free_port();
                 state.rulesets.clear();
                 Ok(())
             })
             .unwrap();
         Self {
             dir,
-            service: Service::new(store),
+            service: service(store),
         }
     }
     pub fn import(&self, name: &str, nodes: Vec<Value>) -> String {
@@ -83,6 +86,21 @@ impl Drop for App {
 
 pub fn socks_node(name: &str, address: SocketAddr) -> Value {
     json!({"type":"socks", "tag":name, "server":address.ip().to_string(), "server_port":address.port()})
+}
+
+/// Exercise the ordinary rule path when a fixture needs an unproxied destination.
+pub fn route_all_direct(app: &App) {
+    app.service.set_routing_mode("rule").unwrap();
+    app.service
+        .save_ruleset(aerobox_for_linux::model::RuleSet {
+            name: "direct fixture destinations".into(),
+            action: "direct".into(),
+            content: json!({"version":3,"rules":[
+                {"domain_regex":[".*"]}, {"ip_cidr":["0.0.0.0/0","::/0"]}
+            ]}),
+            ..Default::default()
+        })
+        .unwrap();
 }
 
 pub struct Server {
@@ -234,7 +252,7 @@ pub fn request_via(service: &Service, url: &str, scheme: &str) -> reqwest::Resul
         .no_proxy()
         .proxy(reqwest::Proxy::all(format!(
             "{scheme}://127.0.0.1:{}",
-            service.snapshot().settings.mixed_port
+            service.local_proxy_port()
         ))?)
         .timeout(Duration::from_secs(4))
         .build()?
@@ -276,8 +294,7 @@ impl Drop for BlockStateWrite {
 }
 
 pub fn echo_tunnel(service: &Service, target: SocketAddr) -> TcpStream {
-    let mut stream =
-        TcpStream::connect(("127.0.0.1", service.snapshot().settings.mixed_port)).unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", service.local_proxy_port())).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();

@@ -20,7 +20,7 @@ async fn test_portforward_through_tls12_httpbin() -> Result<(), Box<dyn std::err
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: httpbin.org:443
         protocol:
           type: tls
@@ -85,7 +85,7 @@ async fn test_portforward_through_plain_tcp_google() -> Result<(), Box<dyn std::
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: google.com:80
         protocol:
           type: portforward
@@ -137,7 +137,7 @@ async fn test_portforward_through_tls13_cloudflare() -> Result<(), Box<dyn std::
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxy:
+      client_chain:
         address: cloudflare.com:443
         protocol:
           type: tls

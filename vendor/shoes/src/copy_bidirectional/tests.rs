@@ -90,6 +90,7 @@ pub(crate) struct Capture {
 #[derive(Default)]
 struct MemoryStream {
     input: std::io::Cursor<Vec<u8>>,
+    read_error: Option<io::Error>,
     output: Arc<Mutex<Capture>>,
     block_flush: bool,
     pending_at_eof: bool,
@@ -103,6 +104,11 @@ impl AsyncRead for MemoryStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.input.position() as usize == self.input.get_ref().len()
+            && let Some(error) = self.read_error.take()
+        {
+            return Poll::Ready(Err(error));
+        }
         if self.pending_at_eof && self.input.position() as usize == self.input.get_ref().len() {
             return Poll::Pending;
         }
@@ -168,6 +174,38 @@ impl AsyncPing for MemoryStream {
 }
 
 impl AsyncStream for MemoryStream {}
+
+#[tokio::test]
+async fn read_failure_flushes_verified_payload_under_backpressure_and_retains_error() {
+    let mut source = MemoryStream {
+        input: std::io::Cursor::new(b"verified payload".to_vec()),
+        read_error: Some(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            crate::diagnostics::TlsTruncation(io::ErrorKind::UnexpectedEof.into()),
+        )),
+        ..Default::default()
+    };
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let mut sink = MemoryStream {
+        write_limit: Some(3),
+        ..Default::default()
+    };
+    sink.output.lock().unwrap().write_release = Some(blocked);
+    let mut buffer = CopyBuffer::new(32, false);
+    let mut copy = std::pin::pin!(std::future::poll_fn(|cx| {
+        buffer.poll_copy(cx, Pin::new(&mut source), Pin::new(&mut sink))
+    }));
+    assert!(futures::poll!(&mut copy).is_pending());
+    release.send(()).unwrap();
+    let error = copy.await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    assert!(crate::diagnostics::contains::<
+        crate::diagnostics::TlsTruncation,
+    >(&error));
+    let output = sink.output.lock().unwrap();
+    assert_eq!(&output.data, b"verified payload");
+    assert!(output.flushes > 0);
+}
 
 struct WakeCount(AtomicUsize);
 

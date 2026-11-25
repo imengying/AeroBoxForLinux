@@ -69,7 +69,6 @@ fn subscription_dial_options_keep_units_and_reject_invalid_values() {
         ("connect_timeout", json!("1..5s")),
         ("connect_timeout", json!("4294967296ms")),
         ("tcp_keep_alive", json!("0s")),
-        ("tcp_keep_alive", json!("1500ms")),
         ("tcp_keep_alive_interval", json!("32768s")),
         ("disable_tcp_keep_alive", json!("true")),
         ("tcp_fast_open", json!("true")),
@@ -147,6 +146,10 @@ fn service_applies_keepalive_to_real_outbound_sockets() {
             json!({"tcp_keep_alive":"7s", "tcp_keep_alive_interval":"3s"}),
             Some((7, 3)),
         ),
+        (
+            json!({"tcp_keep_alive":"1500ms", "tcp_keep_alive_interval":"250ms"}),
+            Some((2, 1)),
+        ),
         (json!({"disable_tcp_keep_alive":true}), None),
     ] {
         let (connected, accepted) = mpsc::channel();
@@ -201,8 +204,7 @@ fn service_applies_keepalive_to_real_outbound_sockets() {
 }
 
 fn assert_dial_times_out(service: &Service) {
-    let mut stream =
-        TcpStream::connect(("127.0.0.1", service.snapshot().settings.mixed_port)).unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", service.local_proxy_port())).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();

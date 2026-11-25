@@ -125,6 +125,41 @@ fn logs_bounds(ui: &Rc<Ui>) -> Result<gtk::graphene::Rect> {
     ))
 }
 
+fn rule_controls(ui: &Rc<Ui>) -> Result<()> {
+    let mut columns = [None::<f32>; 3];
+    for row in descendants(&ui.body)
+        .iter()
+        .filter(|widget| widget.has_css_class("row-actions"))
+    {
+        let mut middle = None::<f32>;
+        for (index, name) in ["rule-enabled", "rule-settings", "rule-delete"]
+            .iter()
+            .enumerate()
+        {
+            let control = descendants(row)
+                .into_iter()
+                .find(|widget| widget.widget_name() == *name)
+                .context("缺少规则操作按钮")?;
+            let bounds = control
+                .compute_bounds(&ui.body)
+                .context("规则按钮尚未布局")?;
+            if let Some(x) = columns[index] {
+                anyhow::ensure!((bounds.x() - x).abs() < 1.0, "规则操作列未对齐: {name}");
+            } else {
+                columns[index] = Some(bounds.x());
+            }
+            let center = bounds.y() + bounds.height() / 2.0;
+            if let Some(y) = middle {
+                anyhow::ensure!((center - y).abs() < 1.0, "规则操作按钮未垂直居中");
+            } else {
+                middle = Some(center);
+            }
+        }
+    }
+    anyhow::ensure!(columns.iter().all(Option::is_some), "缺少规则操作列");
+    Ok(())
+}
+
 pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bool>>) {
     let mut current = 0;
     let floating_y = Cell::new(None::<f32>);
@@ -402,6 +437,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     ui.navigate(Page::Rules);
                 }
                 15 => {
+                    rule_controls(&ui)?;
                     let settings = ui.service.snapshot().settings;
                     anyhow::ensure!(
                         (settings.width, settings.height) == (1000, 680)

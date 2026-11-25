@@ -842,13 +842,14 @@ impl Ui {
                 format!("{action} · 本地")
             };
             let row = resource_row("view-list-bullet-symbolic", &item.name, &meta);
-            // Trailing controls live in one fixed-width slot so the switch,
-            // the "设置" button and the icon buttons line up across rows that
-            // have different numbers of actions.
+            // Keep common controls at the right edge; optional content/file
+            // actions precede them so every row shares the same three columns.
             let trailing = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             trailing.set_valign(gtk::Align::Center);
+            trailing.set_halign(gtk::Align::End);
             trailing.add_css_class("row-actions");
             let enabled = gtk::Switch::new();
+            enabled.set_widget_name("rule-enabled");
             enabled.set_active(item.enabled);
             enabled.set_valign(gtk::Align::Center);
             enabled.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -894,9 +895,8 @@ impl Ui {
                 }
                 glib::Propagation::Stop
             });
-            trailing.append(&enabled);
-            let edit = gtk::Button::with_label("设置");
-            edit.add_css_class("compact-action");
+            let edit = icon_button("emblem-system-symbolic", "规则设置");
+            edit.set_widget_name("rule-settings");
             let weak = Rc::downgrade(self);
             let id = item.id.clone();
             edit.connect_clicked(move |_| {
@@ -911,7 +911,6 @@ impl Ui {
                     editors::ruleset(&ui.window, ui.service.clone(), rules, ui.saved())
                 }
             });
-            trailing.append(&edit);
             if !item.is_remote() {
                 let content = icon_button("document-edit-symbolic", "编辑规则内容");
                 let weak = Rc::downgrade(self);
@@ -953,7 +952,11 @@ impl Ui {
                     trailing.append(&refresh);
                 }
             }
-            trailing.append(&self.delete_button("rulesets", &item.id, &item.name));
+            trailing.append(&enabled);
+            trailing.append(&edit);
+            let delete = self.delete_button("rulesets", &item.id, &item.name);
+            delete.set_widget_name("rule-delete");
+            trailing.append(&delete);
             row.append(&trailing);
             list.append(&row);
         }
@@ -1341,7 +1344,7 @@ fn update_action(button: &gtk::Button, icon: &str, title: &str) {
 
 fn floating_button(icon: &str, title: &str) -> gtk::Button {
     let button = gtk::Button::new();
-    button.add_css_class("suggested-action");
+    button.add_css_class("flat");
     button.add_css_class("floating-action");
     update_action(&button, icon, title);
     button

@@ -94,6 +94,11 @@ fn stats(dir: &std::path::Path) -> Value {
 #[tokio::test]
 #[ignore = "requires AEROBOX_ECH_PEER built from tests/fixtures/ech-peer"]
 async fn tcp_and_quic_ech_accept_rotation_rejection_and_public_auth_with_go() {
+    // The ordinary independent-peer suite also runs on hosted Linux runners
+    // without the TLS kernel module. Exercise offload only when explicitly
+    // requesting the kernel-dependent cases; never fall back after enabling it.
+    let kernel = std::env::var("AEROBOX_TEST_KTLS_REKEY").as_deref() == Ok("1");
+    eprintln!("ECH interoperability: kTLS={kernel}");
     tokio::time::timeout(Duration::from_secs(80), async {
         for quic in [false, true] {
             for mode in ["accept", "rotate", "reject", "badpublic"] {
@@ -160,7 +165,7 @@ async fn tcp_and_quic_ech_accept_rotation_rejection_and_public_auth_with_go() {
                             configuration(port, quic, verify, dir.path(), dynamic, !quic);
                         if let Some(profile) = profile {
                             input["protocol"]["options"]["client_fingerprint"] = profile.into();
-                            if verify {
+                            if verify && kernel {
                                 input["protocol"]["options"]["kernel_tx"] = true.into();
                                 input["protocol"]["options"]["kernel_rx"] = true.into();
                             }

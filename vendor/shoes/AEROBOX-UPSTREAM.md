@@ -22,8 +22,6 @@ domain-aware DNS rule matching, legacy VMess client authentication with bounded
 response parsing, and embedded network recovery. These changes are
 tracked by the parent repository.
 
-Protocol support is being validated incrementally. The repository README
-describes supported parameters and limitations. Server-side ACME issuance
-is deliberately unavailable in this client application; configured file
-certificates remain supported. Test-only reference peers are separate programs
-and are not runtime dependencies.
+Protocol support and parameter limitations are documented in
+[the application protocol guide](../../docs/protocols.md). Test-only reference
+peers are separate programs and are not runtime dependencies.

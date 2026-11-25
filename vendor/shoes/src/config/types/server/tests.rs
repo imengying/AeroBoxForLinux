@@ -670,12 +670,6 @@ protocol:
     );
 }
 
-// Note: This test was for reject unknown fields in Shadowsocks config.
-// After adding udp_enabled with #[serde(flatten)] for ShadowsocksConfig,
-// serde can no longer enforce deny_unknown_fields due to a serde limitation.
-// See: https://github.com/serde-rs/serde/issues/1547
-//
-// The test is kept here but modified to verify that the known fields work correctly.
 #[test]
 fn test_shadowsocks_with_udp_enabled() {
     let yaml = r#"
@@ -852,7 +846,7 @@ misspelled: true
 
 #[test]
 fn test_shadowtls_remote_handshake_defaults_to_direct() {
-    // When no client_chain or client_proxies is specified, should default to direct
+    // When no client_chain is specified, should default to direct
     let yaml = r#"
 address: "example.com:443"
 "#;
@@ -884,44 +878,6 @@ client_chain:
     assert!(result.is_ok(), "Should parse: {:?}", result.err());
     let handshake = result.unwrap();
     assert_eq!(handshake.client_chain.len(), 1);
-}
-
-#[test]
-fn test_shadowtls_remote_handshake_with_deprecated_client_proxies() {
-    // Should still work with deprecated client_proxies field
-    let yaml = r#"
-address: "example.com:443"
-client_proxies:
-  - address: "proxy.example.com:1080"
-    protocol:
-      type: socks
-"#;
-    let result: Result<ShadowTlsRemoteHandshake, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_ok(), "Should parse: {:?}", result.err());
-    let handshake = result.unwrap();
-    assert_eq!(handshake.client_chain.len(), 1);
-}
-
-#[test]
-fn test_shadowtls_remote_handshake_rejects_both_client_proxies_and_chain() {
-    let yaml = r#"
-address: "example.com:443"
-client_proxies:
-  - address: "proxy1.example.com:1080"
-    protocol:
-      type: socks
-client_chain:
-  - address: "proxy2.example.com:1080"
-    protocol:
-      type: socks
-"#;
-    let result: Result<ShadowTlsRemoteHandshake, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("cannot specify both"),
-        "Error should mention cannot specify both: {err}"
-    );
 }
 
 #[test]

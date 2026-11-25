@@ -322,7 +322,9 @@ pub(crate) async fn handle_tcp_connection<T: crate::async_stream::AsyncStream>(
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "TUN TCP setup timed out"))
     .and_then(|result| result)
-    .inspect_err(|error| warn!("Failed to connect to {}: {}", target, error))?;
+    .inspect_err(|error| {
+        crate::diagnostics::report_connection(format_args!("tun target={target}"), error)
+    })?;
     drop(proxy_selector);
     drop(resolver);
 
@@ -340,7 +342,10 @@ pub(crate) async fn handle_tcp_connection<T: crate::async_stream::AsyncStream>(
             "TCP connection to {} completed: {} bytes sent, {} bytes received",
             wire_destination, sent, received,
         ),
-        Err(error) => debug!("TCP connection to {} error: {}", wire_destination, error),
+        Err(error) => crate::diagnostics::report_connection(
+            format_args!("tun target={wire_destination}"),
+            &crate::diagnostics::stage("relay", error),
+        ),
     }
     Ok(())
 }
@@ -660,7 +665,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let rule: crate::config::ResolvedRuleConfig = crate::config::test_support::from_yaml(&format!(
-            "masks: '0.0.0.0/0'\nclient_proxy:\n  address: '{}'\n  protocol:\n    type: socks\n",
+            "masks: '0.0.0.0/0'\nclient_chain:\n  address: '{}'\n  protocol:\n    type: socks\n",
             proxy.local_addr().unwrap()
         ))
         .unwrap();

@@ -39,12 +39,11 @@ fn service() -> (tempfile::TempDir, Arc<Service>) {
     store
         .update(|state| {
             state.settings.system_proxy = false;
-            state.settings.mixed_port = support::free_port();
             state.rulesets.clear();
             Ok(())
         })
         .unwrap();
-    (dir, Service::new(store))
+    (dir, support::service(store))
 }
 
 #[test]
@@ -142,15 +141,7 @@ fn backup_round_trip_retains_credentials_rules_and_dns() {
 fn malformed_and_incomplete_backups_are_rejected_before_merging() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("backup.json");
-    for content in [
-        b"not json".as_slice(),
-        br#"{}"#,
-        br#"{"format":"other","version":1}"#,
-        br#"{"format":"aerobox-android-backup","version":1}"#,
-        br#"{"format":"aerobox-linux-backup","version":0}"#,
-        br#"{"format":"aerobox-linux-backup","version":1}"#,
-        br#"{"format":"aerobox-linux-backup","version":3}"#,
-    ] {
+    for content in [b"not json".as_slice(), br#"{}"#] {
         fs::write(&path, content).unwrap();
         assert!(backup::read(&path).is_err());
     }
@@ -221,12 +212,8 @@ fn incomplete_backups_and_invalid_selections_cannot_change_saved_data() {
             .remove(field);
         invalid.push(incomplete);
     }
-    let mut mismatched = value.clone();
-    mismatched["active_subscription"] = json!("");
-    invalid.push(mismatched);
     let mut missing_subscription = value.clone();
     let missing_id = aerobox_for_linux::model::id();
-    missing_subscription["active_subscription"] = json!(missing_id);
     missing_subscription["settings"]["active_subscription"] = json!(missing_id);
     invalid.push(missing_subscription);
     let mut missing_node = value;
@@ -319,7 +306,7 @@ fn service_export_restore_persists_files_and_does_not_overwrite_existing_data() 
         fs::read(target.dir().join("rules").join(format!("{}.srs", rule.id))).unwrap(),
         SRS
     );
-    let reopened = Service::new(Store::open(Some(target.dir().to_path_buf())).unwrap());
+    let reopened = support::service(Store::open(Some(target.dir().to_path_buf())).unwrap());
     assert_eq!(json_eq(&reopened.snapshot()), json_eq(&restored));
 
     assert_eq!(reopened.restore_backup(&path).unwrap(), (1, 1));
@@ -516,7 +503,7 @@ fn stale_settings_form_cannot_overwrite_newer_state() {
     form.direct_dns = "tcp://223.5.5.5".into();
     form.font_size = 15;
     let mut newer = previous.clone();
-    newer.mixed_port = previous.mixed_port + 1;
+    newer.dns_cache = !previous.dns_cache;
     service.apply_settings(newer.clone()).unwrap();
     assert!(
         service
@@ -621,8 +608,7 @@ fn running_restore_failure_rolls_back_rule_files_and_actual_traffic() {
     let path = app.dir.path().join("backup.json");
     app.service.export_backup(&path).unwrap();
     let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(value["version"], 2);
-    value["settings"]["routing_mode"] = json!("direct");
+    value["settings"]["routing_mode"] = json!("rule");
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     let generation = app.service.status().generation;
     let block = support::BlockStateWrite::new(app.dir.path());

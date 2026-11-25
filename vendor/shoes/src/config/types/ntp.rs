@@ -64,28 +64,25 @@ mod tests {
     use crate::config::{Config, create_server_configs};
 
     #[test]
-    fn ntp_is_opt_in_and_round_trips_through_both_global_names() {
-        for name in ["global_settings", "global_limits"] {
-            for fields in ["{}", "{ntp: null}"] {
-                let configs = serde_yaml::from_str(&format!("- {name}: {fields}")).unwrap();
-                assert!(create_server_configs(configs).unwrap().ntp.is_none());
-            }
-            for server in ["time.example:123", "127.0.0.1:123", "[::1]:123"] {
-                let configs: Vec<Config> =
-                    serde_yaml::from_str(&format!("- {name}:\n    ntp:\n      server: '{server}'"))
-                        .unwrap();
-                let json = serde_json::to_value(&configs).unwrap();
-                assert!(json[0].get("global_settings").is_some());
-                let validated =
-                    create_server_configs(serde_json::from_value(json).unwrap()).unwrap();
-                let config = validated.ntp.unwrap();
-                assert_eq!(config.interval_secs, 1800);
-                assert_eq!(config.timeout_secs, 5);
-                let yaml = serde_yaml::to_string(&configs).unwrap();
-                let validated =
-                    create_server_configs(serde_yaml::from_str(&yaml).unwrap()).unwrap();
-                assert_eq!(validated.ntp.unwrap(), config);
-            }
+    fn ntp_is_opt_in_and_round_trips_through_global_settings() {
+        for fields in ["{}", "{ntp: null}"] {
+            let configs = serde_yaml::from_str(&format!("- global_settings: {fields}")).unwrap();
+            assert!(create_server_configs(configs).unwrap().ntp.is_none());
+        }
+        for server in ["time.example:123", "127.0.0.1:123", "[::1]:123"] {
+            let configs: Vec<Config> = serde_yaml::from_str(&format!(
+                "- global_settings:\n    ntp:\n      server: '{server}'"
+            ))
+            .unwrap();
+            let json = serde_json::to_value(&configs).unwrap();
+            assert!(json[0].get("global_settings").is_some());
+            let validated = create_server_configs(serde_json::from_value(json).unwrap()).unwrap();
+            let config = validated.ntp.unwrap();
+            assert_eq!(config.interval_secs, 1800);
+            assert_eq!(config.timeout_secs, 5);
+            let yaml = serde_yaml::to_string(&configs).unwrap();
+            let validated = create_server_configs(serde_yaml::from_str(&yaml).unwrap()).unwrap();
+            assert_eq!(validated.ntp.unwrap(), config);
         }
     }
 

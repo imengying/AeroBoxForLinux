@@ -1,6 +1,7 @@
 //! Strict conversion of AeroBox Android node settings to the Rust runtime.
 //! Unrecognized options return a field path, never a silent security downgrade.
 #![forbid(unsafe_code)]
+mod naive;
 mod outbound;
 pub(crate) mod ss_plugin;
 use anyhow::Context;

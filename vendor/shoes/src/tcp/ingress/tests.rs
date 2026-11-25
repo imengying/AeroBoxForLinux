@@ -287,7 +287,7 @@ async fn socks_target_at(
 ) -> (Arc<ClientProxySelector>, Arc<dyn Resolver>) {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let rule = crate::config::test_support::from_yaml(&format!(
-        "masks: {mask}\nclient_proxy:\n  address: '127.0.0.1:{}'\n  protocol: {{type: socks}}\n",
+        "masks: {mask}\nclient_chain:\n  address: '127.0.0.1:{}'\n  protocol: {{type: socks}}\n",
         listener.local_addr().unwrap().port(),
     ))
     .unwrap();

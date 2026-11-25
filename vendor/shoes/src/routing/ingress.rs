@@ -89,9 +89,7 @@ impl std::fmt::Display for PolicyBlock {
 impl std::error::Error for PolicyBlock {}
 
 pub(crate) fn is_policy_block(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|cause| cause.is::<PolicyBlock>())
+    crate::diagnostics::contains::<PolicyBlock>(error)
 }
 
 pub(crate) enum UdpRoute<'a> {

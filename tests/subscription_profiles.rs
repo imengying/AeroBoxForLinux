@@ -1,7 +1,6 @@
 mod support;
 
 use aerobox_for_linux::{
-    engine::Service,
     model::{Store, Subscription},
     protocol, subscription,
 };
@@ -129,7 +128,7 @@ fn mixed_clash_profiles_survive_download_storage_and_node_listing() {
         anytls["client_chains"][0]["chain"][0]["protocol"]["protocol"]["udp_enabled"],
         true
     );
-    let reopened = Service::new(Store::open(Some(app.dir.path().into())).unwrap());
+    let reopened = support::service(Store::open(Some(app.dir.path().into())).unwrap());
     let listed = reopened.subscription_nodes(&id).unwrap();
     assert_eq!(listed.len(), 4);
     assert_eq!(
@@ -338,7 +337,7 @@ fn all_supported_protocols_remain_visible_after_reopening() {
     };
     let id = sub.id.clone();
     app.service.import_subscription(sub).unwrap();
-    let reopened = Service::new(Store::open(Some(app.dir.path().into())).unwrap());
+    let reopened = support::service(Store::open(Some(app.dir.path().into())).unwrap());
     let listed = reopened.subscription_nodes(&id).unwrap();
     assert_eq!(listed.len(), 10);
     for node in nodes {

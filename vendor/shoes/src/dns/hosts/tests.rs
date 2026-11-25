@@ -366,11 +366,10 @@ async fn hosts_survive_backend_refresh_without_using_it() {
             max_idle: Duration::from_secs(60),
         },
         "hosts-test".into(),
-    )
-    .await
-    .unwrap();
+        None,
+    );
     let resolver = HostsResolver::wrap(Arc::new(hosts("proxy.test: 192.0.2.1")), Arc::new(backend));
-    for (phase, generation) in [1, 1, 2].into_iter().enumerate() {
+    for (phase, generation) in [0usize, 1, 2].into_iter().enumerate() {
         assert_eq!(
             resolver
                 .resolve_location(&NetLocation::from_str("proxy.test:443", None).unwrap())
@@ -389,7 +388,10 @@ async fn hosts_survive_backend_refresh_without_using_it() {
             assert!(Message::from_vec(&reply).unwrap().answers.is_empty());
         }
         assert_eq!(builds.load(Ordering::SeqCst), generation);
-        assert_eq!(fallback.lookups.load(Ordering::SeqCst), generation - 1);
+        assert_eq!(
+            fallback.lookups.load(Ordering::SeqCst),
+            generation.saturating_sub(1)
+        );
         assert_eq!(fallback.exchanges.load(Ordering::SeqCst), 0);
         assert_eq!(fallback.deadlines.load(Ordering::SeqCst), 0);
         if phase < 2 {

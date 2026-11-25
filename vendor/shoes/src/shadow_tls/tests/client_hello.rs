@@ -2,6 +2,8 @@ use super::*;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+const TLS_EXT_ALPN: u16 = 0x0010;
+
 fn extension(kind: u16, data: &[u8]) -> Vec<u8> {
     let mut bytes = kind.to_be_bytes().to_vec();
     bytes.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
@@ -68,13 +70,11 @@ async fn parse(bytes: &[u8]) -> std::io::Result<ParsedClientHello> {
 
 #[tokio::test]
 async fn rustls_hello_exposes_sni_tls13_and_the_session_id_digest() {
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        aerobox_crypto::provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(rustls::RootCertStore::empty())
-    .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(aerobox_crypto::provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
     let mut client =
         rustls::ClientConnection::new(Arc::new(config), "camouflage.example".try_into().unwrap())
             .unwrap();
@@ -272,9 +272,9 @@ async fn hellos_split_across_records_are_reassembled() {
 
 #[tokio::test]
 async fn alpn_selection_survives_fragmented_client_hellos() {
-    for (protocols, acme) in [
-        (b"\x00\x0b\x0aacme-tls/1".as_slice(), true),
-        (b"\x00\x03\x02h2".as_slice(), false),
+    for protocols in [
+        b"\x00\x09\x08http/1.1".as_slice(),
+        b"\x00\x03\x02h2".as_slice(),
     ] {
         let mut extensions = server_name(0, b"proxy.example");
         extensions.extend(extension(TLS_EXT_ALPN, protocols));
@@ -283,7 +283,6 @@ async fn alpn_selection_survives_fragmented_client_hellos() {
         for chunk in [1, 3, 137] {
             let split = crate::sniff::tests::records(&hello, chunk);
             let parsed = parse(&split).await.unwrap();
-            assert_eq!(parsed.acme_alpn, acme);
             assert_eq!(
                 parsed.requested_server_name.as_deref(),
                 Some("proxy.example")
@@ -292,27 +291,6 @@ async fn alpn_selection_survives_fragmented_client_hellos() {
             assert_eq!(parsed.client_hello_frame, split);
             assert_eq!(parsed.client_hello_record, hello);
         }
-    }
-}
-
-#[tokio::test]
-async fn malformed_or_mixed_acme_alpn_retains_normal_dispatch() {
-    let alpn = extension(TLS_EXT_ALPN, b"\x00\x0b\x0aacme-tls/1");
-    let mut duplicate = alpn.clone();
-    duplicate.extend(alpn);
-    for extensions in [
-        duplicate,
-        extension(TLS_EXT_ALPN, b"\x00\x0e\x0aacme-tls/1\x02h2"),
-        extension(TLS_EXT_ALPN, b"\x00\x04\x02h2"),
-        extension(TLS_EXT_ALPN, b"\x00\x02\x02h"),
-        extension(TLS_EXT_ALPN, b"\x00\x01\x00"),
-    ] {
-        assert!(
-            !parse(&client_hello(&[], &extensions))
-                .await
-                .unwrap()
-                .acme_alpn
-        );
     }
 }
 

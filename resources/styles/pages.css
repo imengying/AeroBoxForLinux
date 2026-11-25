@@ -1,7 +1,6 @@
 .log-view, .log-view text { background: transparent; }
 .log-view { font-size: 0.95em; }
 .editor-root { background: @window_bg_color; }
-.editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
 .page-content > preferencesgroup { margin-top: 0.27em; }
 /* Keep each field with its title; retain clear whitespace before the next
  * field, rather than making the title/input pair itself look disconnected. */
@@ -61,12 +60,12 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-stat { padding: 0.9em 1em; min-width: 9em; }
 .home-stat-value { font-size: 1.18em; font-weight: 600; font-feature-settings: "tnum"; }
 /* Large icon targets share the same geometry in normal and busy states. */
-.aerobox-window button.floating-action { border-radius: 16px; padding: 0; min-width: 3.8em; min-height: 3.8em; box-shadow: 0 2px 6px alpha(#183b50,.16), 0 5px 12px alpha(#183b50,.08); }
+.aerobox-window button.floating-action { padding: 0; min-width: 3.4em; min-height: 3.4em; background: transparent; border: none; box-shadow: none; color: @accent_color; }
 .floating-action image { -gtk-icon-size: 2.1em; }
-.floating-action.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
-.dark .floating-action.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
-.floating-action:disabled { background: @app_primary_container; color: @app_on_primary_container; }
-.dark .floating-action:disabled { background: @dark_primary_container; color: @dark_on_primary_container; }
+.aerobox-window button.floating-action:hover { background: transparent; opacity: .8; }
+.aerobox-window button.floating-action.destructive-action { color: @error_color; }
+.aerobox-window button.floating-action:disabled { background: transparent; color: @app_muted; }
+.dark.aerobox-window button.floating-action:disabled { color: @dark_muted; }
 
 /* Keep one compact control density across the main pages and dialogs. These
  * selectors override libadwaita's generous touch-sized defaults, not the

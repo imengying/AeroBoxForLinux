@@ -79,18 +79,20 @@ fn wireguard_check_validates_outer_udp_without_dns_or_listeners() {
     let mut endpoint = wireguard_support::client(51820);
     endpoint["client_chains"][0]["address"] = json!("unresolvable.invalid:51820");
     for mode in ["check", "--dry-run"] {
-        for (protocol, valid) in [
-            (json!({"type": "socks"}), false),
-            (json!({"type": "trojan", "password": "test"}), false),
+        for (protocol, transport, valid) in [
+            (json!({"type": "socks"}), "tcp", true),
+            (json!({"type": "socks"}), "quic", false),
+            (json!({"type": "trojan", "password": "test"}), "quic", true),
             (
                 json!({"type": "vless", "user_id": shoes_test_support::test_fixture::TEST_UUID, "udp_enabled": false}),
+                "quic",
                 false,
             ),
-            (wireguard_support::vless_protocol(), true),
+            (wireguard_support::vless_protocol(), "quic", true),
         ] {
             endpoint["client_chains"][0]["protocol"]["peer_client_chain"] = json!([{
                 "address": "unresolvable.invalid:443", "protocol": protocol,
-                "transport": "quic",
+                "transport": transport,
             }]);
             if cfg!(any(
                 target_os = "android",
@@ -837,7 +839,7 @@ fn invalid_protocol_configs(address: SocketAddr) -> Vec<String> {
         .map(|protocol| {
             serde_yaml::to_string(&json!([{
                 "address": address.to_string(), "protocol": {"type": "http"},
-                "rules": [{"masks": "0.0.0.0/0", "client_proxy": {
+                "rules": [{"masks": "0.0.0.0/0", "client_chain": {
                     "address": "127.0.0.1:443", "protocol": protocol
                 }}]
             }]))
@@ -1613,7 +1615,7 @@ async fn config_watch_directories_need_only_traverse_permission() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn shutdown_interrupts_dns_preparation_without_retiring_listeners() {
+async fn unused_dns_does_not_delay_reload_or_shutdown() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.yaml");
     let echo = shoes_test_support::test_servers::start_tcp_stream_echo_server("127.0.0.1", 0)
@@ -1627,10 +1629,12 @@ async fn shutdown_interrupts_dns_preparation_without_retiring_listeners() {
     child.wait_for("Servers ready").await;
     std::fs::write(&path, format!("{valid}\n- dns_group: pending\n  dns_servers:\n    - url: https://pending.test/dns-query\n      bootstrap_url: udp://{}\n", blackhole.local_addr().unwrap())).unwrap();
     child.signal(libc::SIGHUP);
-    timeout(Duration::from_secs(3), blackhole.recv(&mut [0; 512]))
-        .await
-        .unwrap()
-        .unwrap();
+    child.wait_for("Servers ready").await;
+    assert!(
+        timeout(Duration::from_millis(100), blackhole.recv(&mut [0; 512]))
+            .await
+            .is_err()
+    );
     roundtrip(&mut TcpStream::connect(address).await.unwrap()).await;
     child.signal(libc::SIGTERM);
     assert_eq!(

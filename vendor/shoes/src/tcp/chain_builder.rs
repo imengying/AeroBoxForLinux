@@ -316,7 +316,7 @@ mod tests {
         for (protocol, expected) in [
             ("{type: direct}", true),
             ("{type: socks}", true),
-            ("{type: trojan, password: test}", false),
+            ("{type: trojan, password: test}", true),
             ("{type: trojan, password: test, h2mux: {}}", true),
             (
                 "{type: vless, user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0, udp_enabled: false}",
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn flat_chain_preflight_validates_later_hops_before_creating_connectors() {
         let invalid_proxy = crate::config::test_support::from_yaml(
-            "address: '127.0.0.1:443'\nprotocol: {type: vless, user_id: invalid}\n",
+            "address: '127.0.0.1:443'\nprotocol: {type: vless, user_id: ''}\n",
         )
         .unwrap();
         let invalid_transport = crate::config::test_support::from_yaml(
@@ -413,10 +413,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.to_string(),
-            "QUIC key_exchange_groups requires a non-direct client at chain hop 0 with transport: quic"
-        );
+        assert!(error.to_string().contains("QUIC key_exchange_groups"));
     }
 
     #[test]

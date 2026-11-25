@@ -216,7 +216,8 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             p
         }
         "naive" => {
-            let mut settings = json!({"quic":f.boolean("quic",false)?});
+            let quic = f.boolean("quic", false)?;
+            let mut settings = json!({"quic":quic});
             f.copy(
                 "congestion_control",
                 &mut settings,
@@ -229,14 +230,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             ] {
                 f.copy(key, &mut settings, key);
             }
-            for (key, target) in [
-                ("stream_receive_window", "stream_receive_window"),
-                ("quic_session_receive_window", "session_receive_window"),
-            ] {
-                if let Some(value) = f.take(key) {
-                    settings[target] = byte_size(value, &format!("{path}.{key}"))?.into();
-                }
-            }
+            super::naive::windows(&mut f, &mut settings, quic)?;
             json!({"type":"naiveproxy", "settings":settings, "username":f.string("username")?.unwrap_or_default(), "password":f.string("password")?.unwrap_or_default(), "udp_enabled":udp})
         }
         "socks" | "http" => {
@@ -455,13 +449,14 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
                 ));
             }
             let millis = duration_millis(value, &path)?;
-            if !millis.is_multiple_of(1000) || millis / 1000 > 32767 {
+            let seconds = millis.div_ceil(1000);
+            if seconds > 32767 {
                 return Err(error(
                     path,
-                    "TCP keepalive requires whole seconds in 1..32767",
+                    "TCP keepalive must round up to 1..32767 seconds",
                 ));
             }
-            tcp[target] = (millis / 1000).into();
+            tcp[target] = seconds.into();
         }
     }
     if !tcp.as_object().unwrap().is_empty() {
@@ -737,7 +732,13 @@ fn tls_config(
             out["alpn_protocols"] = json!(["http/1.1"]);
         }
     }
-    f.copy("curve_preferences", &mut out, "key_exchange_groups");
+    if let Some(groups) = f.take("curve_preferences") {
+        out["key_exchange_groups"] = if groups.is_string() {
+            json!([groups])
+        } else {
+            groups
+        };
+    }
     for (inline, file, target) in [
         ("client_certificate", "client_certificate_path", "cert"),
         ("client_key", "client_key_path", "key"),
@@ -922,7 +923,7 @@ fn tls_config(
     }
 }
 
-fn byte_size(value: Value, path: &str) -> Result<u32> {
+pub(super) fn byte_size(value: Value, path: &str) -> Result<u32> {
     if let Some(n) = value.as_u64() {
         return u32::try_from(n).map_err(|_| error(path, "byte size overflow"));
     }

@@ -2,7 +2,7 @@
 //! and independent server run in other processes, outside measured CPU/memory.
 use aerobox_for_linux::{
     engine::Service,
-    model::{Store, Subscription},
+    model::{RuleSet, Store, Subscription},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -25,12 +25,19 @@ fn main() -> Result<()> {
         state.settings.dns_cache = false;
         state.settings.direct_dns = "udp://127.0.0.1:9".into();
         state.settings.remote_dns = "tcp://127.0.0.1:9".into();
-        state.settings.routing_mode = if case == "direct" { "direct" } else { "global" }.into();
-        state.settings.mixed_port = port;
+        state.settings.routing_mode = if case == "direct" { "rule" } else { "global" }.into();
         state.rulesets.clear();
+        if case == "direct" {
+            state.rulesets.push(RuleSet {
+                name: "benchmark loopback".into(),
+                action: "direct".into(),
+                content: json!({"version":3,"rules":[{"ip_cidr":["127.0.0.1/32"]}]}),
+                ..Default::default()
+            });
+        }
         Ok(())
     })?;
-    let service = Service::new(store);
+    let service = Service::with_local_port(store, port.try_into()?);
     let node = match case {
         "direct" => json!({"type":"socks", "tag":"unused", "server":"127.0.0.1", "server_port":9}),
         "ss-aes128" => json!({"type":"shadowsocks", "tag":"benchmark", "server":"127.0.0.1",

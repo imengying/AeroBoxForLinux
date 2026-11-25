@@ -40,7 +40,7 @@ fn invalid_nodes() -> Vec<(Value, &'static str)> {
     let mut cases = Vec::new();
     for kind in ["vmess", "vless", "tuic"] {
         let mut invalid = node(kind);
-        invalid["uuid"] = "not-a-uuid".into();
+        invalid["uuid"] = "".into();
         cases.push((invalid, "uuid"));
     }
     let mut invalid = node("vmess");
@@ -200,11 +200,12 @@ fn subscription_refresh_keeps_good_nodes_and_reports_bad_parameters() {
         assert!(reason.contains(node["tag"].as_str().unwrap()), "{reason}");
     }
     for source in [
-        "vless://bad@offline.invalid:443#bad-vless\nsocks5://offline.invalid:1080#good".to_owned(),
+        "vless://@offline.invalid:443#bad-vless\nsocks5://offline.invalid:1080#good".to_owned(),
         json!({"proxies":[
-            {"name":"bad-vmess","type":"vmess","server":"offline.invalid","port":443,"uuid":"invalid"},
+            {"name":"bad-vmess","type":"vmess","server":"offline.invalid","port":443,"uuid":""},
             {"name":"good","type":"socks5","server":"offline.invalid","port":1080}
-        ]}).to_string(),
+        ]})
+        .to_string(),
     ] {
         let (nodes, skipped) = subscription::parse_with_skips(&source).unwrap();
         assert_eq!(nodes.len(), 1);
@@ -232,7 +233,7 @@ fn invalid_edit_does_not_replace_cached_valid_node_or_saved_state() {
     assert!(
         store
             .update(|state| {
-                state.subscriptions[0].nodes[0]["uuid"] = "bad".into();
+                state.subscriptions[0].nodes[0]["uuid"] = "".into();
                 Ok(())
             })
             .is_err()

@@ -29,6 +29,6 @@ Vendored component license texts are shipped alongside packaged builds:
 - smoltcp: [LICENSE-0BSD.txt](licenses/smoltcp/LICENSE-0BSD.txt)
 - tendns: [LICENSE](licenses/tendns/LICENSE)
 
-Other Cargo dependencies retain their respective upstream licenses. Rule datasets have separate notices in `resources/rules`. AeroBox application code is GPL-3.0-only.
+Other Cargo dependencies retain their respective upstream licenses. The embedded rule datasets come from [SagerNet/sing-geoip](https://github.com/SagerNet/sing-geoip) and [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite), both GPL-3.0-or-later, with license texts in `resources/rules`. AeroBox application code is GPL-3.0-only.
 
 The browser TLS extensions and additional RustCrypto algorithms are adapted from the local AeroBox Android Rust project. The test-only TLS profile peer and pinned, patched uTLS v1.8.7 renegotiation peer live under `vendor/shoes/tests/fixtures`; provenance and patch hashes are recorded alongside them. They are not runtime dependencies. TLS CBC/RSA support is enabled by explicit cipher selection or browser policy, not by the default TLS provider. Public disposable certificate/key fixtures under `vendor/support/aerobox-crypto/tests/fixtures` are only used by tests.

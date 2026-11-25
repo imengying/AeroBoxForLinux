@@ -850,7 +850,7 @@ async fn test_shoes_vless_tls_vision_proxy_chain_to_https() -> Result<(), Box<dy
   rules:
     - mask: 0.0.0.0/0
       action: allow
-      client_proxies:
+      client_chains:
         - address: "{}:{}"
           protocol:
             type: vless

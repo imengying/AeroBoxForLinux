@@ -92,7 +92,11 @@ const PRIVATE_NETWORKS: &[&str] = &[
     "fe80::/10",
 ];
 
-pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
+pub(crate) fn prepare(
+    state: &State,
+    dir: &Path,
+    local_port: std::num::NonZeroU16,
+) -> Result<Prepared> {
     state.validate()?;
     let settings = &state.settings;
     let sub = state
@@ -147,13 +151,8 @@ pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
     {
         direct_dns["bootstrap_url"] = "system".into();
     }
-    let remote_chain = if settings.routing_mode == "direct" {
-        "direct"
-    } else {
-        "proxy"
-    };
     entries.push(json!({"dns_group":"dns-direct", "dns_servers":[direct_dns]}));
-    entries.push(json!({"dns_group":"dns-remote", "dns_servers":[{"url":remote,"client_chain":remote_chain,"bootstrap_url":"dns-direct","ip_strategy":strategy(settings)}]}));
+    entries.push(json!({"dns_group":"dns-remote", "dns_servers":[{"url":remote,"client_chain":"proxy","bootstrap_url":"dns-direct","ip_strategy":strategy(settings)}]}));
 
     let mut rules = vec![];
     let mut dns_rules = vec![];
@@ -183,8 +182,7 @@ pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
             if rule.is_remote() {
                 source["url"] = rule.source.clone().into();
                 source["update_interval"] = format!("{}m", rule.update_interval_minutes).into();
-                source["download"] =
-                    json!({"client_chain":remote_chain,"bootstrap_url":"dns-direct"});
+                source["download"] = json!({"client_chain":"proxy","bootstrap_url":"dns-direct"});
             }
             entries.push(json!({"rule_source_group":rule.id, "rules":[source]}));
             let conditions = json!({"rule_source_group":rule.id});
@@ -202,16 +200,11 @@ pub(crate) fn prepare(state: &State, dir: &Path) -> Result<Prepared> {
         }
     }
     rules.push(
-        json!({"conditions":{"any_destination":true},"action":"allow","client_chain":remote_chain}),
+        json!({"conditions":{"any_destination":true},"action":"allow","client_chain":"proxy"}),
     );
-    entries.push(json!({"dns_group":"dns-policy","routing":{"final_server":if settings.routing_mode == "direct" {"dns-direct"} else {"dns-remote"},"ip_strategy":strategy(settings),"rules":dns_rules}}));
+    entries.push(json!({"dns_group":"dns-policy","routing":{"final_server":"dns-remote","ip_strategy":strategy(settings),"rules":dns_rules}}));
     entries.push(json!({"global_settings":{"max_connections":4096,"max_streams":8192,"quic_memory_bytes":134217728,"quic_socket_buffer":1048576,"reload_grace_secs":0,"default_dns":{"servers":"dns-policy"},"rule_cache_dir":dir.join("rules/cache")}}));
-    let host = if settings.allow_lan {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    };
-    entries.push(json!({"name":"mixed-in","address":format!("{host}:{}",settings.mixed_port),"protocol":{"type":"mixed","udp_enabled":true},"sniff":settings.sniff,"dns_hijack":settings.dns_hijack,"rules":rules}));
+    entries.push(json!({"name":"mixed-in","address":format!("127.0.0.1:{local_port}"),"protocol":{"type":"mixed","udp_enabled":true},"sniff":settings.sniff,"dns_hijack":settings.dns_hijack,"rules":rules}));
     if settings.tun_enabled {
         let mut addresses = vec!["172.19.0.1/30"];
         if settings.ipv6 {

@@ -179,15 +179,12 @@ fn policy_and_source_groups_are_explicit_and_roundtrip() {
         ),
         ("[{path: a.srs, action: block}]", "unknown field `action`"),
         ("[{path: a.srs, fromat: srs}]", "unknown field `fromat`"),
-        ("[{rule_group: other}]", "use {rule_source_group: name}"),
     ] {
         let result = serde_yaml::from_str::<RuleSourceGroup>(&format!(
             "rule_source_group: x\nrules: {rules}"
         ));
         assert!(result.unwrap_err().to_string().contains(error), "{rules}");
     }
-    let error = serde_yaml::from_str::<Config>("rule_set: old\npath: a.srs").unwrap_err();
-    assert!(error.to_string().contains("replaced by rule_source_group"));
 }
 
 #[test]
@@ -216,7 +213,7 @@ fn source_group_mask_leaf_round_trips_without_becoming_a_file() {
 }
 
 #[test]
-fn policy_group_errors_preserve_element_details_and_migration_guidance() {
+fn policy_group_errors_preserve_element_details() {
     for (rules, expected) in [
         (
             "[{masks: example.com, acton: block}]",
@@ -228,14 +225,8 @@ fn policy_group_errors_preserve_element_details_and_migration_guidance() {
         ),
         ("[true]", "a policy rule requires a mapping"),
         ("[]", "cannot be empty"),
-        (
-            "[a.srs]",
-            "action-free file sources moved to rule_source_group",
-        ),
-        (
-            "a.srs",
-            "action-free file sources moved to rule_source_group",
-        ),
+        ("[a.srs]", "a policy rule requires a mapping"),
+        ("a.srs", "a policy rule requires a mapping"),
     ] {
         let error =
             serde_yaml::from_str::<Config>(&format!("rule_group: policies\nrules: {rules}"))
@@ -350,18 +341,8 @@ fn chain_aliases_share_route_group_and_dns_sequence_semantics() {
 #[test]
 fn group_chain_fields_reject_duplicates_conflicts_and_empty_values() {
     use serde_json::json;
-    for first in [
-        "client_chain",
-        "client_chains",
-        "client_proxy",
-        "client_proxies",
-    ] {
-        for second in [
-            "client_chain",
-            "client_chains",
-            "client_proxy",
-            "client_proxies",
-        ] {
+    for first in ["client_chain", "client_chains"] {
+        for second in ["client_chain", "client_chains"] {
             let yaml = format!("client_group: out\n{first}: a\n{second}: b");
             assert!(
                 serde_yaml::from_str::<ClientConfigGroup>(&yaml).is_err(),

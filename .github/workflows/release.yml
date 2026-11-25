@@ -15,6 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  protocols:
+    uses: ./.github/workflows/protocol-interop.yml
+
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -73,7 +76,7 @@ jobs:
           path: target/wayland/
 
   release:
-    needs: linux
+    needs: [linux, protocols]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -93,15 +96,16 @@ jobs:
 
             连接、分流、DNS 和 TUN 直接集成在应用中，无需下载或指定外部内核。
 
-            - 优化卡片宽度、字体、明暗配色与操作反馈，完善全屏、窄窗口和 1.25 倍缩放。
-            - 设置合并为一页；首页启用 TUN 时按需授权，授权后自动重启并恢复连接。
-            - 修复深色订阅输入框，移除导入结果弹窗，增加节点配置编辑入口。
-            - 出口 IPv4 / IPv6 分别检测和更新，改善首次代理建连较慢时的检测，并补全 DNS、TLS、REALITY 诊断。
-            - 精简安装包，正式程序不编入界面自检；保留必要的使用说明与许可证。
+            - 出站模式保留规则与全局；移除局域网共享和端口设置，本地代理固定使用 127.0.0.1:2080。
+            - 缩小节点卡片，未测速时隐藏占位文字，结果显示在测速按钮内；启动与测速使用纯图标，出口 IP 左对齐，移除订阅编辑快捷工具栏。
+            - DNS 按需建立连接，网络暂时不可用时仍可启动；上游返回失败时继续尝试已配置的其他解析器。正常取消、重置和断管不再刷 ERROR，保留真实协议错误诊断。
+            - 完善 VMess/VLESS 字符串标识、TLS 曲线参数、Naive 接收窗口及 TCP keepalive 处理，并将独立协议互通检查纳入发布流程。
+            - 清理配置版本判断、旧字段迁移分支、闲置证书签发代码及上游文档网站。
+            - 安装包仅包含程序、安装资源与许可证；开发文档和测试工具保留在源码仓库。
             - 使用 Rust 1.100；仅发布 AMD64 安装包，在 ubuntu-latest 构建并执行应用、网络组件及 Wayland 回归测试。
 
             Arch Linux 运行依赖：`sudo pacman -S --needed gtk4 libadwaita gtksourceview5 librsvg`
             安装包适用于 Intel / AMD 的 x86_64 电脑。下载并解压 tar.gz 后运行 `./install.sh`。
-            更新后完全退出旧进程，再从应用菜单启动 AeroBox。本版不迁移旧版配置数据；升级前请保留订阅来源。
+            更新后完全退出旧进程，再从应用菜单启动 AeroBox。
 
-            安装与使用说明见 README.md，协议支持及参数组合限制见 docs/protocols.md。
+            [安装与使用说明](https://github.com/imengying/AeroBoxForLinux/blob/${{ github.ref_name }}/README.md) · [协议与参数说明](https://github.com/imengying/AeroBoxForLinux/blob/${{ github.ref_name }}/docs/protocols.md)

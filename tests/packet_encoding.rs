@@ -147,7 +147,7 @@ fn vless_udp_encodings_use_the_requested_wire_format() {
         app.import("wire-format", vec![node]);
         app.service.start().unwrap();
         let mut association =
-            TcpStream::connect(("127.0.0.1", app.service.snapshot().settings.mixed_port)).unwrap();
+            TcpStream::connect(("127.0.0.1", app.service.local_proxy_port())).unwrap();
         association
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();

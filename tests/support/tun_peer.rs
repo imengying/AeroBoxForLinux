@@ -189,7 +189,7 @@ impl Drop for Peer {
 }
 
 /// Direct resolver for the remote DNS server's hostname. Switching to NXDOMAIN
-/// makes rebuilding the runtime DNS registry fail without touching its sockets.
+/// makes remote DNS bootstrap fail without touching its sockets.
 pub struct BootstrapDns {
     address: SocketAddr,
     failed: Arc<AtomicBool>,

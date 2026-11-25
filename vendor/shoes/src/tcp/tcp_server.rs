@@ -83,11 +83,7 @@ async fn run_tcp_server(
         tasks.spawn(async move {
             let _permit = permit;
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                if crate::diagnostics::contains::<crate::diagnostics::DnsPolicyRejection>(&e) {
-                    debug!("connection peer={addr}: {e}");
-                } else {
-                    error!("connection peer={addr} kind={:?}: {e}", e.kind());
-                }
+                crate::diagnostics::report_connection(addr, &e);
             } else {
                 debug!("{}:{} finished successfully", addr.ip(), addr.port());
             }
@@ -125,11 +121,7 @@ async fn run_unix_server(
         tasks.spawn(async move {
             let _permit = permit;
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                if crate::diagnostics::contains::<crate::diagnostics::DnsPolicyRejection>(&e) {
-                    debug!("connection peer={addr:?}: {e}");
-                } else {
-                    error!("connection peer={addr:?} kind={:?}: {e}", e.kind());
-                }
+                crate::diagnostics::report_connection(format_args!("{addr:?}"), &e);
             } else {
                 debug!("{addr:?} finished successfully");
             }
@@ -240,8 +232,9 @@ pub(crate) async fn process_stream_with_permit<AS: AsyncStream + 'static>(
                 Ok(Err(e)) => {
                     send_connect_failure(&mut server_stream, connection_failure_response, e.kind())
                         .await;
-                    return Err(crate::diagnostics::context(
-                        format!("stage=outbound_setup target={remote_location}"),
+                    return Err(crate::diagnostics::stage_context(
+                        "outbound_setup",
+                        format_args!("target={remote_location}"),
                         e,
                     ));
                 }
