@@ -13,5 +13,3 @@ require (
 	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
 	golang.org/x/sys v0.30.0 // indirect
 )
-
-replace github.com/metacubex/utls => ../../../../../target/reference-utls-renegotiation

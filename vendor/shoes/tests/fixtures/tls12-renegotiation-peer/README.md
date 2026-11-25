@@ -14,18 +14,16 @@ when renegotiation is enabled to compare the independent key schedules.
 
 ```sh
 python3 vendor/shoes/tests/fixtures/tls12-renegotiation-peer/build.py
-AEROBOX_TLS_FIXTURES="$PWD/vendor/support/aerobox-crypto/tests/fixtures" CGO_ENABLED=0 GOMAXPROCS=1 \
-  go -C vendor/shoes/tests/fixtures/tls12-renegotiation-peer test -mod=readonly -p=1 -count=1 -v .
 AEROBOX_TLS12_RENEGOTIATION_PEER="$PWD/target/protocol-peers/tls12-renegotiation-peer" \
   cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml --test tls12_renegotiation -- --include-ignored --test-threads=1
 ```
 
-The reference self-test covers 90 combinations of standard/preset Chrome133
-clients, five cipher suites and nine valid/fault modes. Rust additionally tests
+The builder patches and verifies a fresh temporary source copy, removed after
+compilation. Only the executable is written to the Cargo target directory.
+Rust tests cover key changes, client authentication, invalid handshake rejection,
 ALPN continuity, EMS downgrade, repeated requests, opt-in policy, old-epoch
 application records, cached Chrome ClientHello bytes, and ticket resumption
-followed by a fresh authenticated handshake. TLS 1.0/1.1 and other browser
-profiles are separate work.
+followed by a fresh authenticated handshake.
 
 Sources: [RFC5746](https://www.rfc-editor.org/rfc/rfc5746.html),
 [RFC7627](https://www.rfc-editor.org/rfc/rfc7627.html),

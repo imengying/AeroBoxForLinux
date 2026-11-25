@@ -169,20 +169,3 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 	}
 }
-func checkMarker(c interface {
-	Read([]byte) (int, error)
-	AeroBoxFixtureExportKeyingMaterial() ([]byte, error)
-}, name string) ([]byte, error) {
-	b := make([]byte, len(name)+32)
-	if _, err := io.ReadFull(c, b); err != nil {
-		return nil, err
-	}
-	key, err := c.AeroBoxFixtureExportKeyingMaterial()
-	if err != nil {
-		return nil, err
-	}
-	if string(b[:len(name)]) != name || !bytes.Equal(b[len(name):], key) {
-		return nil, errors.New("exporter/marker mismatch")
-	}
-	return key, nil
-}

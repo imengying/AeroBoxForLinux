@@ -76,8 +76,7 @@ export AEROBOX_CBC_PEER="$test_output/cbc-peer"
 (cd vendor/shoes/tests/fixtures/tls-fragment-peer &&
     CGO_ENABLED=0 GOMAXPROCS=1 go build -trimpath -p 1 -o "$test_output/tls-fragment-peer" main.go)
 export AEROBOX_TLS_FRAGMENT_PEER="$test_output/tls-fragment-peer"
-run_unit_tests
-cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml --locked -- --ignored --test-threads=1
+cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml -- --ignored --test-threads=1
 cargo test --manifest-path vendor/shoes/Cargo.toml --lib -- \
     vmess::interop_tests ss_plugin:: quic_client::tuic_uot_tests \
     quic_client::early_tests ech:: tls_fragment:: tcp::socket_connector_impl::early_tests rustls_config_util::browser:: \

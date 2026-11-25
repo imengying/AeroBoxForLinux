@@ -1,7 +1,9 @@
 name: Protocol interoperability
 
 on:
-  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: "37 3 * * 4"
   workflow_dispatch:

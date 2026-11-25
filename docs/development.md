@@ -24,7 +24,7 @@ make clean
 `scripts/check-network.sh` 检查网络任务的归属，并验证 Vision 分帧状态机和基准工具。持续模糊测试、性能对比与连接日志说明见 [网络诊断与验证](network-validation.md)。这些开发工具不随应用安装。
 
 
-`Protocol interoperability` 工作流由构建流程在 main 推送、标签及 pull request 时调用，也支持每周和手动触发。使用 ubuntu-latest、固定 Go 工具链和依赖，以及经过 SHA256 校验的 sing-box 1.14.4。覆盖 Naive HTTP/2 / HTTP/3、VMess、SS 插件、TUIC、ECH、TLS 与应用协议互通；发布任务同时等待应用检查和协议互通通过。参考服务端仅用于测试，不打包进 Release。kTLS 和特权 TUN 环境测试仍单独运行。
+`Protocol interoperability` 是独立工作流，在 main 推送、pull request、每周及手动触发时运行。使用 ubuntu-latest、固定 Go 工具链和依赖，以及经过 SHA256 校验的 sing-box 1.14.4，覆盖 Naive HTTP/2 / HTTP/3、VMess、SS 插件、TUIC、ECH、TLS 与应用协议互通，不重复运行 `--unit` 测试。标签发布执行 Rust 应用、网络组件、Wayland 和安装包检查，不构建外部 Go 测试服务或运行性能基准工具。参考服务端仅用于开发验证，不打包进 Release；打标签前检查主分支的两条工作流。kTLS 和特权 TUN 环境测试仍单独运行。
 
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 

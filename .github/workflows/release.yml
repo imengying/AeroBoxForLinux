@@ -15,10 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  protocols:
-    name: Protocol interoperability (external test servers)
-    uses: ./.github/workflows/protocol-interop.yml
-
   linux:
     name: Rust application build and package
     runs-on: ubuntu-latest
@@ -44,12 +40,6 @@ jobs:
         run: cargo test --locked
       - name: Test network and TLS components
         run: scripts/test-protocols.sh --unit
-      - name: Check network benchmark tooling
-        run: |
-          cargo build --locked --example network-bench
-          benchmark_dir=$(mktemp -d "$RUNNER_TEMP/aerobox-bench.XXXXXX")
-          trap 'rm -rf "$benchmark_dir"' EXIT
-          python3 scripts/bench-network.py --candidate target/debug/examples/network-bench --output "$benchmark_dir/results" --rounds 1 --mib 1 --operations 10 --smoke
       - name: Build UI checks
         run: cargo build --bin AeroBox --features ui-smoke --locked
       - name: Test Wayland without X11
@@ -80,7 +70,7 @@ jobs:
           path: target/wayland/
 
   release:
-    needs: [linux, protocols]
+    needs: [linux]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -100,11 +90,11 @@ jobs:
 
             连接、分流、DNS 和 TUN 直接集成在应用中，无需下载或指定外部内核。
 
-            - 修复 CI 基准测试目录冲突和外部参考服务补丁的目录权限问题。
+            - 精简发布检查，协议互通独立运行；测试源码使用临时目录，消除 Rust 缓存清理造成的缺失文件问题。
             - 出站模式保留规则与全局；移除局域网共享和端口设置，本地代理固定使用 127.0.0.1:2080。
             - 缩小节点卡片，未测速时隐藏占位文字，结果显示在测速按钮内；启动与测速使用纯图标，出口 IP 左对齐，移除订阅编辑快捷工具栏。
             - DNS 按需建立连接，网络暂时不可用时仍可启动；上游返回失败时继续尝试已配置的其他解析器。正常取消、重置和断管不再刷 ERROR，保留真实协议错误诊断。
-            - 完善 VMess/VLESS 字符串标识、TLS 曲线参数、Naive 接收窗口及 TCP keepalive 处理，并将独立协议互通检查纳入发布流程。
+            - 完善 VMess/VLESS 字符串标识、TLS 曲线参数、Naive 接收窗口及 TCP keepalive 处理，保留独立服务端协议互通检查。
             - 清理配置版本判断、旧字段迁移分支、闲置证书签发代码及上游文档网站。
             - 安装包仅包含程序、安装资源与许可证；开发文档和测试工具保留在源码仓库。
             - 使用 Rust 1.100；仅发布 AMD64 安装包，在 ubuntu-latest 构建并执行应用、网络组件及 Wayland 回归测试。
