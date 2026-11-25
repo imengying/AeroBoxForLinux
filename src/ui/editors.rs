@@ -42,6 +42,7 @@ impl EditorWindow {
         if let Some(app) = parent.application() {
             window.set_application(Some(&app));
         }
+        follow_theme(&window);
         let saving = Rc::new(Cell::new(false));
         let guard = saving.clone();
         window.connect_close_request(move |_| {

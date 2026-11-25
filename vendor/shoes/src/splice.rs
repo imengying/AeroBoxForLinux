@@ -318,24 +318,32 @@ pub(crate) async fn copy_bidirectional_tracked(
     b_flow: Option<&crate::control::flows::FlowEntry>,
 ) -> io::Result<()> {
     tokio::try_join!(
-        copy_direction_tracked(
-            a,
-            b,
-            &Native,
-            Accounting {
-                source: a_flow,
-                destination: b_flow
-            }
-        ),
-        copy_direction_tracked(
-            b,
-            a,
-            &Native,
-            Accounting {
-                source: b_flow,
-                destination: a_flow
-            }
-        ),
+        async {
+            copy_direction_tracked(
+                a,
+                b,
+                &Native,
+                Accounting {
+                    source: a_flow,
+                    destination: b_flow,
+                },
+            )
+            .await
+            .map_err(|error| crate::diagnostics::stage("relay_upload", error))
+        },
+        async {
+            copy_direction_tracked(
+                b,
+                a,
+                &Native,
+                Accounting {
+                    source: b_flow,
+                    destination: a_flow,
+                },
+            )
+            .await
+            .map_err(|error| crate::diagnostics::stage("relay_download", error))
+        },
     )?;
     Ok(())
 }

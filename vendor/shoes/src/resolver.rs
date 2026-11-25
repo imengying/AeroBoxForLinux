@@ -45,9 +45,7 @@ impl std::fmt::Display for DnsSetupPending {
 impl std::error::Error for DnsSetupPending {}
 
 pub(crate) fn dns_setup_pending(error: &std::io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|cause| cause.is::<DnsSetupPending>())
+    crate::diagnostics::contains::<DnsSetupPending>(error)
 }
 
 #[derive(Debug)]
@@ -62,9 +60,7 @@ impl std::fmt::Display for DnsCallerDeadline {
 impl std::error::Error for DnsCallerDeadline {}
 
 pub(crate) fn dns_caller_deadline(error: &std::io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|cause| cause.is::<DnsCallerDeadline>())
+    crate::diagnostics::contains::<DnsCallerDeadline>(error)
 }
 
 const CACHING_NATIVE_RESOLVER_CACHE_CAPACITY: usize = 10_000;
@@ -82,7 +78,9 @@ pub trait Resolver: Send + Sync + Debug {
     fn resolve_location(&self, location: &NetLocation) -> ResolveFuture;
 
     /// Named resolver bindings for proxy entrances; absent bindings fail closed.
-    fn named(&self, _name: &str) -> Option<Arc<dyn Resolver>> { None }
+    fn named(&self, _name: &str) -> Option<Arc<dyn Resolver>> {
+        None
+    }
 
     /// Bounds a logical request, including transport attempts and lazy reconstruction.
     fn request_timeout(&self) -> Option<Duration> {

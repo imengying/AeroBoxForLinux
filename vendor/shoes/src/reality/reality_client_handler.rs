@@ -142,14 +142,19 @@ impl RealityClientHandler {
             RealityInnerClientHandler::VisionVless { .. } => TlsReadMode::PreserveRecords,
             RealityInnerClientHandler::Default(_) => TlsReadMode::Stream,
         };
+        let began = std::time::Instant::now();
         let stream = tokio::time::timeout(
             self.handshake_timeout,
             CryptoTlsStream::handshake(client_stream, connection, mode, &[]),
         )
         .await
-        .map_err(std::io::Error::from)??;
+        .map_err(std::io::Error::from)
+        .and_then(|result| result)
+        .map_err(|error| crate::diagnostics::timed("reality_handshake", began, error))?;
         if let RealityInnerClientHandler::Default(handler) = &self.handler {
-            handler.validate_alpn(stream.alpn_protocol())?;
+            handler
+                .validate_alpn(stream.alpn_protocol())
+                .map_err(|error| crate::diagnostics::stage("reality_alpn", error))?;
         }
         log::debug!(
             "REALITY CLIENT: Handshake completed successfully, negotiated_group={:?}",

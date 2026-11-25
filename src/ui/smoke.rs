@@ -12,7 +12,7 @@ pub(super) fn seed_smoke(service: &Service) -> Result<()> {
             json!({"type":"socks","tag":"本地备用","server":"127.0.0.1","server_port":1080}),
         ],updated:model::now()-1200,expires:model::now()+30*86400,total:200*1024*1024*1024,download:28*1024*1024*1024,..Subscription::default()};
         let rules=RuleSet{name:"工作服务".into(),content:json!({"version":3,"rules":[{"domain_suffix":["example.com","example.org"]}]}),updated:model::now(),..RuleSet::default()};
-        let backup = Subscription { name: "备用订阅".into(), expires:model::now()+60*86400,updated:model::now()-7200,total:100*1024*1024*1024,download:62*1024*1024*1024, selected_node:Some("香港 · 01".into()), nodes: vec![
+        let backup = Subscription { name: "备用订阅".into(), updated:model::now()-7200,total:100*1024*1024*1024,download:62*1024*1024*1024, selected_node:Some("香港 · 01".into()), nodes: vec![
             json!({"type":"socks","tag":"香港 · 01","server":"127.0.0.1","server_port":1081}),
             json!({"type":"socks","tag":"备用 · 02","server":"127.0.0.1","server_port":1082}),
         ], ..Subscription::default() };
@@ -234,6 +234,13 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 2 => {
                     let window = subscriptions::smoke_import_window(&ui)?;
                     screenshot(&window, &parent.join("subscription-import-default.png")).await?;
+                    apply_theme("dark");
+                    glib::timeout_future(Duration::from_millis(80)).await;
+                    anyhow::ensure!(window.has_css_class("dark"), "导入弹窗没有跟随深色模式");
+                    let source = descendants(&window).into_iter().find_map(|widget| widget.downcast::<gtk::TextView>().ok()).context("缺少订阅输入框")?;
+                    source.buffer().set_text("https://subscription.example.test/link");
+                    screenshot(&window, &parent.join("subscription-import-dark.png")).await?;
+                    apply_theme("light");
                     window.close();
                 }
                 3 => {
@@ -544,7 +551,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     settings::smoke_section(&ui, "tun")?;
                 }
                 49 => {
-                    settings::smoke_tun_permission(&ui).await?;
+                    settings::smoke_tun_settings(&ui).await?;
                 }
                 50..=56 => settings::smoke_autostart(&ui, current - 50).await?,
                 57 => subscriptions::smoke_dialog_release(&ui)?,

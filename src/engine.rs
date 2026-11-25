@@ -597,11 +597,24 @@ impl Service {
     }
 
     pub fn network_info(&self) -> Result<network::NetworkInfo> {
+        self.network_info_updates(|_| {})
+    }
+    pub fn network_info_updates(
+        &self,
+        progress: impl Fn(&network::NetworkInfo),
+    ) -> Result<network::NetworkInfo> {
         let generation = self.status().generation;
         let revision = self.subscription_revision();
         let settings = self.snapshot().settings;
-        let client = self.client_with_timeout(Duration::from_secs(4))?;
-        let info = network::detect(client, settings.ipv6, generation.is_some())?;
+        let client = {
+            let run = self.running.lock().unwrap();
+            network::exit_client(run.prepared.as_ref().map(|prepared| &prepared.config))?
+        };
+        let info = network::detect(client, settings.ipv6, generation.is_some(), |info| {
+            if self.status().generation == generation && self.subscription_revision() == revision {
+                progress(info);
+            }
+        })?;
         ensure!(
             self.status().generation == generation && self.subscription_revision() == revision,
             "连接已变化，请重新检测"
@@ -665,7 +678,7 @@ impl Service {
         if settings.tun_enabled {
             ensure!(
                 self.tun_available()?,
-                "虚拟网卡需要网络管理权限，请授权后重启 AeroBox"
+                "虚拟网卡需要网络管理权限，请从首页启用并授权"
             );
         }
         Ok(())
@@ -699,6 +712,35 @@ impl Service {
             .context("无法启动权限授权")?;
         ensure!(status.success(), "虚拟网卡授权未完成");
         Ok(())
+    }
+    /// File capabilities take effect on exec, never on the current process.
+    /// Return the connection state to restore after the UI relaunches.
+    pub fn set_tun_enabled(&self, enabled: bool) -> Result<Option<bool>> {
+        let restart = enabled && !self.tun_available()?;
+        self.change_tun(enabled, restart, || self.authorize_tun())
+    }
+    fn change_tun(
+        &self,
+        enabled: bool,
+        restart: bool,
+        authorize: impl FnOnce() -> Result<()>,
+    ) -> Result<Option<bool>> {
+        if restart {
+            authorize()?;
+        }
+        let resume = self.status().running;
+        if restart {
+            self.stop()?;
+        }
+        let mut settings = self.snapshot().settings;
+        settings.tun_enabled = enabled;
+        if let Err(error) = self.apply_settings(settings) {
+            if restart && resume {
+                self.start().context("保存 TUN 设置失败，恢复连接也失败")?;
+            }
+            return Err(error);
+        }
+        Ok(restart.then_some(resume))
     }
     fn client_with_timeout(&self, timeout: Duration) -> Result<Client> {
         let run = self.running.lock().unwrap();
@@ -1456,4 +1498,61 @@ fn copy_subscription_data(target: &mut model::Subscription, source: &model::Subs
     target.download = source.download;
     target.total = source.total;
     target.expires = source.expires;
+}
+
+#[cfg(test)]
+mod tun_activation_tests {
+    use super::*;
+
+    #[test]
+    fn authorization_cancellation_keeps_live_connection_and_success_prepares_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(Some(directory.path().into())).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        store
+            .update(|state| {
+                state.settings.system_proxy = false;
+                state.settings.mixed_port = port;
+                state.settings.ipv6 = false;
+                state.settings.routing_mode = "direct".into();
+                state.settings.direct_dns = "udp://127.0.0.1:9".into();
+                state.settings.remote_dns = "tcp://127.0.0.1:9".into();
+                state.rulesets.clear();
+                Ok(())
+            })
+            .unwrap();
+        let service = Service::new(store);
+        service.import_subscription(model::Subscription {
+            nodes: vec![serde_json::json!({"type":"socks", "tag":"test", "server":"127.0.0.1", "server_port":9})],
+            ..Default::default()
+        }).unwrap();
+        service.start().unwrap();
+        let generation = service.status().generation;
+        let state = serde_json::to_value(service.snapshot()).unwrap();
+        assert!(
+            service
+                .change_tun(true, true, || bail!("cancelled"))
+                .is_err()
+        );
+        assert_eq!(service.status().generation, generation);
+        assert_eq!(serde_json::to_value(service.snapshot()).unwrap(), state);
+        // The test supplies authorization; it never modifies capabilities or starts TUN.
+        assert_eq!(
+            service.change_tun(true, true, || Ok(())).unwrap(),
+            Some(true)
+        );
+        assert!(!service.status().running);
+        assert!(service.snapshot().settings.tun_enabled);
+        assert_eq!(service.set_tun_enabled(false).unwrap(), None);
+        assert_eq!(
+            service.change_tun(true, true, || Ok(())).unwrap(),
+            Some(false)
+        );
+        assert!(!service.status().running);
+        service.shutdown().unwrap();
+    }
 }

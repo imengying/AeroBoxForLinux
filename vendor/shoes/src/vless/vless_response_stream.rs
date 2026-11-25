@@ -32,13 +32,18 @@ where
             let mut buf = [0u8; 2];
             let remaining = 2 - self.response_buffer.len();
             let mut read_buf = ReadBuf::new(&mut buf[..remaining]);
-            ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf))?;
+            ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf)).map_err(|error| {
+                crate::diagnostics::vless_response(error, &self.response_buffer)
+            })?;
 
             let filled = read_buf.filled();
             if filled.is_empty() {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Connection closed while reading VLESS response",
+                return Poll::Ready(Err(crate::diagnostics::vless_response(
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Connection closed while reading VLESS response",
+                    ),
+                    &self.response_buffer,
                 )));
             }
             self.response_buffer.extend_from_slice(filled);
@@ -47,9 +52,12 @@ where
         // Validate version
         let version = self.response_buffer[0];
         if version != 0 {
-            return Poll::Ready(Err(std::io::Error::other(format!(
-                "invalid server protocol version, expected 0, got {version}"
-            ))));
+            return Poll::Ready(Err(crate::diagnostics::vless_response(
+                std::io::Error::other(format!(
+                    "invalid server protocol version, expected 0, got {version}"
+                )),
+                &self.response_buffer,
+            )));
         }
 
         // Check if we need to read addons
@@ -61,13 +69,18 @@ where
             let remaining = total_response_len - self.response_buffer.len();
             let mut buf = vec![0u8; remaining];
             let mut read_buf = ReadBuf::new(&mut buf);
-            ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf))?;
+            ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf)).map_err(|error| {
+                crate::diagnostics::vless_response(error, &self.response_buffer)
+            })?;
 
             let filled = read_buf.filled();
             if filled.is_empty() {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Connection closed while reading VLESS response addons",
+                return Poll::Ready(Err(crate::diagnostics::vless_response(
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Connection closed while reading VLESS response addons",
+                    ),
+                    &self.response_buffer,
                 )));
             }
             self.response_buffer.extend_from_slice(filled);
@@ -200,6 +213,10 @@ mod tests {
             let mut stream = VlessResponseStream::new(io);
             let error = stream.read(&mut [0; 1]).await.unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof, "len={len}");
+            assert!(error.to_string().contains(&format!(
+                "stage=vless_response received={len} expected={}",
+                if len < 2 { 2 } else { header.len() }
+            )));
         }
     }
 

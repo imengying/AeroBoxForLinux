@@ -124,43 +124,29 @@ impl Ui {
             title.set_max_width_chars(12);
             title.set_tooltip_text(Some(&item.name));
             header.append(&title);
-            if !item.import_issues.is_empty() {
-                let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
-                warning.add_css_class("warning");
-                warning.set_tooltip_text(Some(&format!(
-                    "{} 个节点未导入，可在菜单查看结果",
-                    item.import_issues.len()
-                )));
-                header.append(&warning);
-            }
             let indicator = gtk::Stack::new();
             indicator.set_size_request(16, 16);
             indicator.set_valign(gtk::Align::Center);
-            let check = gtk::Image::from_icon_name("object-select-symbolic");
-            check.add_css_class("selection-check");
-            indicator.add_named(&check, Some("chosen"));
             indicator.add_named(
                 &gtk::Box::new(gtk::Orientation::Horizontal, 0),
                 Some("empty"),
             );
             let spinner = gtk::Spinner::new();
             indicator.add_named(&spinner, Some("busy"));
-            indicator.set_visible_child_name(if selected { "chosen" } else { "empty" });
+            indicator.set_visible_child_name("empty");
             indicators.borrow_mut().push((indicator.clone(), spinner));
             header.append(&indicator);
-            let expiry = if item.expires == 0 {
-                "有效期未知".to_owned()
-            } else {
-                format!("{} 到期", format_timestamp(item.expires, "%Y-%m-%d"))
-            };
-            let expiration = label(&expiry, "subscription-expiry muted small");
-            expiration.set_widget_name("subscription-expiry");
-            expiration.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            if item.expires > 0 && item.expires <= model::now() {
-                expiration.add_css_class("error");
+            if item.expires > 0 {
+                let expiry = format!("{} 到期", format_timestamp(item.expires, "%Y-%m-%d"));
+                let expiration = label(&expiry, "subscription-expiry muted small");
+                expiration.set_widget_name("subscription-expiry");
+                expiration.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                if item.expires <= model::now() {
+                    expiration.add_css_class("error");
+                }
+                title.set_tooltip_text(Some(&format!("{} · {}", item.name, expiry)));
+                header.append(&expiration);
             }
-            title.set_tooltip_text(Some(&format!("{} · {}", item.name, expiry)));
-            header.append(&expiration);
             let menu = gtk::MenuButton::builder()
                 .icon_name("view-more-symbolic")
                 .tooltip_text("订阅操作")
@@ -186,28 +172,23 @@ impl Ui {
                 }
             });
             actions.append(&edit);
-            let report = gtk::Button::with_label("导入结果");
-            report.add_css_class("flat");
-            report.set_widget_name("subscription-import-report");
-            let id = item.id.clone();
+            let edit_nodes = icon_button("document-edit-symbolic", "编辑节点配置");
+            edit_nodes.set_widget_name("subscription-edit-nodes");
             let weak = Rc::downgrade(self);
-            let pop = popover.downgrade();
-            report.connect_clicked(move |_| {
-                if let Some(pop) = pop.upgrade() {
-                    pop.popdown();
-                }
+            let id = item.id.clone();
+            edit_nodes.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade()
                     && let Some(sub) = ui
                         .service
                         .snapshot()
                         .subscriptions
                         .into_iter()
-                        .find(|s| s.id == id)
+                        .find(|sub| sub.id == id)
                 {
-                    ui.subscription_report(&sub, "导入结果", true);
+                    editors::nodes(&ui.window, ui.service.clone(), sub, ui.saved());
                 }
             });
-            actions.append(&report);
+            header.append(&edit_nodes);
             let refresh = gtk::Button::with_label("更新订阅");
             refresh.add_css_class("flat");
             refresh.set_sensitive(!item.source.is_empty());
@@ -233,7 +214,7 @@ impl Ui {
                                     .into_iter()
                                     .find(|s| s.id == id)
                                 {
-                                    ui.subscription_report(&sub, "订阅已更新", false);
+                                    ui.notify(&format!("订阅已更新 · {} 个节点", sub.nodes.len()));
                                 }
                             }
                             Err(error) => ui.error("订阅更新失败", format!("{error:#}")),
@@ -362,11 +343,7 @@ impl Ui {
                                     ))]);
                                 }
                                 spinner.stop();
-                                indicator.set_visible_child_name(if selected {
-                                    "chosen"
-                                } else {
-                                    "empty"
-                                });
+                                indicator.set_visible_child_name("empty");
                             }
                             displayed_revision.set(revision);
                         }
@@ -391,6 +368,7 @@ impl Ui {
         if let Some(app) = self.window.application() {
             window.set_application(Some(&app));
         }
+        follow_theme(&window);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("editor-root");
         root.add_css_class("import-dialog");
@@ -592,7 +570,7 @@ impl Ui {
                                 .into_iter()
                                 .find(|s| s.id == id)
                             {
-                                ui.subscription_report(&sub, "订阅已导入", false);
+                                ui.notify(&format!("已导入 {} 个节点", sub.nodes.len()));
                             }
                         }
                         Err(e) => {
@@ -604,60 +582,6 @@ impl Ui {
             );
         });
         window.present();
-    }
-
-    fn subscription_report(&self, sub: &Subscription, title: &str, always_show: bool) {
-        let protocols = subscription::protocol_summary(&sub.nodes);
-        let summary = format!("{} 个节点 · {protocols}", sub.nodes.len());
-        if sub.import_issues.is_empty() && !always_show {
-            self.notify(&format!("{title}：{summary}"));
-            return;
-        }
-        let dialog = adw::AlertDialog::new(None::<&str>, None::<&str>);
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        content.set_widget_name("subscription-import-result");
-        let heading = label(title, "title-3");
-        heading.set_halign(gtk::Align::Center);
-        content.append(&heading);
-        let text = gtk::Label::builder()
-            .label(format!("{}\n{summary}", sub.name))
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(48)
-            .build();
-        content.append(&text);
-        if !sub.import_issues.is_empty() {
-            let details = gtk::Expander::builder()
-                .label(format!(
-                    "{} 个节点未导入：查看原因",
-                    sub.import_issues.len()
-                ))
-                .build();
-            details.set_widget_name("subscription-import-issues");
-            let text = gtk::Label::builder()
-                .label(sub.import_issues.join("\n\n"))
-                .xalign(0.0)
-                .yalign(0.0)
-                .selectable(true)
-                .wrap(true)
-                .wrap_mode(gtk::pango::WrapMode::WordChar)
-                .max_width_chars(48)
-                .build();
-            let scroll = gtk::ScrolledWindow::builder()
-                .child(&text)
-                .min_content_height(120)
-                .max_content_height(260)
-                .propagate_natural_height(true)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .build();
-            details.set_child(Some(&scroll));
-            content.append(&details);
-        }
-        dialog.set_extra_child(Some(&content));
-        dialog.add_response("close", "知道了");
-        dialog.set_default_response(Some("close"));
-        dialog.set_close_response("close");
-        dialog.present(Some(&self.window));
     }
 }
 
@@ -697,11 +621,26 @@ pub(super) async fn smoke_selection(
         state.settings.active_subscription == state.subscriptions[active].id,
         "点击没有选用订阅"
     );
-    for (index, _) in state.subscriptions.iter().enumerate() {
+    for (index, subscription) in state.subscriptions.iter().enumerate() {
         let row = list.child_at_index(index as i32).unwrap();
         ensure!(
             row.has_css_class("subscription-selected") == (index == active),
             "订阅高亮不准确"
+        );
+        let parts = descendants(&row);
+        ensure!(
+            !parts
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Image>())
+                .any(|image| image.icon_name().as_deref() == Some("object-select-symbolic")),
+            "订阅卡片仍显示选中角标"
+        );
+        ensure!(
+            parts
+                .iter()
+                .any(|widget| widget.widget_name() == "subscription-expiry")
+                == (subscription.expires > 0),
+            "订阅日期显示与到期信息不一致"
         );
         if row.width() > 0 && list.width() > 0 {
             let bounds = row.compute_bounds(&list).context("订阅卡片没有位置")?;
@@ -709,7 +648,6 @@ pub(super) async fn smoke_selection(
                 bounds.x() >= 0.0 && bounds.x() + bounds.width() <= list.width() as f32 + 1.0,
                 "订阅卡片超出页面"
             );
-            let parts = descendants(&row);
             let get = |name: &str| -> Result<gtk::graphene::Rect> {
                 parts
                     .iter()
@@ -719,21 +657,23 @@ pub(super) async fn smoke_selection(
                     .context("订阅卡片信息没有位置")
             };
             let name = get("subscription-name")?;
-            let expiry = get("subscription-expiry")?;
             let progress = get("subscription-progress")?;
             let usage = get("subscription-usage")?;
             let updated = get("subscription-updated")?;
             ensure!(
                 name.y() + name.height() <= progress.y()
-                    && expiry.y() + expiry.height() <= progress.y()
                     && progress.y() + progress.height() <= usage.y()
                     && (usage.y() - updated.y()).abs() <= 2.0,
                 "订阅进度条与流量、更新时间布局不正确"
             );
-            ensure!(
-                (name.y() - expiry.y()).abs() < 2.0,
-                "名称和有效期不在同一行"
-            );
+            if subscription.expires > 0 {
+                let expiry = get("subscription-expiry")?;
+                ensure!(
+                    (name.y() - expiry.y()).abs() < 2.0
+                        && expiry.y() + expiry.height() <= progress.y(),
+                    "名称和有效期不在同一行"
+                );
+            }
             ensure!(usage.width() > 0.0, "订阅缺少流量信息");
             if index == 1 {
                 let first = list
@@ -955,6 +895,32 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
 pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
     let mut retained = Vec::<glib::WeakRef<glib::Object>>::new();
     let app = ui.window.application().context("缺少应用")?;
+    // Open the node editor from its visible card action; this must not select
+    // another subscription or route just because the user wants to edit it.
+    let active = ui.service.snapshot().settings.active_subscription;
+    ui.navigate(Page::Subscriptions);
+    let edit = descendants(&ui.body)
+        .into_iter()
+        .find(|w| w.widget_name() == "subscription-edit-nodes")
+        .and_then(|w| w.downcast::<gtk::Button>().ok())
+        .context("缺少节点编辑按钮")?;
+    edit.emit_clicked();
+    let editor = app
+        .windows()
+        .into_iter()
+        .find(|w| w.title().is_some_and(|title| title.ends_with(" · 节点")))
+        .context("节点编辑未打开")?;
+    anyhow::ensure!(
+        descendants(&editor).iter().any(|w| w
+            .downcast_ref::<sourceview::View>()
+            .is_some_and(|view| view.is_editable())),
+        "节点配置不可编辑"
+    );
+    anyhow::ensure!(
+        ui.service.snapshot().settings.active_subscription == active,
+        "编辑节点改变了订阅选择"
+    );
+    editor.close();
     for _ in 0..5 {
         ui.import_subscription();
         let window = smoke_import_window(ui)?;

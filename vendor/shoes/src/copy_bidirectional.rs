@@ -326,7 +326,12 @@ where
         let b_result = transfer_one_direction(cx, b_to_a, &mut *b_buf, &mut *b, &mut *a);
 
         match (a_result, b_result) {
-            (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => return Poll::Ready(Err(e)),
+            (Poll::Ready(Err(e)), _) => {
+                return Poll::Ready(Err(crate::diagnostics::stage("relay_upload", e)));
+            }
+            (_, Poll::Ready(Err(e))) => {
+                return Poll::Ready(Err(crate::diagnostics::stage("relay_download", e)));
+            }
             (Poll::Ready(Ok(())), Poll::Ready(Ok(()))) => {
                 return Poll::Ready(Ok(CopyOutcome::Complete));
             }

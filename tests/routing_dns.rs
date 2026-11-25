@@ -268,6 +268,33 @@ fn policy_lookups_request_recursion_for_both_address_families() {
     }
     assert!(forwarded_dns.load(Ordering::Relaxed) > 0);
     assert_eq!(direct.count(), 0, "remote lookup leaked to direct DNS");
+    // Error-level logs must identify the failed lookup without rerouting it.
+    remote.reject.store(true, Ordering::Relaxed);
+    assert!(support::request(&app.service, "http://failed.recursive.example.test/").is_err());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let logs = loop {
+        let logs = app.service.logs();
+        if logs.contains("stage=dns") || std::time::Instant::now() >= deadline {
+            break logs;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for field in [
+        "stage=outbound_setup",
+        "stage=dns",
+        "failed.recursive.example.test",
+        "qtype=",
+        "upstream=",
+        "elapsed_ms=",
+        "DNS response",
+    ] {
+        assert!(logs.contains(field), "missing {field}: {logs}");
+    }
+    assert_eq!(
+        direct.count(),
+        0,
+        "failed remote lookup leaked to direct DNS"
+    );
 }
 
 #[test]

@@ -31,9 +31,6 @@
 .node-card.node-selected { box-shadow: none; }
 .node-card.node-selected .muted,
 .node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .90); }
-.node-card.node-selected .node-check { color: @accent_fg_color; }
-.subscription-card.subscription-selected .selection-check { color: @accent_color; }
-.dark .subscription-card.subscription-selected .selection-check { color: @dark_on_primary_container; }
 .node-card.node-selected .node-test-button { color: @accent_fg_color; }
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
 /* Card innards share one padding so selected and unselected cards stay the
@@ -44,9 +41,6 @@
 .node-protocol, .node-delay { font-size: 0.90em; }
 .node-protocol { color: @app_muted; letter-spacing: .02em; }
 .dark .node-protocol { color: @dark_muted; }
-.node-check { color: @accent_color; }
-.selection-check { color: @accent_color; }
-.node-card.node-selected .node-check { color: @accent_fg_color; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
 /* Latency colour communicates quality on an unselected card. The selected
  * blue card deliberately uses white text for a consistent, readable contrast. */

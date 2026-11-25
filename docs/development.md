@@ -21,6 +21,8 @@ make clean
 
 `make test` 和 GitHub Actions 还运行 `scripts/test-protocols.sh --unit`，覆盖内置传输、DNS、TLS 与密码组件的回归测试。这个模式无需 Go、独立协议服务端或内核 kTLS 支持。组件测试以主项目的 `Cargo.lock` 为基础解析测试依赖，结束时清理临时锁文件。
 
+`scripts/check-network.sh` 检查网络任务的归属，并验证 Vision 分帧状态机和基准工具。持续模糊测试、性能对比与连接日志说明见 [网络诊断与验证](network-validation.md)。这些开发工具不随应用安装。
+
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 
 ```sh
@@ -63,6 +65,8 @@ kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / Cha
 - `resources/rules/`：初始规则数据及来源说明。
 - `build.rs`：构建时将资源清单编译到 Cargo 输出目录，不在源码中保存生成的资源包。需要 `glib-compile-resources`（GLib 开发工具）。
 - `tests/`：应用的集成测试与测试服务端。
+- `tools/protocol-checks/`：网络任务静态检查与 Vision 状态机模糊测试。
+- `examples/network-bench.rs`：基准测试使用的隔离应用进程，由 `scripts/bench-network.py` 驱动。
 - `vendor/`、`licenses/`：第三方源码及许可。
 - `scripts/`：安装、卸载、打包和 Wayland 验证。
 - `docs/`：开发说明和协议支持。

@@ -668,6 +668,7 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncStream>> {
+        let began = std::time::Instant::now();
         let deadline =
             tokio::time::Instant::now() + self.connect_timeout.unwrap_or(TCP_ATTEMPT_TIMEOUT);
         self.with_timeout(async {
@@ -719,6 +720,7 @@ impl SocketConnector for SocketConnectorImpl {
             }
         })
         .await
+        .map_err(|error| crate::diagnostics::timed("connect", began, error))
     }
 
     async fn connect_udp_bidirectional(

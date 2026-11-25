@@ -50,16 +50,21 @@ impl TlsClientHandler {
         mode: TlsReadMode,
         reopen: Option<crate::tcp::tcp_handler::ReopenTransport<'_>>,
     ) -> std::io::Result<CryptoTlsStream<Box<dyn AsyncStream>>> {
+        let began = std::time::Instant::now();
         let stream = tokio::time::timeout(
             self.handshake_timeout,
             self.handshake_inner(stream, mode, reopen),
         )
         .await
-        .map_err(std::io::Error::from)??;
+        .map_err(std::io::Error::from)
+        .and_then(|result| result)
+        .map_err(|error| crate::diagnostics::timed("tls_handshake", began, error))?;
         // Every setup path, including pooled transports and ECH retries, must
         // validate the negotiated protocol before exposing the secured stream.
         if let TlsInnerClientHandler::Default(handler) = &self.handler {
-            handler.validate_alpn(stream.alpn_protocol())?;
+            handler
+                .validate_alpn(stream.alpn_protocol())
+                .map_err(|error| crate::diagnostics::stage("tls_alpn", error))?;
         }
         Ok(stream)
     }
@@ -439,6 +444,17 @@ mod tests {
                     error.kind(),
                     std::io::ErrorKind::TimedOut,
                     "{path}: {error}"
+                );
+                let stage = if path == "reality" {
+                    "reality_handshake"
+                } else {
+                    "tls_handshake"
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("stage={stage} elapsed_ms=")),
+                    "{error}"
                 );
                 assert_eq!(start.elapsed(), expected, "{path}");
                 let mut hello = Vec::new();

@@ -1,15 +1,12 @@
 use super::*;
 
 type SettingsAction = Rc<dyn Fn(&Rc<Ui>, bool)>;
-type PermissionRefresh = Rc<dyn Fn(&Rc<Ui>)>;
 
 pub(super) struct SettingsPanel {
     save: gtk::Button,
-    stack: gtk::Stack,
-    tabs: gtk::StackSwitcher,
+    form: gtk::Box,
     autostart: adw::SwitchRow,
     read: Rc<dyn Fn() -> (model::Settings, bool)>,
-    refresh_permissions: PermissionRefresh,
     baseline: RefCell<(model::Settings, bool)>,
     is_dirty: Cell<bool>,
     saving: Cell<bool>,
@@ -27,6 +24,7 @@ impl SettingsPanel {
         let next = model::Settings {
             active_subscription: saved.active_subscription,
             routing_mode: saved.routing_mode,
+            tun_enabled: saved.tun_enabled,
             ..current
         };
         if let Err(error) = next.validate() {
@@ -46,8 +44,7 @@ impl SettingsPanel {
                     return;
                 };
                 panel.saving.set(false);
-                panel.stack.set_sensitive(true);
-                panel.tabs.set_sensitive(true);
+                panel.form.set_sensitive(true);
                 match result {
                     Ok(()) => {
                         panel.is_dirty.set(false);
@@ -56,7 +53,6 @@ impl SettingsPanel {
                         panel
                             .baseline
                             .replace((ui.service.snapshot().settings, login));
-                        panel.refresh_permissions(ui);
                         ui.notify("设置已保存");
                         if let Some(after) = after {
                             after();
@@ -151,10 +147,6 @@ impl SettingsPanel {
         self.baseline.borrow().0.clone()
     }
 
-    pub(super) fn refresh_permissions(&self, ui: &Rc<Ui>) {
-        (self.refresh_permissions)(ui);
-    }
-
     fn sync_autostart(&self, service: &Service) {
         self.autostart.set_active(service.autostart_enabled());
         self.update_dirty();
@@ -162,8 +154,7 @@ impl SettingsPanel {
 
     fn busy(&self, active: bool) {
         self.saving.set(active);
-        self.stack.set_sensitive(!active);
-        self.tabs.set_sensitive(!active);
+        self.form.set_sensitive(!active);
         self.save.set_visible(!active && self.is_dirty.get());
         self.save.set_sensitive(!active && self.is_dirty.get());
     }
@@ -290,24 +281,10 @@ impl Ui {
         save.set_sensitive(false);
         self.floating.add_overlay(&save);
         self.settings_action.replace(Some(save.clone()));
-        let stack = gtk::Stack::builder()
-            .hhomogeneous(false)
-            .vhomogeneous(false)
-            .build();
-        stack.set_widget_name("settings-sections");
-        let tabs = gtk::StackSwitcher::builder()
-            .stack(&stack)
-            .halign(gtk::Align::Start)
-            .build();
-        tabs.add_css_class("editor-tabs");
-        self.body.append(&tabs);
-        self.body.append(&stack);
-        let general_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
-        let network_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
-        let tun_page = gtk::Box::new(gtk::Orientation::Vertical, 24);
-        stack.add_titled(&general_page, Some("general"), "常规");
-        stack.add_titled(&network_page, Some("network"), "网络");
-        stack.add_titled(&tun_page, Some("tun"), "虚拟网卡");
+        let form = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        form.set_widget_name("settings-form");
+        self.body.append(&form);
+        self.body.set_margin_bottom(84);
         let appearance = group("外观与启动");
         let theme = combo(
             "外观",
@@ -354,7 +331,7 @@ impl Ui {
         appearance.add(&autostart);
         let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
         appearance.add(&detect_ip);
-        general_page.append(&appearance);
+        form.append(&appearance);
 
         let network = group("代理");
         let proxy = switch_row("连接时启用系统代理", "", settings.system_proxy);
@@ -366,7 +343,7 @@ impl Ui {
         network.add(&lan);
         let mixed_port = number_entry("代理端口", &settings.mixed_port.to_string());
         network.add(&mixed_port.root);
-        network_page.append(&network);
+        form.append(&network);
         let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
         routing.add(&bypass);
@@ -390,120 +367,13 @@ impl Ui {
         dns.add(&hijack);
         let cache = switch_row("DNS 缓存", "缓存域名解析结果", settings.dns_cache);
         dns.add(&cache);
-        network_page.append(&routing);
-        network_page.append(&dns);
+        form.append(&routing);
+        form.append(&dns);
 
         let tun_group = group("虚拟网卡");
-        let tun = switch_row("启用 TUN", "", settings.tun_enabled);
-        tun_group.add(&tun);
         let mtu = number_entry("MTU", &settings.tun_mtu.to_string());
         tun_group.add(&mtu.root);
-        mtu.root.set_sensitive(settings.tun_enabled);
-        let mtu_row = mtu.root.downgrade();
-        tun.connect_active_notify(move |row| {
-            if let Some(mtu) = mtu_row.upgrade() {
-                mtu.set_sensitive(row.is_active());
-            }
-        });
-        let permissions = adw::ActionRow::builder()
-            .title("网络权限")
-            .subtitle("读取中…")
-            .build();
-        let authorize = gtk::Button::with_label("授权");
-        authorize.set_valign(gtk::Align::Center);
-        authorize.set_tooltip_text(Some("允许 AeroBox 创建虚拟网卡"));
-        permissions.add_suffix(&authorize);
-        tun_group.add(&permissions);
-        tun_page.append(&tun_group);
-        let refresh_permissions: PermissionRefresh = Rc::new({
-            let permissions = permissions.downgrade();
-            let authorize = authorize.downgrade();
-            let generation = Rc::new(Cell::new(0_u64));
-            move |ui: &Rc<Ui>| {
-                let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade()) else {
-                    return;
-                };
-                let request = generation.get().wrapping_add(1);
-                generation.set(request);
-                row.set_subtitle("读取中…");
-                row.set_tooltip_text(None);
-                button.set_sensitive(false);
-                button.set_label("检查中…");
-                let (tx, rx) = mpsc::channel();
-                let service = ui.service.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(service.tun_available());
-                });
-                let permissions = permissions.clone();
-                let authorize = authorize.clone();
-                let generation = generation.clone();
-                let weak_ui = Rc::downgrade(ui);
-                glib::timeout_add_local(Duration::from_millis(100), move || {
-                    if weak_ui.upgrade().is_none() {
-                        return glib::ControlFlow::Break;
-                    }
-                    if generation.get() != request {
-                        return glib::ControlFlow::Break;
-                    }
-                    let (Some(row), Some(button)) = (permissions.upgrade(), authorize.upgrade())
-                    else {
-                        return glib::ControlFlow::Break;
-                    };
-                    match rx.try_recv() {
-                        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                        Ok(Ok(true)) => {
-                            row.set_subtitle("已授权，可创建虚拟网卡");
-                            button.set_sensitive(false);
-                            button.set_label("已授权");
-                            glib::ControlFlow::Break
-                        }
-                        Ok(Ok(false)) => {
-                            row.set_subtitle("未授权；TUN 需要网络管理权限");
-                            button.set_sensitive(true);
-                            button.set_label("授权");
-                            glib::ControlFlow::Break
-                        }
-                        Ok(Err(error)) => {
-                            row.set_subtitle("无法读取网络权限");
-                            row.set_tooltip_text(Some(&format!("{error:#}")));
-                            button.set_sensitive(true);
-                            button.set_label("授权");
-                            glib::ControlFlow::Break
-                        }
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            row.set_subtitle("权限检查未完成，请重新打开设置");
-                            button.set_sensitive(true);
-                            button.set_label("授权");
-                            glib::ControlFlow::Break
-                        }
-                    }
-                });
-            }
-        });
-        refresh_permissions(self);
-        let weak = Rc::downgrade(self);
-        let refresh_after_authorize = refresh_permissions.clone();
-        authorize.connect_clicked(move |button| {
-            if let Some(ui) = weak.upgrade() {
-                button.set_sensitive(false);
-                let button = button.downgrade();
-                let refresh = refresh_after_authorize.clone();
-                ui.task(
-                    "授权",
-                    |s| Ok(s.authorize_tun()),
-                    move |ui, result| {
-                        match result {
-                            Ok(()) => ui.notify("授权已保存，重启 AeroBox 后生效"),
-                            Err(e) => ui.error("授权失败", format!("{e:#}")),
-                        }
-                        if let Some(button) = button.upgrade() {
-                            button.set_label("检查中…");
-                        }
-                        refresh(ui);
-                    },
-                );
-            }
-        });
+        form.append(&tun_group);
 
         let logging = group("日志与诊断");
         let levels = ["trace", "debug", "info", "warn", "error"];
@@ -517,14 +387,14 @@ impl Ui {
         );
         logging.add(&log);
         self.diagnostics_row(&logging);
-        general_page.append(&logging);
+        form.append(&logging);
 
         let testing = group("测速");
         let test_url = LabeledEntry::new("测试地址", &settings.test_url);
         testing.add(&test_url.root);
         let timeout = number_entry("超时（毫秒）", &settings.test_timeout.to_string());
         testing.add(&timeout.root);
-        network_page.append(&testing);
+        form.append(&testing);
         let data = group("应用");
         let dir = adw::ActionRow::builder()
             .title("配置目录")
@@ -555,7 +425,7 @@ impl Ui {
                 .subtitle(option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
                 .build(),
         );
-        general_page.append(&data);
+        form.append(&data);
         let weak = Rc::downgrade(self);
         let reset = adw::ActionRow::builder()
             .title("恢复默认设置")
@@ -651,7 +521,7 @@ impl Ui {
         restore.set_valign(gtk::Align::Center);
         import_row.add_suffix(&restore);
         backup_group.add(&import_row);
-        general_page.append(&backup_group);
+        form.append(&backup_group);
         let weak = Rc::downgrade(self);
         export.connect_clicked(move |button| {
             let Some(ui) = weak.upgrade() else {
@@ -805,7 +675,6 @@ impl Ui {
                     direct_dns: direct_dns.text().trim().into(),
                     remote_dns: remote_dns.text().trim().into(),
                     auto_detect_ip: detect_ip.is_active(),
-                    tun_enabled: tun.is_active(),
                     tun_mtu: mtu.text().trim().parse().unwrap_or(0),
                     log_level: levels[log.selected() as usize].into(),
                     test_url: test_url.text().trim().into(),
@@ -822,20 +691,9 @@ impl Ui {
         });
         let panel = Rc::new(SettingsPanel {
             save: save.clone(),
-            stack: self
-                .body
-                .last_child()
-                .and_then(|widget| widget.downcast::<gtk::Stack>().ok())
-                .expect("settings form stack"),
-            tabs: self
-                .body
-                .first_child()
-                .and_then(|widget| widget.next_sibling())
-                .and_then(|widget| widget.downcast::<gtk::StackSwitcher>().ok())
-                .expect("settings tabs"),
+            form,
             autostart: autostart.clone(),
             read: read.clone(),
-            refresh_permissions,
             baseline,
             is_dirty: Cell::new(false),
             saving: Cell::new(false),
@@ -881,14 +739,13 @@ impl Ui {
 }
 pub(super) fn smoke_general(ui: &Rc<Ui>) -> Result<()> {
     let panel = ui.settings_panel.borrow().clone().context("缺少设置页")?;
-    let pages = panel.stack.pages();
-    anyhow::ensure!(pages.n_items() == 3, "设置分类应为常规、网络和虚拟网卡");
+    let content = descendants(&panel.form);
     anyhow::ensure!(
-        panel.stack.visible_child_name().as_deref() == Some("general"),
-        "常规设置未显示"
+        !content
+            .iter()
+            .any(|widget| widget.is::<gtk::StackSwitcher>()),
+        "设置仍有标签页"
     );
-    let page = panel.stack.visible_child().context("缺少常规设置内容")?;
-    let content = descendants(&page);
     anyhow::ensure!(
         content.iter().any(|widget| widget
             .downcast_ref::<adw::ComboRow>()
@@ -966,13 +823,20 @@ async fn smoke_respond(ui: &Ui, response: &str) -> Result<()> {
 }
 
 pub(super) fn smoke_section(ui: &Ui, section: &str) -> Result<()> {
-    let panel = ui.settings_panel.borrow();
-    let stack = &panel.as_ref().context("缺少设置页")?.stack;
-    anyhow::ensure!(
-        stack.child_by_name(section).is_some(),
-        "缺少设置分组 {section}"
-    );
-    stack.set_visible_child_name(section);
+    let title = match section {
+        "general" => "外观与启动",
+        "network" => "DNS",
+        "tun" => "虚拟网卡",
+        _ => anyhow::bail!("未知设置分组"),
+    };
+    let group = descendants(&ui.body)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<adw::PreferencesGroup>().ok())
+        .find(|group| group.title() == title)
+        .context("缺少设置分组")?;
+    if let Some(bounds) = group.compute_bounds(&ui.body) {
+        ui.scroll.vadjustment().set_value(f64::from(bounds.y()));
+    }
     Ok(())
 }
 
@@ -1160,81 +1024,53 @@ pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
     }
 }
 
-pub(super) async fn smoke_tun_permission(ui: &Rc<Ui>) -> Result<()> {
+pub(super) async fn smoke_tun_settings(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
-
-    let row = descendants(&ui.body)
-        .iter()
-        .filter_map(|widget| widget.clone().downcast::<adw::ActionRow>().ok())
-        .find(|row| row.title().as_str() == "网络权限")
-        .context("缺少网络权限行")?;
-    ensure!(row.is_visible(), "网络权限行不可见");
+    let widgets = descendants(&ui.body);
     ensure!(
-        !ui.service.status().running,
-        "权限自检不能更改正在运行的连接"
+        !widgets
+            .iter()
+            .any(|widget| widget.is::<gtk::StackSwitcher>()),
+        "设置仍有标签页"
     );
-    let panel = ui
-        .settings_panel
-        .borrow()
-        .as_ref()
-        .cloned()
-        .context("缺少设置页")?;
-    let authorize = smoke_data_button(ui, "网络权限")?;
-    let mtu = descendants(&ui.body)
-        .into_iter()
-        .filter_map(|widget| widget.downcast::<gtk::Entry>().ok())
+    ensure!(
+        !widgets
+            .iter()
+            .filter_map(|w| w.downcast_ref::<adw::ActionRow>())
+            .any(|row| matches!(row.title().as_str(), "网络权限" | "启用 TUN")),
+        "设置仍有重复的 TUN 控件"
+    );
+    let panel = ui.settings_panel.borrow().clone().context("缺少设置页")?;
+    let mtu = widgets
+        .iter()
+        .filter_map(|w| w.downcast_ref::<gtk::Entry>())
         .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
-        .context("缺少 MTU 输入")?;
-    let original_mtu = ui.service.snapshot().settings.tun_mtu;
-    let changed_mtu = if original_mtu == 1400 { 1500 } else { 1400 };
-    for value in [changed_mtu, original_mtu] {
-        // Seed stale feedback to prove that saving refreshes the retained row,
-        // including a previous error, without invoking privileged authorization.
-        row.set_subtitle("权限自检：旧状态");
-        row.set_tooltip_text(Some("权限自检：旧错误"));
-        authorize.set_label("旧状态");
+        .context("缺少 MTU")?;
+    let original = ui.service.snapshot().settings;
+    for value in [
+        if original.tun_mtu == 1400 { 1500 } else { 1400 },
+        original.tun_mtu,
+    ] {
         mtu.set_text(&value.to_string());
         panel.save.emit_clicked();
         smoke_saving(ui)?;
         let start = std::time::Instant::now();
-        while ui.jobs.get() > 0 || row.subtitle().as_deref() == Some("读取中…") {
-            ensure!(
-                start.elapsed() < Duration::from_secs(5),
-                "保存后权限检查未完成"
-            );
+        while ui.jobs.get() > 0 {
+            ensure!(start.elapsed() < Duration::from_secs(5), "保存 MTU 超时");
             glib::timeout_future(Duration::from_millis(16)).await;
         }
+        let saved = ui.service.snapshot().settings;
         ensure!(
-            ui.service.snapshot().settings.tun_mtu == value,
-            "虚拟网卡设置未保存"
+            saved.tun_mtu == value && saved.tun_enabled == original.tun_enabled,
+            "保存 MTU 改变了 TUN 开关"
         );
         ensure!(
             ui.settings_panel
                 .borrow()
                 .as_ref()
-                .is_some_and(|current| Rc::ptr_eq(current, &panel))
-                && row.is_ancestor(&ui.body)
-                && panel.stack.visible_child_name().as_deref() == Some("tun"),
-            "保存后重建了设置表单或切换了设置分组"
+                .is_some_and(|p| Rc::ptr_eq(p, &panel)),
+            "保存重建了设置表单"
         );
-        let expected = ui.service.tun_available();
-        let (subtitle, button_label, sensitive) = match &expected {
-            Ok(true) => ("已授权，可创建虚拟网卡", "已授权", false),
-            Ok(false) => ("未授权；TUN 需要网络管理权限", "授权", true),
-            Err(_) => ("无法读取网络权限", "授权", true),
-        };
-        ensure!(
-            row.subtitle().as_deref() == Some(subtitle)
-                && authorize.label().as_deref() == Some(button_label)
-                && authorize.is_sensitive() == sensitive,
-            "保存后权限显示没有更新: {:?}, {:?}, {}",
-            row.subtitle(),
-            authorize.label(),
-            authorize.is_sensitive()
-        );
-        if expected.is_ok() {
-            ensure!(row.tooltip_text().is_none(), "权限刷新保留了旧错误提示");
-        }
     }
     Ok(())
 }
@@ -1436,7 +1272,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
                 && settings.font_size == model::FONT_SIZE_MAX
                 && settings.allow_lan
                 && !settings.dns_cache
-                && settings.tun_enabled
+                && !settings.tun_enabled
                 && settings.tun_mtu == 1400
                 && settings.direct_dns == "tcp://223.5.5.5:5353"
                 && settings.remote_dns == "tls://one.one.one.one",
@@ -1458,7 +1294,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         ("IPv6", false),
         ("允许局域网访问", true),
         ("DNS 缓存", false),
-        ("启用 TUN", true),
     ] {
         let row = body
             .iter()
@@ -1478,7 +1313,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .filter_map(|w| w.clone().downcast::<gtk::Entry>().ok())
         .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
         .context("缺少 MTU 输入")?;
-    ensure!(mtu.is_sensitive(), "启用 TUN 后无法设置 MTU");
+    ensure!(mtu.is_sensitive(), "无法设置 MTU");
     mtu.set_text("1400");
     body.iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
@@ -1497,11 +1332,6 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     }
     save.emit_clicked();
     smoke_saving(ui)?;
-    body.iter()
-        .filter_map(|w| w.clone().downcast::<gtk::Stack>().ok())
-        .find(|stack| stack.widget_name() == "settings-sections")
-        .context("缺少设置分组")?
-        .set_visible_child_name("tun");
     let scroll = ui
         .body
         .ancestor(gtk::ScrolledWindow::static_type())

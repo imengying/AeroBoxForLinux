@@ -1,0 +1,28 @@
+[package]
+name = "aerobox-protocol-checks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+[workspace]
+members = ["."]
+exclude = ["fuzz"]
+resolver = "3"
+
+[features]
+default = ["task-check"]
+task-check = ["dep:syn", "dep:proc-macro2"]
+
+[dependencies]
+log = { version = "0.4.35", features = ["max_level_off"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"], optional = true }
+syn = { version = "2.0.119", features = ["full", "visit"], optional = true }
+
+[[bin]]
+name = "protocol-checks"
+path = "src/main.rs"
+required-features = ["task-check"]
+
+[profile.dev]
+debug = 0

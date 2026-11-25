@@ -26,7 +26,7 @@ cd AeroBoxForLinux-linux-amd64
 3. 在首页选择「规则」「全局」或「直连」，点击右下角「启动」。全局使用所选节点；规则按启用的规则分流，未匹配的连接使用所选节点；直连绕过节点。模式切换会断开旧连接。
 4. 节点卡片下方可单独测速，右下角悬浮按钮测试当前订阅。连接页可查看和断开连接，设置 → 常规提供日志级别与连接诊断。
 
-首页显示单个出口 IP、上传下载、连接数、运行时间及 AeroBox 整体内存。优先显示 IPv4，点击 IP 卡片重新检测。IPv6 开关位于设置中；字体大小支持 9–18 pt，布局随字体和 Wayland 缩放调整。日志级别默认 `error`。
+首页显示出口 IP、上传下载、连接数、运行时间及 AeroBox 整体内存。IPv4 在上方，启用 IPv6 后同时检测并显示 IPv6；两个地址分别更新，点击 IP 卡片重新检测。IPv6 开关位于设置中；字体大小支持 9–18 pt，布局随字体和 Wayland 缩放调整。日志级别默认 `error`。
 
 支持 Shadowsocks、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP。具体传输和字段见[协议与订阅](docs/protocols.md)。
 
@@ -34,7 +34,7 @@ cd AeroBoxForLinux-linux-amd64
 
 系统代理支持 GNOME 和 KDE Plasma；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。其他应用可填写本地 HTTP / SOCKS 入口，默认 `127.0.0.1:2080`。
 
-TUN 使用固定的内部 Rust 网络栈，需要 `/dev/net/tun`、`nftables` 命令及网络管理权限。Arch Linux 可安装 `nftables libcap polkit`。在设置中授权后，**完全退出并重新启动 AeroBox** 才会获得当前进程需要的 `CAP_NET_ADMIN` / `CAP_NET_RAW`；授权作用于应用可执行文件，界面仍以当前用户身份运行。更新替换程序后需重新授权。
+TUN 使用固定的内部 Rust 网络栈，需要 `/dev/net/tun`、`nftables` 命令及网络管理权限。Arch Linux 可安装 `nftables libcap polkit`。从首页启用虚拟网卡时，如缺少权限会弹出桌面授权框；授权后 AeroBox 自动重启以获得 `CAP_NET_ADMIN` / `CAP_NET_RAW`，并恢复之前的连接状态。取消授权会保留原有状态。界面仍以当前用户身份运行；更新替换程序后，再次启用时会按需授权。
 
 TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络断开时保留接管并暂停转发，恢复联网后自动重建连接；异常退出留下的网络状态在下次启动 TUN 时清理。关闭主窗口会停止网络运行并恢复桌面代理。
 

@@ -32,10 +32,16 @@ jobs:
         run: |
           cargo fmt --package aerobox-for-linux --check
           cargo clippy --all-targets --locked -- -D warnings
+      - name: Check task ownership and protocol state machines
+        run: scripts/check-network.sh
       - name: Test
         run: cargo test --locked
       - name: Test network and TLS components
         run: scripts/test-protocols.sh --unit
+      - name: Check network benchmark tooling
+        run: |
+          cargo build --locked --example network-bench
+          python3 scripts/bench-network.py --candidate target/debug/examples/network-bench --output target/bench-smoke --rounds 1 --mib 1 --operations 10 --smoke
       - name: Build
         env:
           AEROBOX_VERSION: ${{ github.ref_name }}

@@ -83,7 +83,11 @@ async fn run_tcp_server(
         tasks.spawn(async move {
             let _permit = permit;
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                error!("{}:{} finished with error: {:?}", addr.ip(), addr.port(), e);
+                if crate::diagnostics::contains::<crate::diagnostics::DnsPolicyRejection>(&e) {
+                    debug!("connection peer={addr}: {e}");
+                } else {
+                    error!("connection peer={addr} kind={:?}: {e}", e.kind());
+                }
             } else {
                 debug!("{}:{} finished successfully", addr.ip(), addr.port());
             }
@@ -121,7 +125,11 @@ async fn run_unix_server(
         tasks.spawn(async move {
             let _permit = permit;
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                error!("{addr:?} finished with error: {e:?}");
+                if crate::diagnostics::contains::<crate::diagnostics::DnsPolicyRejection>(&e) {
+                    debug!("connection peer={addr:?}: {e}");
+                } else {
+                    error!("connection peer={addr:?} kind={:?}: {e}", e.kind());
+                }
             } else {
                 debug!("{addr:?} finished successfully");
             }
@@ -173,10 +181,7 @@ pub(crate) async fn process_stream_with_permit<AS: AsyncStream + 'static>(
     let setup_result = match setup_server_stream_future.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return Err(std::io::Error::new(
-                e.kind(),
-                format!("failed to setup server stream: {e}"),
-            ));
+            return Err(crate::diagnostics::stage("inbound_handshake", e));
         }
         Err(elapsed) => {
             return Err(std::io::Error::new(
@@ -235,9 +240,9 @@ pub(crate) async fn process_stream_with_permit<AS: AsyncStream + 'static>(
                 Ok(Err(e)) => {
                     send_connect_failure(&mut server_stream, connection_failure_response, e.kind())
                         .await;
-                    return Err(std::io::Error::new(
-                        e.kind(),
-                        format!("failed to setup client stream to {remote_location}: {e}"),
+                    return Err(crate::diagnostics::context(
+                        format!("stage=outbound_setup target={remote_location}"),
+                        e,
                     ));
                 }
                 Err(elapsed) => {
@@ -307,7 +312,19 @@ pub(crate) async fn process_stream_with_permit<AS: AsyncStream + 'static>(
 
             crate::util::shutdown_stream_pair(&mut server_stream, &mut client_stream).await;
 
-            copy_result?;
+            if let Err(error) = copy_result {
+                let route = flow.as_ref().map_or(&[][..], |flow| flow.chains.as_slice());
+                return Err(crate::diagnostics::context(
+                    format!("target={remote_location} route={route:?}"),
+                    error,
+                ));
+            }
+            if log::log_enabled!(log::Level::Debug) {
+                let counters = flow.as_ref().map(|flow| flow.counters.totals());
+                debug!(
+                    "connection target={remote_location} end=eof bytes_upload_download={counters:?}"
+                );
+            }
             Ok(())
         }
         TcpServerSetupResult::BidirectionalUdp {

@@ -28,6 +28,7 @@ pub(super) struct Dashboard {
     uptime: gtk::Label,
     memory: gtk::Label,
     exit_ip: gtk::Label,
+    exit_ipv6: gtk::Label,
     network: gtk::Button,
     rates: RefCell<RateMeter>,
     pending: Cell<bool>,
@@ -47,15 +48,14 @@ impl Ui {
         let status = self.service.status();
         let syncing = Rc::new(Cell::new(false));
 
-        let toggle = primary(
-            if status.running { "停止" } else { "启动" },
+        let toggle = floating_button(
             if status.running {
                 "media-playback-stop-symbolic"
             } else {
                 "media-playback-start-symbolic"
             },
+            if status.running { "停止" } else { "启动" },
         );
-        toggle.add_css_class("floating-action");
         toggle.set_widget_name("home-start");
         toggle.set_halign(gtk::Align::End);
         toggle.set_valign(gtk::Align::End);
@@ -89,17 +89,31 @@ impl Ui {
                 } else {
                     "启动中…"
                 },
-                move |s| if running { s.stop() } else { s.start() },
+                move |s| {
+                    if running {
+                        s.stop()?;
+                    } else {
+                        if s.snapshot().settings.tun_enabled && s.set_tun_enabled(true)?.is_some() {
+                            return Ok(Some(true));
+                        }
+                        s.start()?;
+                    }
+                    Ok(None)
+                },
                 |ui, result| {
                     ui.refresh(Page::Home);
-                    if let Err(e) = result {
-                        ui.error("操作失败", format!("{e:#}"));
+                    match result {
+                        Ok(Some(resume)) => ui.relaunch_after_authorization(resume),
+                        Ok(None) => {}
+                        Err(e) => ui.error("操作失败", format!("{e:#}")),
                     }
                 },
             );
             ui.refresh(Page::Home);
         });
         self.floating.add_overlay(&toggle);
+        let (_, height, _, _) = toggle.measure(gtk::Orientation::Vertical, -1);
+        self.body.set_margin_bottom(height + 8);
         self.home_action.replace(Some(toggle));
 
         let top = flow(1, 2);
@@ -113,14 +127,16 @@ impl Ui {
         network.set_tooltip_text(Some("点击检测出口 IP"));
         network.update_property(&[gtk::accessible::Property::Label("检测出口 IP")]);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        content.set_valign(gtk::Align::Center);
+        content.set_valign(gtk::Align::Fill);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        header.set_halign(gtk::Align::Center);
+        header.set_halign(gtk::Align::Start);
+        header.set_widget_name("exit-ip-title");
         header.append(&gtk::Image::from_icon_name("network-wireless-symbolic"));
         header.append(&label("出口 IP", "section-title"));
         content.append(&header);
         let exit_ip = label("—", "exit-ip");
         exit_ip.set_hexpand(true);
+        exit_ip.set_vexpand(true);
         exit_ip.set_xalign(0.5);
         exit_ip.set_justify(gtk::Justification::Center);
         exit_ip.set_wrap(true);
@@ -128,6 +144,15 @@ impl Ui {
         exit_ip.set_width_chars(1);
         exit_ip.set_max_width_chars(39);
         content.append(&exit_ip);
+        let exit_ipv6 = label("", "exit-ip-secondary muted");
+        exit_ipv6.set_xalign(0.5);
+        exit_ipv6.set_justify(gtk::Justification::Center);
+        exit_ipv6.set_wrap(true);
+        exit_ipv6.set_wrap_mode(gtk::pango::WrapMode::Char);
+        exit_ipv6.set_width_chars(1);
+        exit_ipv6.set_max_width_chars(39);
+        exit_ipv6.set_visible(false);
+        content.append(&exit_ipv6);
         network.set_child(Some(&content));
         top.insert(&network, -1);
 
@@ -248,17 +273,18 @@ impl Ui {
                     ui.task_result(
                         move |s| {
                             if system {
-                                s.set_system_proxy_enabled(enabled)
+                                s.set_system_proxy_enabled(enabled)?;
+                                Ok(None)
                             } else {
-                                let mut settings = s.snapshot().settings;
-                                settings.tun_enabled = enabled;
-                                s.apply_settings(settings)
+                                s.set_tun_enabled(enabled)
                             }
                         },
                         |ui, result| {
                             ui.refresh(Page::Home);
-                            if let Err(e) = result {
-                                ui.error("设置失败", format!("{e:#}"));
+                            match result {
+                                Ok(Some(resume)) => ui.relaunch_after_authorization(resume),
+                                Ok(None) => {}
+                                Err(e) => ui.error("设置失败", format!("{e:#}")),
                             }
                         },
                     );
@@ -308,6 +334,7 @@ impl Ui {
             uptime,
             memory,
             exit_ip,
+            exit_ipv6,
             network: network.clone(),
             rates: RefCell::new(RateMeter::default()),
             pending: Cell::new(false),
@@ -325,6 +352,14 @@ impl Ui {
         let key = self.detect_key();
         if self.detecting.borrow().as_ref() == Some(&key) {
             dashboard.show_detecting();
+            if let Some((_, info)) = self
+                .last_detected
+                .borrow()
+                .as_ref()
+                .filter(|(saved, _)| saved == &key)
+            {
+                dashboard.show_info(info);
+            }
         } else if let Some((_, info)) = self
             .last_detected
             .borrow()
@@ -339,6 +374,13 @@ impl Ui {
 }
 
 impl Ui {
+    fn relaunch_after_authorization(&self, resume: bool) {
+        self.save_window_size();
+        self.relaunch.set(Some(resume));
+        if let Some(app) = self.window.application() {
+            app.quit();
+        }
+    }
     fn detect_key(&self) -> ExitIpKey {
         let state = self.service.snapshot();
         let status = self.service.status();
@@ -382,6 +424,21 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
         "首页卡片被裁切或上传、下载顺序错误"
     );
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
+    let action = ui.home_action.borrow().clone().context("缺少启动按钮")?;
+    anyhow::ensure!(
+        !descendants(&action)
+            .iter()
+            .any(|widget| widget.is::<gtk::Label>()),
+        "启动按钮仍有文字"
+    );
+    let title = descendants(&dashboard.network)
+        .into_iter()
+        .find(|widget| widget.widget_name() == "exit-ip-title")
+        .context("缺少出口 IP 标题")?;
+    anyhow::ensure!(
+        title.halign() == gtk::Align::Start,
+        "出口 IP 标题没有左对齐"
+    );
     let text = dashboard.exit_ip.layout().pixel_size();
     let (text_x, _) = dashboard.exit_ip.layout_offsets();
     let (_, logical) = dashboard.exit_ip.layout().pixel_extents();
@@ -435,6 +492,10 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
         anyhow::ensure!(ui.jobs.get() == 0, "点击当前模式重复发起切换");
     }
     for (system, switch) in &dashboard.switches {
+        // Headless UI checks never invoke the desktop authentication agent.
+        if !system && !ui.service.tun_available()? {
+            continue;
+        }
         let original = switch.is_active();
         for active in [!original, original] {
             switch.set_active(active);
@@ -546,6 +607,16 @@ pub(super) async fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
         dashboard.exit_ip.text() == "192.0.2.10" && ui.detect_count.get() == before,
         "返回首页时未优先显示缓存的 IPv4"
     );
+    anyhow::ensure!(
+        dashboard.exit_ipv6.is_visible() == ipv6,
+        "IPv6 出口显示不符合设置"
+    );
+    if ipv6 {
+        anyhow::ensure!(
+            dashboard.exit_ipv6.text() == "2001:db8:abcd:1234:5678:9abc:def0:1234",
+            "IPv6 出口未显示"
+        );
+    }
     let info = network::NetworkInfo {
         ipv6: Some("2001:db8:abcd:1234:5678:9abc:def0:1234".into()),
         ..Default::default()
@@ -625,14 +696,14 @@ impl Dashboard {
         if self.running.replace(status.running) != status.running
             && let Some(button) = ui.home_action.borrow().as_ref()
         {
-            let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-            content.append(&gtk::Image::from_icon_name(if status.running {
+            button.set_icon_name(if status.running {
                 "media-playback-stop-symbolic"
             } else {
                 "media-playback-start-symbolic"
-            }));
-            content.append(&label(if status.running { "停止" } else { "启动" }, ""));
-            button.set_child(Some(&content));
+            });
+            let title = if status.running { "停止" } else { "启动" };
+            button.set_tooltip_text(Some(title));
+            button.update_property(&[gtk::accessible::Property::Label(title)]);
             // A running child can be stopped while startup waits for rules or API readiness.
             button.set_sensitive(status.running);
             for (class, active) in [
@@ -677,6 +748,7 @@ impl Dashboard {
                 self.detect(ui, key);
             } else {
                 self.exit_ip.set_text("—");
+                self.exit_ipv6.set_visible(false);
                 self.network.set_sensitive(true);
                 self.network.set_tooltip_text(Some("点击检测出口 IP"));
                 self.network
@@ -782,16 +854,24 @@ impl Dashboard {
             .or_else(|| info.ipv6.as_deref().filter(|_| self.exit_key.borrow().ipv6))
             .unwrap_or("不可用");
         self.exit_ip.set_text(ip);
+        let secondary = info
+            .ipv6
+            .as_deref()
+            .filter(|_| self.exit_key.borrow().ipv6 && info.ipv4.is_some());
+        self.exit_ipv6.set_text(secondary.unwrap_or(""));
+        self.exit_ipv6.set_visible(secondary.is_some());
         self.network.set_tooltip_text(Some("点击检测出口 IP"));
         self.network
             .update_property(&[gtk::accessible::Property::Label(&format!(
-                "出口 IP {ip}，点击重新检测"
+                "出口 IP {ip} {}，点击重新检测",
+                secondary.unwrap_or("")
             ))]);
     }
 
     fn show_detecting(&self) {
         self.network.set_sensitive(false);
         self.exit_ip.set_text("检测中…");
+        self.exit_ipv6.set_visible(false);
         self.network.set_tooltip_text(None);
         self.network
             .update_property(&[gtk::accessible::Property::Label("正在检测出口 IP")]);
@@ -803,12 +883,16 @@ impl Dashboard {
             return;
         }
         ui.detecting.replace(Some(key.clone()));
+        ui.last_detected.take();
         let request = ui.detect_count.get() + 1;
         ui.detect_count.set(request);
         let service = ui.service.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(service.network_info());
+            let result = service.network_info_updates(|info| {
+                let _ = tx.send((false, Ok(info.clone())));
+            });
+            let _ = tx.send((true, result));
         });
         let weak_ui = Rc::downgrade(ui);
         glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -818,25 +902,31 @@ impl Dashboard {
             if ui.detect_count.get() != request {
                 return glib::ControlFlow::Break;
             }
-            let result = match rx.try_recv() {
+            let (finished, result) = match rx.try_recv() {
                 Ok(v) => v,
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(_) => Err(anyhow::anyhow!("检测任务已结束")),
+                Err(_) => (true, Err(anyhow::anyhow!("检测任务已结束"))),
             };
-            ui.detecting.take();
+            if finished {
+                ui.detecting.take();
+            }
             let dashboard = ui.dashboard.borrow().clone();
             if ui.detect_key() != key {
+                ui.detecting.take();
                 if let Some(view) = dashboard
                     && !view.network.is_sensitive()
                 {
                     view.network.set_sensitive(true);
                     view.exit_ip.set_text("点击重新检测");
+                    view.exit_ipv6.set_visible(false);
                     view.network
                         .update_property(&[gtk::accessible::Property::Label("重新检测出口 IP")]);
                 }
                 return glib::ControlFlow::Break;
             }
-            if let Some(view) = &dashboard {
+            if let Some(view) = &dashboard
+                && finished
+            {
                 view.network.set_sensitive(true);
             }
             match result {
@@ -850,6 +940,7 @@ impl Dashboard {
                     ui.last_detected.take();
                     if let Some(view) = dashboard {
                         view.exit_ip.set_text("检测失败");
+                        view.exit_ipv6.set_visible(false);
                         view.network.set_tooltip_text(Some(&format!("{e:#}")));
                         view.network
                             .update_property(&[gtk::accessible::Property::Label(
@@ -858,7 +949,11 @@ impl Dashboard {
                     }
                 }
             }
-            glib::ControlFlow::Break
+            if finished {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
         });
     }
     fn update(&self, at: Instant, counters: Counters) {

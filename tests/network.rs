@@ -180,6 +180,16 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
         let _ = support::respond(&mut stream, body.as_bytes());
     });
     let original = app.import("connected", vec![socks_node("connected", node.address)]);
+    // Selecting a node alone must not activate a download proxy.
+    app.service
+        .import_subscription(Subscription {
+            source: format!("http://{}/before-start", origin.address),
+            ..Subscription::default()
+        })
+        .unwrap();
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
+    app.service.select_subscription(&original).unwrap();
     app.service.start().unwrap();
     let rule = RuleSet {
         name: "downloaded rule".into(),
@@ -201,11 +211,11 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
         })
         .unwrap();
     assert_eq!(
-        app.service.snapshot().subscriptions[1].nodes[0]["tag"],
+        app.service.snapshot().subscriptions[2].nodes[0]["tag"],
         "downloaded through proxy"
     );
     assert_eq!(requests.load(Ordering::Relaxed), 2);
-    assert_eq!(origin_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
     app.service.select_subscription(&original).unwrap();
     app.service.stop().unwrap();
     app.service
@@ -215,10 +225,10 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
         })
         .unwrap();
     assert_eq!(
-        app.service.snapshot().subscriptions[2].nodes[0]["tag"],
+        app.service.snapshot().subscriptions[3].nodes[0]["tag"],
         "downloaded directly"
     );
-    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 2);
     assert_eq!(requests.load(Ordering::Relaxed), 2);
 }
 

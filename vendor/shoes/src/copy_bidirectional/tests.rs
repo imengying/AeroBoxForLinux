@@ -4,6 +4,61 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+struct ResetStream(bool);
+impl AsyncRead for ResetStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.0 {
+            Poll::Ready(Err(io::Error::from_raw_os_error(libc::ECONNRESET)))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+impl AsyncWrite for ResetStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(bytes.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+impl AsyncPing for ResetStream {
+    fn supports_ping(&self) -> bool {
+        false
+    }
+    fn poll_write_ping(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<bool>> {
+        Poll::Ready(Ok(false))
+    }
+}
+impl AsyncStream for ResetStream {}
+
+#[tokio::test]
+async fn relay_errors_identify_the_direction_without_changing_the_error_kind() {
+    for (upstream, stage) in [(false, "relay_upload"), (true, "relay_download")] {
+        let error = copy_bidirectional(
+            &mut ResetStream(!upstream),
+            &mut ResetStream(upstream),
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert!(error.to_string().contains(stage), "{error}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn handoff_requires_empty_open_buffers_without_flush_or_ping_debt() {

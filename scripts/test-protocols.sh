@@ -35,11 +35,11 @@ fi
 run_unit_tests() {
     cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml -- --test-threads=1
     cargo test --manifest-path vendor/shoes/Cargo.toml --lib -- \
-        vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
+        diagnostics:: copy_bidirectional:: network_tasks:: vless::vless_response_stream:: vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
         quic_client::tuic_uot_tests quic_client::hop:: quic_client::hysteria2:: \
         quic_client::early_tests ech:: tls_fragment:: tcp::fast_open:: dial_options:: crypto:: \
         config::types::quic_client:: config::types::tls:: config::validate:: \
-        dns::builder::tests dns::parsed:: vless::encryption:: vless::vision_unpad:: vless::vision_stream:: rustls_config_util:: reality:: \
+        dns::builder::tests dns::parsed:: dns::routing:: dns::exchange:: dns::recovery_tests:: vless::encryption:: vless::vision_unpad:: vless::vision_stream:: rustls_config_util:: reality:: \
         tcp::socket_connector_impl::tests::configured_quic_handshake_timeout --test-threads=1
 }
 if [ "$mode" = --unit ]; then

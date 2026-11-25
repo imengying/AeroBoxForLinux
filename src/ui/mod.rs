@@ -71,12 +71,16 @@ impl Page {
     }
 }
 
-pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
+pub fn run(
+    service: Arc<Service>,
+    smoke: Option<PathBuf>,
+    resume: bool,
+) -> (glib::ExitCode, Option<bool>) {
     if smoke.is_some()
         && let Err(e) = seed_smoke(&service)
     {
         eprintln!("smoke fixture: {e:#}");
-        return glib::ExitCode::FAILURE;
+        return (glib::ExitCode::FAILURE, None);
     }
     let app = adw::Application::builder()
         .application_id(platform::APP_ID)
@@ -89,6 +93,8 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
     let failed = Rc::new(Cell::new(false));
     let activate_failed = failed.clone();
     let activate_service = service.clone();
+    let relaunch = Rc::new(Cell::new(None));
+    let activate_relaunch = relaunch.clone();
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
@@ -119,7 +125,7 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
                 .expect("GTK settings")
                 .set_gtk_enable_animations(false);
         }
-        let ui = Ui::new(app, activate_service.clone());
+        let ui = Ui::new(app, activate_service.clone(), activate_relaunch.clone());
         ui.smoke_dir.replace(
             smoke
                 .as_ref()
@@ -129,6 +135,17 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
         if let Some(path) = smoke.clone() {
             glib::spawn_future_local(smoke_sequence(ui.clone(), path, activate_failed.clone()));
         } else {
+            if resume {
+                ui.task_result(
+                    |s| s.start(),
+                    |ui, result| {
+                        ui.refresh(Page::Home);
+                        if let Err(error) = result {
+                            ui.error("恢复连接失败", format!("{error:#}"));
+                        }
+                    },
+                );
+            }
             ui.start_subscription_updates();
         }
     });
@@ -144,14 +161,16 @@ pub fn run(service: Arc<Service>, smoke: Option<PathBuf>) -> glib::ExitCode {
         }
     });
     let result = app.run_with_args::<&str>(&[]);
-    if failed.get() {
+    let result = if failed.get() {
         glib::ExitCode::FAILURE
     } else {
         result
-    }
+    };
+    (result, relaunch.get())
 }
 
 struct Ui {
+    relaunch: Rc<Cell<Option<bool>>>,
     typography: typography::Typography,
     window: adw::ApplicationWindow,
     service: Arc<Service>,
@@ -192,7 +211,11 @@ struct Ui {
 }
 
 impl Ui {
-    fn new(app: &adw::Application, service: Arc<Service>) -> Rc<Self> {
+    fn new(
+        app: &adw::Application,
+        service: Arc<Service>,
+        relaunch: Rc<Cell<Option<bool>>>,
+    ) -> Rc<Self> {
         const MIN_WIDTH: i32 = 480;
         const MIN_HEIGHT: i32 = 400;
         let settings = service.snapshot().settings;
@@ -306,6 +329,7 @@ impl Ui {
         toast.set_child(Some(&split));
         window.set_content(Some(&toast));
         let ui = Rc::new(Self {
+            relaunch,
             typography,
             window,
             service,
@@ -511,7 +535,11 @@ impl Ui {
         spinner.set_size_request(18, 18);
         spinner.start();
         content.append(&spinner);
-        content.append(&label(busy, ""));
+        if !button.has_css_class("floating-action") {
+            content.append(&label(busy, ""));
+        }
+        content.set_halign(gtk::Align::Center);
+        content.set_valign(gtk::Align::Center);
         button.set_child(Some(&content));
         button.set_sensitive(false);
         let weak_button = button.downgrade();
@@ -1240,6 +1268,39 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button.set_valign(gtk::Align::Center);
     button
 }
+fn floating_button(icon: &str, title: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.add_css_class("suggested-action");
+    button.add_css_class("floating-action");
+    button.set_tooltip_text(Some(title));
+    button.update_property(&[gtk::accessible::Property::Label(title)]);
+    button
+}
+
+fn follow_theme(window: &impl IsA<gtk::Window>) {
+    let window = window.as_ref();
+    let manager = adw::StyleManager::default();
+    if manager.is_dark() {
+        window.add_css_class("dark");
+    }
+    let weak = window.downgrade();
+    // Disconnect when the dialog closes; repeated imports must not retain callbacks.
+    let handler = manager.connect_dark_notify(move |manager| {
+        if let Some(window) = weak.upgrade() {
+            if manager.is_dark() {
+                window.add_css_class("dark");
+            } else {
+                window.remove_css_class("dark");
+            }
+        }
+    });
+    let handler = RefCell::new(Some(handler));
+    window.connect_destroy(move |_| {
+        if let Some(handler) = handler.borrow_mut().take() {
+            manager.disconnect(handler);
+        }
+    });
+}
 fn bolt() -> gtk::Image {
     // A real symbolic icon follows foreground colour on the selected blue card.
     gtk::Image::from_icon_name("aerobox-bolt-symbolic")
@@ -1328,7 +1389,7 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 fn sidebar_width(font_size: u32) -> f64 {
     // Narrow enough to leave the cards room, but still wide enough for the
     // longest navigation label at the largest supported font size.
-    148.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
+    128.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
 }
 fn follow_width(
     grid: &gtk::FlowBox,

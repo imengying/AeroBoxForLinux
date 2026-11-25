@@ -20,8 +20,10 @@ fn run() -> Result<gtk::glib::ExitCode> {
     let mut args = std::env::args().skip(1);
     let mut dir = None;
     let mut smoke = None;
+    let mut resume = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--resume-connection" => resume = true,
             "--version" => {
                 println!(
                     "AeroBox {} · Rust / GTK4 / Wayland",
@@ -75,9 +77,21 @@ fn run() -> Result<gtk::glib::ExitCode> {
         Err(error) => return Err(error),
     };
     let service = engine::Service::new(store);
-    let result = ui::run(service.clone(), smoke);
+    let (result, relaunch) = ui::run(service.clone(), smoke, resume);
     if let Err(e) = service.shutdown() {
+        if relaunch.is_some() {
+            return Err(e.context("重启前停止连接失败"));
+        }
         eprintln!("停止连接: {e:#}")
+    }
+    if let Some(resume) = relaunch {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.arg("--data-dir").arg(service.dir());
+        if resume {
+            command.arg("--resume-connection");
+        }
+        return Err(command.exec()).context("授权后重启 AeroBox 失败");
     }
     Ok(result)
 }

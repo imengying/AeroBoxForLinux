@@ -348,9 +348,12 @@ where
             if self.partial_vless_response.len() >= 2 {
                 let version = self.partial_vless_response[0];
                 if version != 0 {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Invalid VLESS response version: {version}"),
+                    return Poll::Ready(Err(crate::diagnostics::vless_response(
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid VLESS response version: {version}"),
+                        ),
+                        &self.partial_vless_response,
                     )));
                 }
                 let response_len = 2 + self.partial_vless_response[1] as usize;
@@ -362,11 +365,16 @@ where
 
             let mut scratch = [0; 8192];
             let mut buf = ReadBuf::new(&mut scratch);
-            ready!(Pin::new(&mut self.tls).poll_read(cx, &mut buf))?;
+            ready!(Pin::new(&mut self.tls).poll_read(cx, &mut buf)).map_err(|error| {
+                crate::diagnostics::vless_response(error, &self.partial_vless_response)
+            })?;
             if buf.filled().is_empty() {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Connection closed while reading VLESS response",
+                return Poll::Ready(Err(crate::diagnostics::vless_response(
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Connection closed while reading VLESS response",
+                    ),
+                    &self.partial_vless_response,
                 )));
             }
             self.partial_vless_response.extend_from_slice(buf.filled());

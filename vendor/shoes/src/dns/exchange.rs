@@ -316,9 +316,11 @@ impl RawDnsExchange {
         let waves = upstreams.len().div_ceil(concurrency).max(1);
         let slot_timeout = self.context.options.timeout / waves.min(u32::MAX as usize) as u32;
         for _ in 0..self.context.options.attempts.max(1) {
-            let jobs = futures::stream::iter(upstreams.iter().copied()).map(|index| {
+            let jobs = futures::stream::iter(upstreams.iter().copied()).map(|index| async move {
+                let upstream = &self.upstreams[index];
+                let began = std::time::Instant::now();
                 self.send(
-                    &self.upstreams[index],
+                    upstream,
                     request,
                     setups,
                     partial,
@@ -328,6 +330,18 @@ impl RawDnsExchange {
                         outer: timing.outer,
                     },
                 )
+                .await
+                .map_err(|error| {
+                    crate::diagnostics::context(
+                        format!(
+                            "stage=dns_exchange transport={} endpoint={} elapsed_ms={}",
+                            upstream.config.protocol.to_protocol(),
+                            std::net::SocketAddr::new(upstream.ip, upstream.config.port),
+                            began.elapsed().as_millis()
+                        ),
+                        error,
+                    )
+                })
             });
             let mut answers = jobs.buffer_unordered(concurrency);
             while let Some(result) = answers.next().await {

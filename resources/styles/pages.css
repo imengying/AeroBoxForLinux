@@ -12,7 +12,7 @@
   padding-right: 0.55em;
 }
 .settings-page .labeled-entry-title { margin-bottom: 0.35em; }
-.settings-page > stack > box { padding-top: 0.35em; padding-bottom: 1.5em; }
+.settings-page > box { padding-top: 0.35em; padding-bottom: 1.5em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
 separator { background: alpha(#728292,.13); min-height: 0.09em; }
 
@@ -59,8 +59,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
 .home-stat { padding: 0.86em 1em; min-width: 7em; }
 .home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
-.floating-action { border-radius: 16px; padding: 0.91em 1.64em; min-height: 2.18em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
-.floating-action image { -gtk-icon-size: 20px; }
+.aerobox-window button.floating-action { border-radius: 18px; padding: 0; min-width: 3.8em; min-height: 3.8em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.floating-action image { -gtk-icon-size: 2.1em; }
 .floating-action.suggested-action { background: @app_primary_container; color: @app_on_primary_container; }
 .dark .floating-action.suggested-action { background: @dark_primary_container; color: @dark_on_primary_container; }
 
@@ -82,8 +82,10 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .editor-root entry { background: @app_card_bg; border: 1px solid @app_outline; box-shadow: none; }
 .dark.aerobox-window entry,
 .dark .editor-root entry { background: @dark_card_bg; border-color: @dark_outline; }
-.import-dialog .import-source text { background: @app_card_bg; }
-.dark .import-dialog .import-source text { background: @dark_card_bg; }
+.import-dialog .import-source textview,
+.import-dialog .import-source text { background: @app_card_bg; color: #1a202a; }
+.dark .import-dialog .import-source textview,
+.dark .import-dialog .import-source text { background: @dark_card_bg; color: #e2e7f0; }
 .aerobox-window spinbutton,
 .editor-root spinbutton { min-height: 2.36em; }
 .aerobox-window spinbutton text,

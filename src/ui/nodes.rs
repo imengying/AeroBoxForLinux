@@ -47,8 +47,7 @@ impl Ui {
             return;
         };
         let subscription_id = subscription.id.clone();
-        let test = primary("测速", "aerobox-bolt-symbolic");
-        test.add_css_class("floating-action");
+        let test = floating_button("aerobox-bolt-symbolic", "测试全部节点延迟");
         test.set_halign(gtk::Align::End);
         test.set_valign(gtk::Align::End);
         test.set_margin_end(30);
@@ -162,9 +161,6 @@ impl NodesPanel {
                 let indicator = gtk::Stack::new();
                 indicator.set_size_request(16, 16);
                 indicator.set_valign(gtk::Align::Start);
-                let check = gtk::Image::from_icon_name("object-select-symbolic");
-                check.add_css_class("node-check");
-                indicator.add_named(&check, Some("chosen"));
                 indicator.add_named(
                     &gtk::Box::new(gtk::Orientation::Horizontal, 0),
                     Some("empty"),
@@ -239,8 +235,7 @@ impl NodesPanel {
         let previous = self.data.borrow();
         for (node, card) in nodes.iter_mut().zip(self.cards.borrow().iter()) {
             card.spinner.stop();
-            card.indicator
-                .set_visible_child_name(if node.selected { "chosen" } else { "empty" });
+            card.indicator.set_visible_child_name("empty");
             if node.selected {
                 card.child.add_css_class("node-selected");
             } else {
@@ -553,6 +548,12 @@ pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
     let action = ui.nodes_action.borrow().clone().context("缺少悬浮测速")?;
     ensure!(
+        !descendants(&action)
+            .iter()
+            .any(|widget| widget.is::<gtk::Label>()),
+        "悬浮测速仍有文字"
+    );
+    ensure!(
         action.halign() == gtk::Align::End && action.valign() == gtk::Align::End,
         "测速不在右下角"
     );
@@ -641,6 +642,13 @@ pub(super) fn smoke_nodes(
         ensure!(first_row == 4, "常规窗口第一行显示了 {first_row} 个节点");
     }
     for card in cards.iter() {
+        ensure!(
+            !descendants(&card.child)
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Image>())
+                .any(|image| image.icon_name().as_deref() == Some("object-select-symbolic")),
+            "节点卡片仍显示选中角标"
+        );
         let bounds = card
             .child
             .compute_bounds(&panel.grid)

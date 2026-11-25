@@ -1,7 +1,12 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use reqwest::{Proxy, blocking::Client};
 use serde_json::Value;
-use std::{fs, io::Read, net::IpAddr, time::Duration};
+use std::{
+    fs,
+    io::Read,
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct NetworkInfo {
@@ -63,17 +68,37 @@ pub(crate) fn proxy_url(config: &Value) -> Result<url::Url> {
     ))?)
 }
 
-pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client> {
+fn client_builder(config: Option<&Value>) -> Result<reqwest::blocking::ClientBuilder> {
     let mut builder = Client::builder()
         .no_proxy()
-        .timeout(timeout)
-        .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("AeroBox/", env!("CARGO_PKG_VERSION")));
     if let Some(config) = config {
         builder = builder.proxy(Proxy::all(proxy_url(config)?)?);
     }
-    Ok(builder.build()?)
+    Ok(builder)
+}
+
+pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client> {
+    Ok(client_builder(config)?
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(5))
+        .build()?)
+}
+
+const EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const EXIT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn exit_client_builder(config: Option<&Value>) -> Result<reqwest::blocking::ClientBuilder> {
+    // CONNECT includes proxy-side DNS and the node's handshake. A five-second
+    // connect timeout can expire even when ordinary browser requests succeed.
+    Ok(client_builder(config)?
+        .timeout(EXIT_REQUEST_TIMEOUT)
+        .connect_timeout(EXIT_REQUEST_TIMEOUT))
+}
+
+pub(crate) fn exit_client(config: Option<&Value>) -> Result<Client> {
+    Ok(exit_client_builder(config)?.build()?)
 }
 
 /// Expose the failure stage without copying URLs, endpoints or credentials
@@ -111,56 +136,110 @@ pub(crate) fn request_failure(error: &reqwest::Error) -> String {
     .into()
 }
 
-pub(crate) fn detect(client: Client, ipv6: bool, via_proxy: bool) -> Result<NetworkInfo> {
-    let (v4, v6) = std::thread::scope(|scope| {
-        let client_v4 = client.clone();
-        let v4 = scope.spawn(move || detect_family(&client_v4, false));
-        let v6 = ipv6.then(|| scope.spawn(move || detect_family(&client, true)));
-        (
-            v4.join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("IPv4 检测中断"))),
-            v6.map(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("IPv6 检测中断")))
-            }),
-        )
-    });
-    let ipv4 = v4.ok();
-    let ipv6 = v6.and_then(Result::ok);
-    ensure!(
-        ipv4.is_some() || ipv6.is_some(),
-        "无法检测出口 IP，请检查当前连接后重试"
-    );
-    Ok(NetworkInfo {
-        ipv4,
+pub(crate) fn detect(
+    client: Client,
+    ipv6: bool,
+    via_proxy: bool,
+    progress: impl Fn(&NetworkInfo),
+) -> Result<NetworkInfo> {
+    detect_with_endpoints(
+        &client,
         ipv6,
         via_proxy,
-    })
+        &["https://api4.ipify.org", "https://ipv4.icanhazip.com"],
+        &["https://api6.ipify.org", "https://ipv6.icanhazip.com"],
+        EXIT_TOTAL_TIMEOUT,
+        progress,
+    )
 }
 
-fn detect_family(client: &Client, ipv6: bool) -> Result<String> {
-    let endpoints = if ipv6 {
-        ["https://api6.ipify.org", "https://ipv6.icanhazip.com"]
-    } else {
-        ["https://api4.ipify.org", "https://ipv4.icanhazip.com"]
+fn detect_with_endpoints(
+    client: &Client,
+    ipv6: bool,
+    via_proxy: bool,
+    v4_endpoints: &[&str],
+    v6_endpoints: &[&str],
+    budget: Duration,
+    progress: impl Fn(&NetworkInfo),
+) -> Result<NetworkInfo> {
+    let deadline = Instant::now() + budget;
+    let mut info = NetworkInfo {
+        via_proxy,
+        ..Default::default()
     };
+    let mut last_error = anyhow::anyhow!("检测超时");
+    // Publish each family as soon as it completes. IPv6 can never hold back a
+    // usable IPv4 address, and a failed family cannot discard a successful one.
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (family, endpoints) in [(false, v4_endpoints), (true, v6_endpoints)] {
+            if family && !ipv6 {
+                continue;
+            }
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let _ = tx.send((family, detect_family(client, endpoints, family, deadline)));
+            });
+        }
+        drop(tx);
+        for (family, result) in rx {
+            match result {
+                Ok(ip) => {
+                    if family {
+                        info.ipv6 = Some(ip);
+                    } else {
+                        info.ipv4 = Some(ip);
+                    }
+                    progress(&info);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+    });
+    if info.ipv4.is_some() || info.ipv6.is_some() {
+        Ok(info)
+    } else {
+        Err(last_error.context("无法检测出口 IP"))
+    }
+}
+
+fn detect_family(
+    client: &Client,
+    endpoints: &[&str],
+    ipv6: bool,
+    deadline: Instant,
+) -> Result<String> {
+    let mut last_error = anyhow::anyhow!("检测超时");
     for endpoint in endpoints {
-        if let Ok(ip) = detect_endpoint(client, endpoint, ipv6) {
-            return Ok(ip);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match detect_endpoint(client, endpoint, ipv6, remaining.min(EXIT_REQUEST_TIMEOUT)) {
+            Ok(ip) => return Ok(ip),
+            Err(error) => last_error = error,
         }
     }
-    bail!("此地址族不可用")
+    Err(last_error)
 }
 
-fn detect_endpoint(client: &Client, endpoint: &str, ipv6: bool) -> Result<String> {
+fn detect_endpoint(
+    client: &Client,
+    endpoint: &str,
+    ipv6: bool,
+    timeout: Duration,
+) -> Result<String> {
     let response = client
         .get(endpoint)
-        .timeout(Duration::from_secs(4))
-        .send()?
-        .error_for_status()?;
+        .timeout(timeout)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| anyhow::anyhow!(request_failure(&error)))?;
     let mut body = String::new();
-    response.take(129).read_to_string(&mut body)?;
+    response
+        .take(129)
+        .read_to_string(&mut body)
+        .context("无法读取检测响应")?;
     ensure!(body.len() <= 128, "IP 检测响应过长");
     parse_ip(&body, ipv6)
 }
@@ -174,6 +253,10 @@ fn parse_ip(body: &str, ipv6: bool) -> Result<String> {
     );
     Ok(ip.to_string())
 }
+
+#[cfg(test)]
+#[path = "network_tests.rs"]
+mod exit_tests;
 
 pub(crate) fn memory_usage() -> MemoryUsage {
     process_memory().usage()

@@ -53,6 +53,7 @@ mod copy_bidirectional_message;
 mod crypto;
 mod desktop;
 pub mod dial_options;
+mod diagnostics;
 pub mod dns;
 pub mod ech;
 pub mod embedding;
