@@ -1,4 +1,6 @@
+#[cfg(feature = "ui-smoke")]
 mod smoke;
+#[cfg(feature = "ui-smoke")]
 use smoke::{seed_smoke, smoke_sequence};
 mod editors;
 mod home;
@@ -11,12 +13,12 @@ mod typography;
 use adw::prelude::*;
 use aerobox_for_linux::{
     engine::Service,
-    model::{self, RuleSet, Subscription},
+    model::{self, RuleSet},
     network, platform,
 };
 use anyhow::{Context, Result};
 use gtk::{gio, glib};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
@@ -24,6 +26,8 @@ use std::{
     sync::{Arc, mpsc},
     time::Duration,
 };
+#[cfg(feature = "ui-smoke")]
+use {aerobox_for_linux::model::Subscription, serde_json::json};
 
 pub use startup::recover_store;
 
@@ -73,9 +77,10 @@ impl Page {
 
 pub fn run(
     service: Arc<Service>,
-    smoke: Option<PathBuf>,
     resume: bool,
+    #[cfg(feature = "ui-smoke")] smoke: Option<PathBuf>,
 ) -> (glib::ExitCode, Option<bool>) {
+    #[cfg(feature = "ui-smoke")]
     if smoke.is_some()
         && let Err(e) = seed_smoke(&service)
     {
@@ -84,13 +89,14 @@ pub fn run(
     }
     let app = adw::Application::builder()
         .application_id(platform::APP_ID)
-        .flags(if smoke.is_some() {
-            gio::ApplicationFlags::NON_UNIQUE
-        } else {
-            gio::ApplicationFlags::FLAGS_NONE
-        })
         .build();
+    #[cfg(feature = "ui-smoke")]
+    if smoke.is_some() {
+        app.set_flags(gio::ApplicationFlags::NON_UNIQUE);
+    }
+    #[cfg(feature = "ui-smoke")]
     let failed = Rc::new(Cell::new(false));
+    #[cfg(feature = "ui-smoke")]
     let activate_failed = failed.clone();
     let activate_service = service.clone();
     let relaunch = Rc::new(Cell::new(None));
@@ -115,6 +121,7 @@ pub fn run(
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        #[cfg(feature = "ui-smoke")]
         if smoke.is_some() {
             // A desktop may omit font DPI. Exercise this real layout failure
             // even when the test compositor normally provides a valid value.
@@ -126,28 +133,30 @@ pub fn run(
                 .set_gtk_enable_animations(false);
         }
         let ui = Ui::new(app, activate_service.clone(), activate_relaunch.clone());
+        #[cfg(feature = "ui-smoke")]
         ui.smoke_dir.replace(
             smoke
                 .as_ref()
                 .and_then(|path| path.parent().map(Path::to_owned)),
         );
         ui.window.present();
+        #[cfg(feature = "ui-smoke")]
         if let Some(path) = smoke.clone() {
             glib::spawn_future_local(smoke_sequence(ui.clone(), path, activate_failed.clone()));
-        } else {
-            if resume {
-                ui.task_result(
-                    |s| s.start(),
-                    |ui, result| {
-                        ui.refresh(Page::Home);
-                        if let Err(error) = result {
-                            ui.error("恢复连接失败", format!("{error:#}"));
-                        }
-                    },
-                );
-            }
-            ui.start_subscription_updates();
+            return;
         }
+        if resume {
+            ui.task_result(
+                |s| s.start(),
+                |ui, result| {
+                    ui.refresh(Page::Home);
+                    if let Err(error) = result {
+                        ui.error("恢复连接失败", format!("{error:#}"));
+                    }
+                },
+            );
+        }
+        ui.start_subscription_updates();
     });
     let monitor = Arc::downgrade(&service);
     std::thread::spawn(move || {
@@ -161,6 +170,7 @@ pub fn run(
         }
     });
     let result = app.run_with_args::<&str>(&[]);
+    #[cfg(feature = "ui-smoke")]
     let result = if failed.get() {
         glib::ExitCode::FAILURE
     } else {
@@ -182,6 +192,8 @@ struct Ui {
     window_size: RefCell<(i32, i32)>,
     window_size_generation: Cell<u64>,
     scroll: gtk::ScrolledWindow,
+    content_clamp: adw::Clamp,
+    layout_scale: Cell<(u32, i32)>,
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
     nodes_action: RefCell<Option<gtk::Button>>,
@@ -200,6 +212,7 @@ struct Ui {
     settings_panel: RefCell<Option<Rc<settings::SettingsPanel>>>,
     pending_leave: RefCell<Option<Rc<dyn Fn()>>>,
     settings_prompt: RefCell<Option<adw::AlertDialog>>,
+    #[cfg(feature = "ui-smoke")]
     smoke_dir: RefCell<Option<PathBuf>>,
     node_panel: RefCell<Option<Rc<nodes::NodesPanel>>>,
     /// Last successful exit-IP probe together with the connection/selection key it
@@ -308,7 +321,7 @@ impl Ui {
         body.add_css_class("page-content");
         margin(&body, 20, 20, 10, 18);
         let clamp = adw::Clamp::builder()
-            .maximum_size(1030)
+            .maximum_size(1440)
             .tightening_threshold(850)
             .hexpand(true)
             .child(&body)
@@ -339,6 +352,8 @@ impl Ui {
             window_size: RefCell::new((settings.width, settings.height)),
             window_size_generation: Cell::new(0),
             scroll,
+            content_clamp: clamp,
+            layout_scale: Cell::new((0, 0)),
             floating,
             home_action: RefCell::new(None),
             nodes_action: RefCell::new(None),
@@ -357,6 +372,7 @@ impl Ui {
             settings_panel: RefCell::new(None),
             pending_leave: RefCell::new(None),
             settings_prompt: RefCell::new(None),
+            #[cfg(feature = "ui-smoke")]
             smoke_dir: RefCell::new(None),
             node_panel: RefCell::new(None),
             last_detected: RefCell::new(None),
@@ -391,6 +407,20 @@ impl Ui {
             }
             glib::Propagation::Proceed
         });
+        for adjustment in [ui.scroll.hadjustment(), ui.scroll.vadjustment()] {
+            let weak = Rc::downgrade(&ui);
+            adjustment.connect_page_size_notify(move |_| {
+                let weak = weak.clone();
+                // Adjustments report actual viewport allocation. Defer until
+                // allocation finishes, and do no CSS work on idle frames.
+                glib::idle_add_local_once(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.update_viewport_scale();
+                    }
+                });
+            });
+        }
+        ui.update_viewport_scale();
         ui.refresh(Page::Home);
         {
             let weak = Rc::downgrade(&ui);
@@ -568,9 +598,35 @@ impl Ui {
     /// in pixels rather than em, so a live preview stays internally consistent.
     fn apply_font_size(&self, font_size: u32) {
         self.typography.apply(font_size);
-        let width = sidebar_width(font_size);
-        self.split.set_min_sidebar_width(width);
-        self.split.set_max_sidebar_width(width);
+        self.update_viewport_scale();
+    }
+
+    /// Scale compact windows with the user's font choice and large windows with
+    /// the available viewport. The saved normal geometry is never overwritten
+    /// when maximizing, fullscreening or switching between density classes.
+    fn update_viewport_scale(&self) {
+        let font_size = self.typography.preview();
+        // Use the unscaled sidebar reservation. Measuring the scaled sidebar
+        // would toggle the density back and forth at a breakpoint.
+        let width = (self.window.width() - sidebar_width(font_size).round() as i32).max(0);
+        self.typography
+            .set_viewport_scale(width, self.window.height());
+        let percent = self.typography.density_percent();
+        let scale = (font_size, percent);
+        if self.layout_scale.replace(scale) == scale {
+            return;
+        }
+        let density = self.typography.density();
+        self.split
+            .set_min_sidebar_width(sidebar_width(self.typography.preview()) * density);
+        self.split
+            .set_max_sidebar_width(sidebar_width(self.typography.preview()) * density);
+        let gutter = (20.0 * density).round() as i32;
+        let top = (10.0 * density).round() as i32;
+        margin(&self.body, gutter, gutter, top, self.body.margin_bottom());
+        self.content_clamp
+            .set_maximum_size((1440.0 * density).round() as i32);
+        self.body.queue_resize();
     }
 
     /// Resize notifications are frequent. Keep the latest size in memory while
@@ -1268,13 +1324,40 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button.set_valign(gtk::Align::Center);
     button
 }
-fn floating_button(icon: &str, title: &str) -> gtk::Button {
-    let button = gtk::Button::from_icon_name(icon);
-    button.add_css_class("suggested-action");
-    button.add_css_class("floating-action");
+fn action_content(icon: &str, title: &str) -> gtk::Box {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let image = gtk::Image::from_icon_name(icon);
+    content.append(&image);
+    let text = label(title, "");
+    content.append(&text);
+    content
+}
+
+fn update_action(button: &gtk::Button, icon: &str, title: &str) {
+    button.set_icon_name(icon);
     button.set_tooltip_text(Some(title));
     button.update_property(&[gtk::accessible::Property::Label(title)]);
+}
+
+fn floating_button(icon: &str, title: &str) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("suggested-action");
+    button.add_css_class("floating-action");
+    update_action(&button, icon, title);
     button
+}
+
+fn reserve_floating_action(body: &gtk::Box, button: &gtk::Button) {
+    let body = body.downgrade();
+    button.add_tick_callback(move |button, _| {
+        let Some(body) = body.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        // GTK includes margins; remeasure after font or viewport changes.
+        let (_, height, _, _) = button.measure(gtk::Orientation::Vertical, -1);
+        body.set_margin_bottom(height + 8);
+        glib::ControlFlow::Continue
+    });
 }
 
 fn follow_theme(window: &impl IsA<gtk::Window>) {
@@ -1311,10 +1394,7 @@ fn primary(title: &str, icon: &str) -> gtk::Button {
     button.add_css_class("suggested-action");
     button.add_css_class("primary-action");
     button.set_valign(gtk::Align::Center);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-    row.append(&gtk::Image::from_icon_name(icon));
-    row.append(&label(title, ""));
-    button.set_child(Some(&row));
+    button.set_child(Some(&action_content(icon, title)));
     button
 }
 fn resource_row(icon: &str, title: &str, subtitle: &str) -> gtk::Box {
@@ -1387,8 +1467,8 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 // Sidebar width follows the font so the brand and nav labels keep their
 /// margins instead of clipping against a fixed track.
 fn sidebar_width(font_size: u32) -> f64 {
-    // Narrow enough to leave the cards room, but still wide enough for the
-    // longest navigation label at the largest supported font size.
+    // Keep this width in user-font units. Viewport density is applied once by
+    // `update_viewport_scale`, rather than being multiplied in twice.
     128.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
 }
 fn follow_width(
@@ -1398,25 +1478,23 @@ fn follow_width(
     max_columns: u32,
     responsive: bool,
 ) {
-    let last_width = std::rc::Rc::new(Cell::new(-1));
-    let grid_weak = grid.downgrade();
-    grid.add_tick_callback(move |_, _| {
-        let Some(grid) = grid_weak.upgrade() else {
-            return glib::ControlFlow::Break;
+    let last_layout = Cell::new((0, 0));
+    grid.add_tick_callback(move |grid, _| {
+        // A newly opened page has not allocated its grid yet. Use the
+        // existing content width so its first frame has the right columns.
+        let width = match grid.width() {
+            0 => grid.parent().map_or(0, |parent| parent.width()),
+            width => width,
         };
-        let width = grid.width();
-        if width != last_width.get() {
-            last_width.set(width);
+        let font_size = grid
+            .pango_context()
+            .font_description()
+            .map(|font| font.size())
+            .unwrap_or(11 * gtk::pango::SCALE);
+        if last_layout.replace((width, font_size)) != (width, font_size) {
             let scale = if responsive {
-                grid.pango_context()
-                    .font_description()
-                    .map(|font| {
-                        let points = font.size() as f32 / gtk::pango::SCALE as f32;
-                        // Large text needs more room, but not a fully linear
-                        // column collapse at every small size increase.
-                        (points / 11.0).sqrt().clamp(0.85, 1.4)
-                    })
-                    .unwrap_or(1.0)
+                let points = font_size as f32 / gtk::pango::SCALE as f32;
+                (points / 11.0).sqrt().clamp(0.85, 1.4)
             } else {
                 1.0
             };

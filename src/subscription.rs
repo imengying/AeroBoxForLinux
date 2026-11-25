@@ -5,10 +5,7 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use serde_json::{Value, json};
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashSet},
-};
+use std::{cell::RefCell, collections::HashSet};
 use url::Url;
 mod quic;
 mod ss_plugin;
@@ -179,32 +176,6 @@ fn redact_node_error(node: &Value, message: &str) -> String {
         .filter(|c| !c.is_control())
         .take(500)
         .collect()
-}
-
-pub fn protocol_summary(nodes: &[Value]) -> String {
-    let mut counts = BTreeMap::new();
-    for node in nodes {
-        let kind = node["type"].as_str().unwrap_or("unknown");
-        let label = match kind {
-            "shadowsocks" => "SS",
-            "vmess" => "VMess",
-            "vless" => "VLESS",
-            "trojan" => "Trojan",
-            "anytls" => "AnyTLS",
-            "hysteria2" => "Hysteria2",
-            "tuic" => "TUIC",
-            "naive" => "Naive",
-            "socks" => "SOCKS",
-            "http" => "HTTP",
-            _ => kind,
-        };
-        *counts.entry(label).or_insert(0usize) += 1;
-    }
-    counts
-        .into_iter()
-        .map(|(kind, count)| format!("{kind} {count}"))
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 
 fn known_fields(value: &Value, allowed: &[&str], context: &str) -> Result<()> {

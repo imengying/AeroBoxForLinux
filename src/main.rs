@@ -19,6 +19,7 @@ fn main() -> gtk::glib::ExitCode {
 fn run() -> Result<gtk::glib::ExitCode> {
     let mut args = std::env::args().skip(1);
     let mut dir = None;
+    #[cfg(feature = "ui-smoke")]
     let mut smoke = None;
     let mut resume = false;
     while let Some(arg) = args.next() {
@@ -32,6 +33,7 @@ fn run() -> Result<gtk::glib::ExitCode> {
                 return Ok(gtk::glib::ExitCode::SUCCESS);
             }
             "--data-dir" => dir = Some(PathBuf::from(args.next().context("--data-dir 需要路径")?)),
+            #[cfg(feature = "ui-smoke")]
             "--smoke-test" => {
                 smoke = Some(PathBuf::from(
                     args.next().context("--smoke-test 需要截图路径")?,
@@ -54,6 +56,7 @@ fn run() -> Result<gtk::glib::ExitCode> {
     }
     // Set before any GTK/network worker threads exist. Never fall back to X11.
     unsafe { std::env::set_var("GDK_BACKEND", "wayland") };
+    #[cfg(feature = "ui-smoke")]
     if smoke.is_some() {
         let smoke_dir = dir
             .as_ref()
@@ -70,14 +73,24 @@ fn run() -> Result<gtk::glib::ExitCode> {
     }
     let store = match model::Store::open(dir.clone()) {
         Ok(store) => store,
-        Err(error) if smoke.is_none() => match ui::recover_store(dir, error)? {
-            Some(store) => store,
-            None => return Ok(gtk::glib::ExitCode::FAILURE),
-        },
-        Err(error) => return Err(error),
+        Err(error) => {
+            #[cfg(feature = "ui-smoke")]
+            if smoke.is_some() {
+                return Err(error);
+            }
+            match ui::recover_store(dir, error)? {
+                Some(store) => store,
+                None => return Ok(gtk::glib::ExitCode::FAILURE),
+            }
+        }
     };
     let service = engine::Service::new(store);
-    let (result, relaunch) = ui::run(service.clone(), smoke, resume);
+    let (result, relaunch) = ui::run(
+        service.clone(),
+        resume,
+        #[cfg(feature = "ui-smoke")]
+        smoke,
+    );
     if let Err(e) = service.shutdown() {
         if relaunch.is_some() {
             return Err(e.context("重启前停止连接失败"));

@@ -1,22 +1,8 @@
 use super::*;
-use std::{
-    cell::Cell,
-    rc::Rc,
-    sync::{Arc, mpsc},
-    time::Duration,
-};
-
-use super::LabeledEntry;
-use adw::prelude::*;
-use anyhow::{Context, Result, ensure};
-use gtk::glib;
-use serde_json::{Value, json};
+use aerobox_for_linux::model::Subscription;
+use anyhow::ensure;
+use serde_json::json;
 use sourceview::prelude::*;
-
-use crate::{
-    engine::Service,
-    model::{self, RuleSet, Subscription},
-};
 
 type Saved = Rc<dyn Fn()>;
 type SaveText = (Arc<dyn Fn(String) -> Result<()> + Send + Sync>, Saved);
@@ -1007,6 +993,7 @@ fn validate_rules(value: &Value) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_ruleset(
     parent: &adw::ApplicationWindow,
     service: Arc<Service>,

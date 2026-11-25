@@ -21,10 +21,12 @@ chmod 755 "$test_dir/AeroBox"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cp "$script_dir/install.sh" "$script_dir/test-desktop.py" "$test_dir/"
 cp "$script_dir/../resources/icons/io.github.imengying.AeroBoxForLinux.png" "$test_dir/"
-cat > "$test_dir/sway.config" <<'CONFIG'
+test_width=${AEROBOX_TEST_WIDTH:-1400}
+case "$test_width" in 1400|1920) ;; *) printf '%s\n' 'AEROBOX_TEST_WIDTH must be 1400 or 1920' >&2; exit 1 ;; esac
+cat > "$test_dir/sway.config" <<CONFIG
 xwayland disable
 output * bg #f4f5f8 solid_color
-output HEADLESS-1 mode 1750x1250 scale 1.25
+output HEADLESS-1 mode $((test_width * 5 / 4))x1250 scale 1.25
 default_border none
 default_floating_border none
 for_window [app_id=".*"] floating enable

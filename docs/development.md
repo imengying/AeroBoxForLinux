@@ -53,7 +53,9 @@ TUN 测试需要 `timeout`、`unshare`、`ip`、`nft` 和 `/dev/net/tun`，使�
 
 kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / ChaCha20-Poly1305 内核算法。模块化内核可先执行 `sudo modprobe tls`；Ubuntu 托管 runner 可能未提供该模块，因此普通 CI 不运行这三项环境测试。`--ktls` 下的错误仍会使测试失败，不会静默跳过。
 
-界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，并运行安装器检查桌面启动器与窗口标识、重复启动和启动恢复窗口；`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放。截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
+界面测试需要 Weston、Sway 和 `dbus-run-session`，使用隔离的 XDG 目录和 D-Bus 会话。`make wayland` 构建启用 `ui-smoke` 的开发程序，测试数据、截图逻辑及 `--smoke-test` 入口仅在该选项下编译。正式构建不启用此选项。`AEROBOX_TEST_SCALE=1.25 make wayland` 验证 1.25 倍缩放，并运行安装器检查桌面启动器与窗口标识、重复启动和启动恢复窗口；`AEROBOX_TEST_SCALE=2 make wayland` 验证 2 倍缩放。截图与日志位于 `target/wayland/`。可通过 `CARGO_TARGET_DIR` 将生成文件放到仓库外。
+
+界面检查包含全屏与恢复窗口、缩放临界宽度、大字号侧栏和悬浮按钮避让。默认使用 1400×1000 逻辑桌面，`AEROBOX_TEST_WIDTH=1920` 可检查更宽的桌面；桌面缩放与应用的宽屏布局分别验证，普通窗口保持用户设置的字号。
 
 `src/runtime.rs` 组装原生运行配置，`engine.rs` 管理连接生命周期和事务回滚，`protocol/` 严格转换节点参数，`model.rs` 管理数据与原子存储，`ui/` 为 GTK 界面。`vendor/` 保存带本项目修改的第三方源码，`tests/` 包含集成测试。GitHub Actions 使用 `ubuntu-latest`，仅构建 amd64，推送 `v*` 标签后发布安装包。
 
@@ -61,7 +63,7 @@ kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / Cha
 
 - `src/`：AeroBox 的数据、连接管理、协议转换与桌面界面。
 - `src/ui/`：页面与共用组件；`smoke.rs` 负责 Wayland 界面回归。
-- `resources/icons/`、`resources/styles/`、`resources/desktop/`：图标、Material 3 样式与桌面入口。
+- `resources/icons/`、`resources/styles/`：图标与 Material 3 样式。桌面入口由 `platform.rs` 按实际安装路径生成。
 - `resources/rules/`：初始规则数据及来源说明。
 - `build.rs`：构建时将资源清单编译到 Cargo 输出目录，不在源码中保存生成的资源包。需要 `glib-compile-resources`（GLib 开发工具）。
 - `tests/`：应用的集成测试与测试服务端。
@@ -73,6 +75,8 @@ kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / Cha
 - `target/`：编译产物、安装包和截图，不提交到 Git。
 
 AeroBox 作为一个应用构建、测试和发布；连接管理和界面共用同一份状态，没有独立内核的安装或升级流程。
+
+安装包使用明确的文件清单，只包含正式程序、安装与卸载脚本、图标、使用文档和许可声明。开发文档、源码、测试、截图、基准工具及已嵌入程序的规则数据不重复打包。`scripts/check-package.py` 在 CI 中检查归档内容，并在临时目录验证安装与卸载。
 
 界面参考 [Material 3 色彩角色](https://m3.material.io/styles/color/roles)，使用 GTK 原生控件及桌面字体渲染；配色、卡片、选中状态和间距统一在 `resources/styles/` 管理。
 

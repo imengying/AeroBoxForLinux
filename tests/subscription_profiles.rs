@@ -93,8 +93,11 @@ fn mixed_clash_profiles_survive_download_storage_and_node_listing() {
     assert!(sub.import_issues.is_empty(), "{:?}", sub.import_issues);
     assert_eq!(sub.nodes.len(), 4);
     assert_eq!(
-        subscription::protocol_summary(&sub.nodes),
-        "AnyTLS 1 · SS 1 · VLESS 2"
+        sub.nodes
+            .iter()
+            .map(|node| node["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["vless", "vless", "shadowsocks", "anytls"]
     );
     let reality = protocol::convert_outbound(sub.nodes[0].clone(), "fixture").unwrap();
     assert_eq!(

@@ -112,12 +112,11 @@ impl Ui {
             ui.refresh(Page::Home);
         });
         self.floating.add_overlay(&toggle);
-        let (_, height, _, _) = toggle.measure(gtk::Orientation::Vertical, -1);
-        self.body.set_margin_bottom(height + 8);
+        reserve_floating_action(&self.body, &toggle);
         self.home_action.replace(Some(toggle));
 
         let top = flow(1, 2);
-        follow_width(&top, 232, 14, 2, false);
+        follow_width(&top, 290, 16, 2, false);
         top.set_vexpand(false);
         top.add_css_class("home-top");
         let network = gtk::Button::new();
@@ -169,7 +168,7 @@ impl Ui {
 
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let control_grid = flow(1, 2);
-        follow_width(&control_grid, 232, 14, 2, false);
+        follow_width(&control_grid, 290, 16, 2, false);
         let mode_row = card(gtk::Orientation::Vertical, 12);
         mode_row.add_css_class("home-mode");
         let mode_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -303,7 +302,7 @@ impl Ui {
         let stats = flow(1, 3);
         // Three equal cards only while they stay readable; narrow windows drop
         // to two or one instead of squeezing the labels.
-        follow_width(&stats, 168, 14, 3, false);
+        follow_width(&stats, 200, 16, 3, false);
         stats.add_css_class("home-stats");
         let (connection_box, connections) = stat("network-workgroup-symbolic", "连接数", "—");
         let (uptime_box, uptime) = stat(
@@ -399,6 +398,7 @@ impl Ui {
     }
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
     let cards = descendants(&ui.body)
         .into_iter()
@@ -456,6 +456,7 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
     let dashboard = ui.dashboard.borrow().clone().context("缺少首页")?;
     let content = ui.body.first_child().context("首页没有内容")?;
@@ -585,6 +586,7 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
     let before = ui.detect_count.get();
     let ipv6 = ui.service.snapshot().settings.ipv6;
@@ -696,14 +698,16 @@ impl Dashboard {
         if self.running.replace(status.running) != status.running
             && let Some(button) = ui.home_action.borrow().as_ref()
         {
-            button.set_icon_name(if status.running {
-                "media-playback-stop-symbolic"
-            } else {
-                "media-playback-start-symbolic"
-            });
             let title = if status.running { "停止" } else { "启动" };
-            button.set_tooltip_text(Some(title));
-            button.update_property(&[gtk::accessible::Property::Label(title)]);
+            update_action(
+                button,
+                if status.running {
+                    "media-playback-stop-symbolic"
+                } else {
+                    "media-playback-start-symbolic"
+                },
+                title,
+            );
             // A running child can be stopped while startup waits for rules or API readiness.
             button.set_sensitive(status.running);
             for (class, active) in [

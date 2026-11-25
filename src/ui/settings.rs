@@ -134,6 +134,7 @@ impl SettingsPanel {
         dialog.present(Some(&ui.window));
         false
     }
+    #[cfg(feature = "ui-smoke")]
     pub(super) fn smoke_has_prompt(ui: &Rc<Ui>) -> bool {
         ui.settings_prompt.borrow().is_some()
     }
@@ -230,6 +231,7 @@ impl Ui {
     fn diagnostics_row(self: &Rc<Self>, group: &adw::PreferencesGroup) {
         let row = adw::ActionRow::builder().title("连接诊断").build();
         let button = gtk::Button::with_label("检测");
+        button.add_css_class("secondary-action");
         button.set_valign(gtk::Align::Center);
         button.set_widget_name("connection-diagnostics");
         row.add_suffix(&button);
@@ -539,8 +541,10 @@ impl Ui {
                         Ok(()) => ui.notify("备份已导出"),
                         Err(error) => ui.error("导出备份失败", format!("{error:#}")),
                     }
-                }); // Weston has no desktop file portal. The explicit smoke-test
+                });
+                // Weston has no desktop file portal. The explicit smoke-test
                 // directory exercises the real export without needing one.
+                #[cfg(feature = "ui-smoke")]
                 if let Some(dir) = ui.smoke_dir.borrow().clone() {
                     let path = dir.join("smoke-backup.json");
                     ui.button_task(
@@ -629,6 +633,7 @@ impl Ui {
                     if !ui.finish_settings_prompt(dialog) || response != "restore" {
                         return;
                     }
+                    #[cfg(feature = "ui-smoke")]
                     if let Some(dir) = ui.smoke_dir.borrow().clone() {
                         restore_file(&ui, dir.join("smoke-backup.json"), login);
                         return;
@@ -706,26 +711,17 @@ impl Ui {
                 }
             })
         };
-        for row in descendants(&self.body)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<adw::SwitchRow>().ok())
-        {
-            let update = update_dirty.clone();
-            row.connect_active_notify(move |_| update());
-        }
-        for row in descendants(&self.body)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<adw::ComboRow>().ok())
-        {
-            let update = update_dirty.clone();
-            row.connect_selected_notify(move |_| update());
-        }
-        for row in descendants(&self.body)
-            .iter()
-            .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
-        {
-            let update = update_dirty.clone();
-            row.connect_changed(move |_| update());
+        for widget in descendants(&self.body) {
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+                let update = update_dirty.clone();
+                row.connect_active_notify(move |_| update());
+            } else if let Some(row) = widget.downcast_ref::<adw::ComboRow>() {
+                let update = update_dirty.clone();
+                row.connect_selected_notify(move |_| update());
+            } else if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+                let update = update_dirty.clone();
+                entry.connect_changed(move |_| update());
+            }
         }
         panel.update_dirty();
         self.settings_panel.replace(Some(panel.clone()));
@@ -737,6 +733,7 @@ impl Ui {
         });
     }
 }
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_general(ui: &Rc<Ui>) -> Result<()> {
     let panel = ui.settings_panel.borrow().clone().context("缺少设置页")?;
     let content = descendants(&panel.form);
@@ -771,6 +768,7 @@ fn combo(title: &str, choices: &[&str], selected: u32) -> adw::ComboRow {
         .build()
 }
 
+#[cfg(feature = "ui-smoke")]
 fn smoke_data_button(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
     let row = descendants(&ui.body)
         .iter()
@@ -784,6 +782,7 @@ fn smoke_data_button(ui: &Rc<Ui>, title: &str) -> Result<gtk::Button> {
         .with_context(|| format!("设置项 {title} 没有操作按钮"))
 }
 
+#[cfg(feature = "ui-smoke")]
 async fn smoke_respond(ui: &Ui, response: &str) -> Result<()> {
     let dialog = ui
         .settings_prompt
@@ -822,6 +821,7 @@ async fn smoke_respond(ui: &Ui, response: &str) -> Result<()> {
     }
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_section(ui: &Ui, section: &str) -> Result<()> {
     let title = match section {
         "general" => "外观与启动",
@@ -840,6 +840,7 @@ pub(super) fn smoke_section(ui: &Ui, section: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
     match step {
@@ -925,6 +926,7 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
     ensure!(ui.jobs.get() == 0, "设置操作尚未完成");
@@ -971,6 +973,7 @@ pub(super) async fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
     let widgets = descendants(&ui.body);
     let mut entries = Vec::new();
@@ -1024,6 +1027,7 @@ pub(super) async fn smoke_network(ui: &Ui) -> Result<()> {
     }
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_tun_settings(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let widgets = descendants(&ui.body);
@@ -1075,6 +1079,7 @@ pub(super) async fn smoke_tun_settings(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result<()> {
     if let Some(response) = response {
         anyhow::ensure!(ui.page.get() == Page::Settings, "确认前已离开设置页");
@@ -1095,6 +1100,7 @@ pub(super) async fn smoke_unsaved(ui: &Rc<Ui>, response: Option<&str>) -> Result
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_save_bounds(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let save = descendants(&ui.floating)
@@ -1121,6 +1127,7 @@ pub(super) fn smoke_save_bounds(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 fn smoke_saving(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui.settings_panel.borrow();
@@ -1140,6 +1147,7 @@ fn smoke_saving(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui
@@ -1194,6 +1202,7 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     let saved = ui.service.snapshot().settings;
     anyhow::ensure!(
@@ -1232,6 +1241,7 @@ pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_row_height(ui: &Rc<Ui>) -> Option<i32> {
     fn tallest(widget: &gtk::Widget) -> Option<adw::ActionRow> {
         if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
@@ -1253,6 +1263,50 @@ pub(super) fn smoke_row_height(ui: &Rc<Ui>) -> Option<i32> {
     Some(natural)
 }
 
+#[cfg(feature = "ui-smoke")]
+pub(super) fn smoke_fullscreen_settings(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    ensure!(ui.page.get() == Page::Settings, "设置页未打开");
+    let panel = ui
+        .settings_panel
+        .borrow()
+        .clone()
+        .context("缺少设置控制器")?;
+    let Some(row_height) = smoke_row_height(ui) else {
+        anyhow::bail!("缺少设置行")
+    };
+    ensure!(row_height >= 56, "全屏控件没有跟随密度增大: {row_height}");
+    ensure!(
+        panel.form.width() > 1000 && panel.form.width() <= ui.body.width(),
+        "全屏设置内容宽度不合理"
+    );
+    let fields: Vec<_> = descendants(&panel.form)
+        .into_iter()
+        .filter(|widget| widget.has_css_class("labeled-entry"))
+        .collect();
+    ensure!(fields.len() >= 2, "缺少成对输入框");
+    for field in &fields {
+        let caption = field
+            .first_child()
+            .and_then(|child| child.downcast::<gtk::Label>().ok())
+            .context("缺少固定输入框标题")?;
+        let entry = descendants(field)
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Entry>().ok())
+            .next()
+            .context("缺少输入框")?;
+        let caption_bounds = caption.compute_bounds(field).context("标题未布局")?;
+        let entry_bounds = entry.compute_bounds(field).context("输入框未布局")?;
+        ensure!(
+            caption_bounds.y() >= 0.0
+                && entry_bounds.y() >= caption_bounds.y() + caption_bounds.height(),
+            "固定标题和输入框位置不正确"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     use anyhow::ensure;
     // The save button floats over the page overlay, outside `ui.body`.

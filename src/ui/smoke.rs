@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 pub(super) fn seed_smoke(service: &Service) -> Result<()> {
     service.update(|state| {
@@ -21,6 +22,22 @@ pub(super) fn seed_smoke(service: &Service) -> Result<()> {
 }
 
 async fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
+    // Timers can run before pending layout/paint work on a busy runner. Wait
+    // for complete frames so both the snapshot and following bounds checks
+    // observe the allocated page, including responsive column updates.
+    let clock = window.as_ref().frame_clock().context("窗口没有帧时钟")?;
+    let painted = Rc::new(Cell::new(0));
+    let observed = painted.clone();
+    let handler = clock.connect_after_paint(move |_| observed.set(observed.get() + 1));
+    clock.begin_updating();
+    window.as_ref().queue_draw();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while painted.get() < 2 && Instant::now() < deadline {
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    clock.end_updating();
+    clock.disconnect(handler);
+    anyhow::ensure!(painted.get() >= 2, "等待窗口布局和绘制超时");
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         match screenshot_frame(window, path) {
@@ -113,6 +130,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
     let floating_y = Cell::new(None::<f32>);
     let font_size = Cell::new(None);
     let row_height = Cell::new(None);
+    let normal_size = Cell::new((0, 0));
     let resources_before_reset = Rc::new(RefCell::new(None::<model::State>));
     let parent = path
         .parent()
@@ -127,8 +145,17 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
         guard_app.quit();
     });
     loop {
-        glib::timeout_future(Duration::from_millis(850)).await;
+        glib::timeout_future(Duration::from_millis(650)).await;
         let result: Result<()> = async {
+            // A previous action can still be committing its result under
+            // load. Wait for that work explicitly instead of adding a long
+            // fixed delay to every step. In-flight checks remain inside the
+            // action that starts each task.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while ui.jobs.get() > 0 {
+                anyhow::ensure!(Instant::now() < deadline, "上一项界面操作尚未完成");
+                glib::timeout_future(Duration::from_millis(16)).await;
+            }
             let name = match current {
                 0 => "home.png",
                 1 => "subscriptions.png",
@@ -159,6 +186,9 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 45 => "settings-network.png",
                 46 => "settings-network-scrolled.png",
                 48 => "settings-tun-permission.png",
+                59 => "nodes-fullscreen.png",
+                60 => "home-fullscreen.png",
+                61 => "settings-fullscreen.png",
                 _ => "",
             };
             if !name.is_empty() {
@@ -167,6 +197,18 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 } else {
                     ui.window.clone().upcast::<gtk::Window>()
                 };
+                if (59..=61).contains(&current) {
+                    let started = std::time::Instant::now();
+                    while !ui.window.is_fullscreen() || ui.typography.density_percent() <= 100 {
+                        anyhow::ensure!(
+                            started.elapsed() < Duration::from_secs(3),
+                            "宽屏密度未在截图前生效: {}%",
+                            ui.typography.density_percent()
+                        );
+                        glib::timeout_future(Duration::from_millis(16)).await;
+                    }
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                }
                 screenshot(&window, &parent.join(name)).await?;
             }
             if current == 0 {
@@ -215,6 +257,54 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     anyhow::ensure!((bounds.y() - previous).abs() < 1.0, "滚动移动了启动按钮");
                 }
                 floating_y.set(Some(bounds.y()));
+            }
+            if current == 58 {
+                // Restore a stable active subscription without merging the
+                // backup fixtures twice; the fullscreen checks are visual only.
+                let state = ui.service.snapshot();
+                let selected = state
+                    .subscriptions
+                    .iter()
+                    .find(|sub| sub.name == "日常连接")
+                    .or_else(|| state.subscriptions.first())
+                    .context("全屏测试缺少订阅")?
+                    .id
+                    .clone();
+                ui.service.update(|state| {
+                    state.settings.font_size = 11;
+                    state.settings.theme = "light".into();
+                    state.settings.auto_detect_ip = false;
+                    Ok(())
+                })?;
+                ui.service.select_subscription(&selected)?;
+                ui.apply_font_size(11);
+                apply_theme("light");
+                ui.navigate(Page::Nodes);
+                ui.save_window_size();
+                normal_size.set((ui.window.width(), ui.window.height()));
+                ui.window.fullscreen();
+            }
+            if current == 59 {
+                nodes::smoke_fullscreen(&ui)?;
+            }
+            if current == 60 {
+                home::smoke_cards(&ui)?;
+            }
+            if current == 61 {
+                settings::smoke_fullscreen_settings(&ui)?;
+            }
+            if current == 62 {
+                anyhow::ensure!(
+                    !ui.window.is_fullscreen()
+                        && (ui.window.width(), ui.window.height()) == normal_size.get()
+                        && ui.typography.density_percent() == 100,
+                    "退出全屏后没有恢复窗口尺寸和普通界面密度"
+                );
+                let saved = ui.service.snapshot().settings;
+                anyhow::ensure!(
+                    (saved.width, saved.height) == normal_size.get(),
+                    "全屏改写了保存的普通窗口尺寸"
+                );
             }
             match current {
                 0 => {
@@ -361,6 +451,10 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                         "字体变大后行高没有跟随: {:?} -> {:?}",
                         row_height.get(),
                         after_row
+                    );
+                    anyhow::ensure!(
+                        ui.split.min_sidebar_width() > 180.0,
+                        "预览大字号没有同步放宽侧栏"
                     );
                     ui.navigate(Page::Subscriptions);
                     ui.import_subscription();
@@ -555,6 +649,16 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 }
                 50..=56 => settings::smoke_autostart(&ui, current - 50).await?,
                 57 => subscriptions::smoke_dialog_release(&ui)?,
+                59 => ui.navigate(Page::Home),
+                60 => ui.navigate(Page::Settings),
+                61 => {
+                    ui.window.unfullscreen();
+                }
+                62 => {
+                    ui.window.set_default_size(1000, 680);
+                    ui.navigate(Page::Nodes);
+                }
+                63 => smoke_resize_boundaries(&ui).await?,
                 _ => {}
             }
             Ok(())
@@ -573,18 +677,76 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
             app.quit();
             return;
         }
-        if current == 57 {
+        if current == 63 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();
             let failed = failed.clone();
             clipboard.read_text_async(None::<&gio::Cancellable>,move |result| {
                 if !matches!(result,Ok(Some(ref text)) if text=="AeroBox Wayland 剪贴板测试") {failed.set(true);eprintln!("Clipboard roundtrip failed");}
-                else {println!("Wayland smoke: subscription selection, node cards, home modes, rules, settings, import and clipboard passed");}
+                else {println!("Wayland smoke: selection, cards, settings, fullscreen scaling, import and clipboard passed");}
                 app.quit();
             });
             return;
         }
         current += 1;
     }
+}
+
+async fn smoke_resize_boundaries(ui: &Rc<Ui>) -> Result<()> {
+    // The sidebar grows at the wide breakpoint. Repeated frames must keep the
+    // new density, rather than using the narrower content to switch it back.
+    for (width, density) in [(1224, 100), (1232, 112), (1224, 100), (1000, 100)] {
+        ui.window.set_default_size(width, 680);
+        let start = Instant::now();
+        while ui.window.width() != width || ui.typography.density_percent() != density {
+            anyhow::ensure!(
+                start.elapsed() < Duration::from_secs(3),
+                "缩放边界没有完成布局"
+            );
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        for _ in 0..20 {
+            glib::timeout_future(Duration::from_millis(16)).await;
+            anyhow::ensure!(
+                ui.typography.density_percent() == density,
+                "缩放在临界宽度 {width} 来回跳动"
+            );
+        }
+    }
+    // Font previews must update the sidebar even without a density change.
+    for size in [model::FONT_SIZE_MIN, model::FONT_SIZE_MAX, 11] {
+        ui.apply_font_size(size);
+        glib::timeout_future(Duration::from_millis(80)).await;
+        anyhow::ensure!(
+            (ui.split.min_sidebar_width() - sidebar_width(size)).abs() < 0.1,
+            "修改字号没有同步侧栏宽度"
+        );
+        let actual = ui
+            .window
+            .pango_context()
+            .font_description()
+            .context("缺少窗口字体")?;
+        let units_per_point = if actual.is_size_absolute() {
+            f64::from(
+                gtk::Settings::default()
+                    .context("缺少 GTK 设置")?
+                    .gtk_xft_dpi(),
+            ) / 1024.0
+                / 72.0
+        } else {
+            1.0
+        };
+        anyhow::ensure!(
+            (actual.size() as f64 / gtk::pango::SCALE as f64 - f64::from(size) * units_per_point)
+                .abs()
+                < 0.1,
+            "普通窗口字体与用户设置不符"
+        );
+    }
+    anyhow::ensure!(
+        ui.service.snapshot().settings.font_size == 11,
+        "预览改写了保存的字号"
+    );
+    Ok(())
 }

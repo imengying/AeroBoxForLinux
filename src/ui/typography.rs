@@ -9,6 +9,7 @@ use super::*;
 pub(super) struct Typography {
     provider: gtk::CssProvider,
     font_size: Cell<u32>,
+    density: Cell<u32>,
 }
 
 impl Typography {
@@ -27,7 +28,8 @@ impl Typography {
         }
         let result = Self {
             provider,
-            font_size: Cell::new(model::FONT_SIZE_MIN),
+            font_size: Cell::new(0),
+            density: Cell::new(100),
         };
         result.apply(font_size);
         result
@@ -37,10 +39,42 @@ impl Typography {
         self.font_size.get()
     }
 
+    pub(super) fn density_percent(&self) -> i32 {
+        self.density.get() as i32
+    }
+
+    pub(super) fn density(&self) -> f64 {
+        f64::from(self.density.get()) / 100.0
+    }
+
+    /// A restrained viewport-based scale, separate from the user's font size.
+    /// Wide screens increase both text and control sizes; `em` metrics keep
+    /// the proportions consistent, including in dialogs and menus.
+    pub(super) fn set_viewport_scale(&self, width: i32, height: i32) {
+        let density = match (width, height) {
+            (0, _) | (_, 0) => 100,
+            (_, height) if height < 600 => 100,
+            (width, _) if width >= 1700 => 120,
+            (width, _) if width >= 1100 => 112,
+            _ => 100,
+        };
+        if self.density.replace(density) != density {
+            self.update();
+        }
+    }
+
     pub(super) fn apply(&self, font_size: u32) {
         let size = font_size.clamp(model::FONT_SIZE_MIN, model::FONT_SIZE_MAX);
-        self.font_size.set(size);
-        self.provider
-            .load_from_data(&format!("window {{ font-size: {size}pt; }}"));
+        if self.font_size.replace(size) != size {
+            self.update();
+        }
+    }
+
+    fn update(&self) {
+        let size = self.font_size.get();
+        self.provider.load_from_data(&format!(
+            "window {{ font-size: calc({size}pt * {} / 100); }}",
+            self.density.get()
+        ));
     }
 }

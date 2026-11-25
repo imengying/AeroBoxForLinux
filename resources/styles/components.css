@@ -8,12 +8,13 @@
 .empty-icon { color: @app_muted; background: alpha(@window_fg_color,.06); border-radius: 12px; -gtk-icon-size: 2.73em; min-height: 5.45em; min-width: 5.45em; }
 .empty-description { color: alpha(@window_fg_color, .70); }
 .search { border-radius: 12px; min-height: 2.73em; }
-/* Fixed-caption inputs: the caption never moves into the field, so entering
- * text cannot shift the layout the way a floating entry label does. */
-.labeled-entry { margin-top: 0.12em; margin-bottom: 0.12em; }
-.labeled-entry-title { font-size: 0.92em; font-weight: 600; color: alpha(@window_fg_color, 0.70); }
+/* Fixed-caption inputs: a tight caption/input pair, with more room between
+ * neighbouring pairs. Labels never move or collapse as the user types. */
+.labeled-entry { margin-top: 0.18em; margin-bottom: 0.55em; }
+.labeled-entry-title { font-size: 0.96em; font-weight: 600; color: @app_muted; }
+.dark .labeled-entry-title { color: @dark_muted; }
 .labeled-entry-input { min-height: 2.82em; border-radius: 8px; }
-.labeled-entry-input:focus { border-color: @accent_color; }
+.labeled-entry-input:focus { border-color: @accent_color; outline: 2px solid alpha(@accent_color, .25); outline-offset: 1px; }
 
 /* Shared card surfaces, selection and focus for nodes and subscriptions. */
 .nodes-grid, .subscriptions-grid { background: transparent; }
@@ -22,8 +23,10 @@
 .node-card, .subscription-card { padding: 0; border-radius: 12px; background: @app_card_bg; border-width: 1px; border-style: solid; border-color: transparent; box-shadow: none; }
 .subscription-card { border-radius: 16px; }
 .dark .node-card, .dark .subscription-card { background: @dark_card_bg; border-color: transparent; box-shadow: none; }
-.node-card:hover, .subscription-card:hover { background: shade(@app_card_bg, .98); border-color: transparent; }
+.node-card:hover, .subscription-card:hover { background: shade(@app_card_bg, .96); border-color: transparent; }
 .dark .node-card:hover, .dark .subscription-card:hover { background: shade(@dark_card_bg, 1.12); border-color: transparent; }
+.node-card:active, .subscription-card:active { background: shade(@app_card_bg, .92); }
+.dark .node-card:active, .dark .subscription-card:active { background: shade(@dark_card_bg, 1.20); }
 .node-card.node-selected { background: @accent_bg_color; border-color: @accent_bg_color; color: @accent_fg_color; }
 .subscription-card.subscription-selected { background: @app_primary_container; border-color: @accent_bg_color; box-shadow: none; }
 .dark .node-card.node-selected { background: @accent_bg_color; border-color: @accent_bg_color; color: @accent_fg_color; }
@@ -32,14 +35,22 @@
 .node-card.node-selected .muted,
 .node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .90); }
 .node-card.node-selected .node-test-button { color: @accent_fg_color; }
-.node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
+.node-card.node-selected:hover { background: shade(@accent_bg_color, 1.09); }
+.node-card.node-selected:active { background: shade(@accent_bg_color, .92); }
+.subscription-card.subscription-selected:hover { background: shade(@app_primary_container, .96); }
+.dark .subscription-card.subscription-selected:hover { background: shade(@dark_primary_container, 1.16); }
+.subscription-card.subscription-selected:active { background: shade(@app_primary_container, .90); }
+.dark .subscription-card.subscription-selected:active { background: shade(@dark_primary_container, 1.28); }
+.node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 3px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content { padding: 0.75em 0.85em; }
+.node-card-content { padding: 0.85em 0.9em; }
 .subscription-card-content { padding: 1em 1em; }
-.node-name, .subscription-name { font-size: 0.96em; font-weight: 600; }
-.node-protocol, .node-delay { font-size: 0.90em; }
-.node-protocol { color: @app_muted; letter-spacing: .02em; }
+.node-name { font-size: 1em; font-weight: 600; }
+.subscription-name { font-size: 1em; font-weight: 600; }
+.node-protocol, .node-delay { font-size: 0.92em; }
+.node-protocol { color: @app_muted; letter-spacing: .01em; margin-top: 0.15em; }
+.node-card-footer { min-height: 1.8em; margin-top: 0.35em; }
 .dark .node-protocol { color: @dark_muted; }
 .node-delay, .subscription-usage { font-feature-settings: "tnum"; }
 /* Latency colour communicates quality on an unselected card. The selected
@@ -54,9 +65,16 @@
 .node-card.node-selected .node-delay.latency-good,
 .node-card.node-selected .node-delay.latency-medium,
 .node-card.node-selected .node-delay.latency-bad { color: alpha(@accent_fg_color, .90); }
-.aerobox-window button.node-test-button { padding: 0; min-width: 1.6em; min-height: 1.6em; border-radius: 5px; }
-.node-test-button:disabled { color: alpha(@window_fg_color, .45); opacity: 1; filter: none; }
-.node-test-button:disabled image { -gtk-icon-filter: none; }
+/* Keep the 16px symbol small but give the whole target room to click. */
+.aerobox-window button.node-test-button { padding: 0; min-width: 2.2em; min-height: 2.2em; border-radius: 8px; }
+.aerobox-window button.node-test-button:hover { background: alpha(@window_fg_color, .07); }
+.node-card.node-selected button.node-test-button:hover { background: alpha(@accent_fg_color, .15); }
+.node-card.node-selected button.node-test-button:focus-visible { outline-color: @accent_fg_color; }
+.node-test-button:disabled { color: alpha(@window_fg_color, .62); opacity: 1; filter: none; }
+/* Adwaita gives some symbolic image nodes their own foreground; explicitly
+ * inherit the card colour so the icon stays legible in the selected state. */
+.node-test-button:disabled image,
+.node-card.node-selected .node-test-button:disabled image { color: inherit; opacity: 1; filter: none; -gtk-icon-filter: none; }
 .node-card.node-selected .node-test-button:disabled { color: alpha(@accent_fg_color, .82); }
 /* Usage is ellipsized in Rust, so it can never force a wider grid column. */
 
@@ -68,6 +86,6 @@
 .subscription-progress progress { min-height: 0.35em; border-radius: 999px; background: @accent_bg_color; }
 .dark .subscription-progress trough { background: alpha(@dark_on_primary_container,.15); }
 .dark .subscription-progress progress { background: @dark_on_primary_container; }
-.aerobox-window .card-menu > button { padding: 0.08em; min-width: 1.5em; min-height: 1.5em; border-radius: 5px; }
+.aerobox-window .card-menu > button { padding: 0; min-width: 2em; min-height: 2em; border-radius: 8px; }
 .subscription-actions { padding: 0.27em; }
 .subscription-actions button { padding: 0.45em 0.91em; }

@@ -594,6 +594,7 @@ fn format_timestamp(timestamp: u64, pattern: &str) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_selection(
     ui: &Rc<Ui>,
     active: usize,
@@ -745,6 +746,7 @@ pub(super) async fn smoke_selection(
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_menu(ui: &Rc<Ui>, open: bool) -> Result<()> {
     fn find(widget: &gtk::Widget) -> Option<gtk::MenuButton> {
         if widget.widget_name() == "subscription-menu" {
@@ -768,6 +770,7 @@ pub(super) fn smoke_menu(ui: &Rc<Ui>, open: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_import_window(ui: &Rc<Ui>) -> Result<adw::Window> {
     let application = ui.window.application().context("缺少应用")?;
     application
@@ -778,6 +781,7 @@ pub(super) fn smoke_import_window(ui: &Rc<Ui>) -> Result<adw::Window> {
         .context("导入订阅窗口未打开")
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
     use anyhow::ensure;
     if step == 3 {
@@ -892,6 +896,7 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
     let mut retained = Vec::<glib::WeakRef<glib::Object>>::new();
     let app = ui.window.application().context("缺少应用")?;

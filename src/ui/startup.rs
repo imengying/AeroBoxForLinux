@@ -92,6 +92,7 @@ pub fn recover_store(
     }
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_recovery() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("state.json");

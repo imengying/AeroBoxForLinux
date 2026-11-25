@@ -20,9 +20,12 @@ trap 'exit 1' HUP INT TERM
 mkdir "$stage/$name"
 install -m755 "$binary" "$stage/$name/AeroBox"
 install -m755 scripts/install.sh scripts/uninstall.sh "$stage/$name/"
-install -m644 resources/desktop/io.github.imengying.AeroBoxForLinux.desktop resources/icons/io.github.imengying.AeroBoxForLinux.png README.md LICENSE THIRD_PARTY.md "$stage/$name/"
+install -m644 resources/icons/io.github.imengying.AeroBoxForLinux.png README.md LICENSE THIRD_PARTY.md "$stage/$name/"
 cp -R licenses "$stage/$name/licenses"
-cp -R docs "$stage/$name/docs"
+# Runtime assets are embedded. Ship user documentation and required notices
+# explicitly so new developer docs, fixtures or tools cannot enter the archive.
+mkdir "$stage/$name/docs"
+install -m644 docs/protocols.md "$stage/$name/docs/"
 mkdir -p "$stage/$name/resources/rules"
 install -m644 resources/rules/README.md resources/rules/*-LICENSE "$stage/$name/resources/rules/"
 tar -C "$stage" -czf "$output_dir/$name.tar.gz" "$name"

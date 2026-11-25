@@ -6,14 +6,14 @@
 @define-color app_on_primary_container #12315b;
 @define-color dark_primary_container #294567;
 @define-color dark_on_primary_container #d8e7ff;
-@define-color app_bg #f8faff;
-@define-color app_card_bg #eff3f9;
-@define-color app_sidebar_bg #e9eff7;
+@define-color app_bg #f7f9fc;
+@define-color app_card_bg #eef2f8;
+@define-color app_sidebar_bg #e8eef6;
 @define-color app_muted #555f6e;
 @define-color app_outline #c3cbd7;
-@define-color dark_app_bg #11141a;
-@define-color dark_card_bg #20252d;
-@define-color dark_sidebar_bg #191e26;
+@define-color dark_app_bg #11161e;
+@define-color dark_card_bg #222a35;
+@define-color dark_sidebar_bg #1a222d;
 @define-color dark_muted #bdc6d5;
 @define-color dark_outline #454d5b;
 @define-color latency_good #237a45;
@@ -29,6 +29,7 @@
 .aerobox-window.dark .app-sidebar,
 .aerobox-window.dark .sidebar-scroll { background: @dark_sidebar_bg; border: none; }
 
+/* Tonal navigation selection; no selection-dependent border or padding. */
 .nav-list { background: transparent; }
 .nav-list row { border-radius: 999px; margin: 0.12em 0; padding: 0; color: @app_muted; }
 .nav-list row:hover { background: alpha(@accent_bg_color, .06); }
@@ -49,12 +50,55 @@
 .muted { color: @app_muted; }
 .dark .muted { color: @dark_muted; }
 .brand { font-size: 1.22em; font-weight: 600; }
-.section-title, .resource-name { font-size: 1em; font-weight: 600; }
+.section-title { font-size: 1.02em; font-weight: 600; }
+.resource-name { font-size: 1em; font-weight: 600; }
 .empty-title { font-size: 1.08em; font-weight: 600; }
 .small { font-size: 0.92em; }
 .surface-card { border-radius: 16px; background: @app_card_bg; border: 1px solid transparent; box-shadow: none; }
 .dark .surface-card { background: @dark_card_bg; }
+
+/* One action hierarchy: filled primary, quiet tonal secondary, flat inline. */
 .primary-action { border-radius: 999px; padding: 0.55em 1.18em; font-weight: 600; }
+.aerobox-window button.suggested-action,
+.editor-root button.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
+.aerobox-window button.suggested-action:hover,
+.editor-root button.suggested-action:hover { background: shade(@accent_bg_color, 1.09); color: @accent_fg_color; }
+.aerobox-window button.suggested-action:active,
+.editor-root button.suggested-action:active { background: shade(@accent_bg_color, .92); color: @accent_fg_color; }
+.aerobox-window button.suggested-action:disabled,
+.editor-root button.suggested-action:disabled { background: @app_primary_container; color: @app_on_primary_container; }
+.aerobox-window button.destructive-action,
+.editor-root button.destructive-action { background: @error_color; color: white; }
+.aerobox-window button.destructive-action:hover,
+.editor-root button.destructive-action:hover { background: shade(@error_color, 1.08); color: white; }
+.aerobox-window button.secondary-action,
+.editor-root button.secondary-action,
+.aerobox-window button.compact-action:not(.flat),
+.editor-root button.compact-action:not(.flat) { background: @app_primary_container; color: @app_on_primary_container; }
+.dark.aerobox-window button.suggested-action:disabled,
+.dark .editor-root button.suggested-action:disabled { background: @dark_primary_container; color: @dark_on_primary_container; }
+.dark.aerobox-window button.secondary-action,
+.dark .editor-root button.secondary-action,
+.dark.aerobox-window button.compact-action:not(.flat),
+.dark .editor-root button.compact-action:not(.flat) { background: @dark_primary_container; color: @dark_on_primary_container; }
+button.secondary-action:hover,
+button.compact-action:not(.flat):hover { background: shade(@app_primary_container, .96); }
+.dark button.secondary-action:hover,
+.dark button.compact-action:not(.flat):hover { background: shade(@dark_primary_container, 1.16); }
+button.secondary-action:active,
+button.compact-action:not(.flat):active { background: shade(@app_primary_container, .90); }
+.dark button.secondary-action:active,
+.dark button.compact-action:not(.flat):active { background: shade(@dark_primary_container, 1.28); }
+.aerobox-window button:disabled,
+.editor-root button:disabled { opacity: 1; filter: none; }
+.aerobox-window button.flat:not(:disabled),
+.editor-root button.flat:not(:disabled) { color: inherit; }
+.aerobox-window button.flat:not(:disabled):hover,
+.editor-root button.flat:not(:disabled):hover { background: alpha(@window_fg_color, .07); }
+.aerobox-window button.flat:not(:disabled):active,
+.editor-root button.flat:not(:disabled):active { background: alpha(@window_fg_color, .12); }
+.aerobox-window button:focus-visible,
+.editor-root button:focus-visible { outline: 2px solid @accent_color; outline-offset: 3px; }
 .aerobox-window .floating-save { border-radius: 16px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 3px 8px alpha(#1a202a,.16); }
 .dark .floating-save { box-shadow: 0 3px 8px alpha(#000000,.30); }
 .compact-action { border-radius: 999px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }

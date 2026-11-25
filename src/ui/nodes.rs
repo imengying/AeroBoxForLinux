@@ -47,7 +47,9 @@ impl Ui {
             return;
         };
         let subscription_id = subscription.id.clone();
-        let test = floating_button("aerobox-bolt-symbolic", "测试全部节点延迟");
+        let test = floating_button("aerobox-bolt-symbolic", "测速全部");
+        test.remove_css_class("suggested-action");
+        test.add_css_class("secondary-action");
         test.set_halign(gtk::Align::End);
         test.set_valign(gtk::Align::End);
         test.set_margin_end(30);
@@ -56,10 +58,7 @@ impl Ui {
         test.set_tooltip_text(Some("测试此订阅的节点延迟"));
         self.floating.add_overlay(&test);
         self.nodes_action.replace(Some(test.clone()));
-        // GTK includes the button's margins in its natural height. Put this
-        // clearance after the last card so earlier rows can scroll under it.
-        let (_, action_height, _, _) = test.measure(gtk::Orientation::Vertical, -1);
-        self.body.set_margin_bottom(action_height + 8);
+        reserve_floating_action(&self.body, &test);
         let grid = gtk::FlowBox::new();
         grid.add_css_class("nodes-grid");
         grid.set_hexpand(true);
@@ -68,11 +67,11 @@ impl Ui {
         grid.set_activate_on_single_click(true);
         grid.set_homogeneous(true);
         grid.set_min_children_per_line(1);
-        grid.set_max_children_per_line(4);
+        grid.set_max_children_per_line(8);
         grid.set_column_spacing(8);
         grid.set_row_spacing(8);
         grid.set_valign(gtk::Align::Start);
-        follow_width(&grid, 156, 8, 4, true);
+        follow_width(&grid, 180, 8, 8, true);
         grid.update_property(&[gtk::accessible::Property::Label("订阅节点")]);
         self.body.append(&grid);
         let empty = empty("network-wireless-symbolic", "暂无节点", "");
@@ -154,7 +153,7 @@ impl NodesPanel {
                 name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                 name.set_lines(2);
                 name.set_width_chars(1);
-                name.set_max_width_chars(10);
+                name.set_max_width_chars(18);
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 name.set_tooltip_text(Some(&node.name));
                 title.append(&name);
@@ -169,13 +168,14 @@ impl NodesPanel {
                 indicator.add_named(&spinner, Some("busy"));
                 title.append(&indicator);
                 content.append(&title);
-                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 let protocol = label(&node.protocol, "muted node-protocol");
-                protocol.set_hexpand(true);
                 protocol.set_width_chars(1);
                 protocol.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                footer.append(&protocol);
-                let delay = label("", "muted node-delay");
+                content.append(&protocol);
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                footer.add_css_class("node-card-footer");
+                let delay = label("未测速", "muted node-delay");
+                delay.set_hexpand(true);
                 footer.append(&delay);
                 let test = gtk::Button::new();
                 test.add_css_class("flat");
@@ -509,10 +509,11 @@ fn delay_text(delay: Option<u64>) -> String {
     match delay {
         Some(0) => "超时".into(),
         Some(ms) => format!("{ms} ms"),
-        None => "".into(),
+        None => "未测速".into(),
     }
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_delay_colors(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
@@ -529,6 +530,7 @@ pub(super) fn smoke_delay_colors(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_delay_failure(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
@@ -543,6 +545,7 @@ pub(super) fn smoke_delay_failure(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
@@ -597,6 +600,48 @@ pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
+pub(super) fn smoke_fullscreen(ui: &Rc<Ui>) -> Result<()> {
+    use anyhow::ensure;
+    ensure!(ui.window.is_fullscreen(), "节点窗口未进入全屏");
+    let expected = if ui.window.width() >= 1800 { 120 } else { 112 };
+    ensure!(
+        ui.scroll.width() >= 1000 && ui.typography.density_percent() == expected,
+        "全屏内容区或密度尚未应用: viewport={}x{} density={}%",
+        ui.scroll.width(),
+        ui.scroll.height(),
+        ui.typography.density_percent()
+    );
+    ensure!(ui.typography.preview() == 11, "全屏不应改写用户字号");
+    ensure!(
+        ui.content_clamp.maximum_size() > 1030,
+        "全屏内容仍被旧限宽约束"
+    );
+    ensure!(
+        ui.split.min_sidebar_width() > 128.0,
+        "全屏侧栏没有跟随整体密度"
+    );
+    let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
+    let cards = panel.cards.borrow();
+    let first_y = cards[0].child.allocation().y();
+    let columns = cards
+        .iter()
+        .take_while(|card| card.child.allocation().y() == first_y)
+        .count();
+    ensure!(columns > 3, "全屏节点没有扩展列数: {columns}");
+    ensure!(
+        cards.iter().all(|card| {
+            card.child.width() > 180
+                && card.child.width() < 330
+                && card.test.width() >= 28
+                && card.test.height() >= 28
+        }),
+        "全屏卡片或测速命中区尺寸不合理"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_nodes(
     ui: &Rc<Ui>,
     subscription: &str,
@@ -639,7 +684,12 @@ pub(super) fn smoke_nodes(
             .iter()
             .take_while(|card| card.child.allocation().y() == first_y)
             .count();
-        ensure!(first_row == 4, "常规窗口第一行显示了 {first_row} 个节点");
+        ensure!(
+            first_row == 3,
+            "常规窗口第一行显示了 {first_row} 个节点: grid={} max={}",
+            panel.grid.width(),
+            panel.grid.max_children_per_line()
+        );
     }
     for card in cards.iter() {
         ensure!(
@@ -664,8 +714,8 @@ pub(super) fn smoke_nodes(
             .compute_bounds(&card.child)
             .context("测速按钮没有位置")?;
         ensure!(
-            test.width() > 0.0
-                && test.height() > 0.0
+            test.width() >= 28.0
+                && test.height() >= 28.0
                 && test.x() >= 0.0
                 && test.y() > 0.0
                 && test.x() + test.width() <= card.child.width() as f32 + 1.0
@@ -731,6 +781,7 @@ pub(super) fn smoke_nodes(
     Ok(())
 }
 
+#[cfg(feature = "ui-smoke")]
 pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
     use anyhow::ensure;
     ensure!(ui.jobs.get() == 0, "节点任务未完成");
@@ -850,6 +901,7 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
 
 /// Exercise the actual icon handler, including its disabled stopped-core guard.
 /// The next smoke step checks the selected node after any async work finishes.
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
     use anyhow::ensure;
     ensure!(ui.jobs.get() == 0, "节点任务未完成");

@@ -3,15 +3,15 @@
 .editor-root { background: @window_bg_color; }
 .editor-toolbar { padding: 0.55em 1.09em; border-bottom: 1px solid alpha(@borders,.5); }
 .page-content > preferencesgroup { margin-top: 0.27em; }
-/* Caption-and-entry rows need separation from the preceding switch and from
- * one another. Margins live on the child so separators stay full width. */
+/* Keep each field with its title; retain clear whitespace before the next
+ * field, rather than making the title/input pair itself look disconnected. */
 .settings-page .labeled-entry {
-  margin-top: 1.2em;
-  margin-bottom: 1.3em;
+  margin-top: 0.9em;
+  margin-bottom: 1.1em;
   padding-left: 0.55em;
   padding-right: 0.55em;
 }
-.settings-page .labeled-entry-title { margin-bottom: 0.35em; }
+.settings-page .labeled-entry-title { margin-bottom: 0; }
 .settings-page > box { padding-top: 0.35em; padding-bottom: 1.5em; }
 .transparent-header { background: transparent; box-shadow: none; border-bottom: none; }
 separator { background: alpha(#728292,.13); min-height: 0.09em; }
@@ -20,7 +20,8 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .upload { color: @app_muted; }
 .dark .download { color: #8cbaff; }
 .dark .upload { color: #b3bcd5; }
-.aerobox-window preferencesgroup .title, .editor-root preferencesgroup .title { font-size: 1em; }
+.aerobox-window preferencesgroup .heading, .editor-root preferencesgroup .heading { font-size: 1.04em; font-weight: 600; }
+.aerobox-window row .title, .editor-root row .title { font-size: 1em; font-weight: normal; }
 .aerobox-window row .subtitle, .editor-root row .subtitle { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
 .aerobox-window preferencesgroup .description, .editor-root preferencesgroup .description { font-size: 0.92em; color: alpha(@window_fg_color, .70); opacity: 1; }
 
@@ -40,15 +41,15 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 /* Cards in the same row stretch to the tallest one so their bottom edges line
  * up; inner spacing stays on the card class, not on the flow child. */
 .dashboard-grid > flowboxchild > .surface-card { margin: 0; }
-.aerobox-window button.home-network { padding: 0.75em 1em; min-width: 14em; font-weight: normal; }
+.aerobox-window button.home-network { padding: 0.8em 1em; min-width: 18em; font-weight: normal; }
 .home-network:hover { background: shade(@app_card_bg, .98); }
 .dark .home-network:hover { background: shade(@dark_card_bg, 1.12); }
 .home-network:active { background: @app_sidebar_bg; }
 .dark .home-network:active { background: @dark_sidebar_bg; }
-.home-network .exit-ip { font-size: 1.12em; font-weight: 600; font-feature-settings: "tnum"; }
-.speed-card { padding: 0.75em 1em; min-width: 6.6em; }
-.speed-value { font-size: 1.30em; font-weight: 600; font-feature-settings: "tnum"; }
-.home-mode { padding: 0.86em 1em; min-width: 14em; }
+.home-network .exit-ip { font-size: 1.10em; font-weight: 600; font-feature-settings: "tnum"; }
+.speed-card { padding: 0.8em 1em; min-width: 8em; }
+.speed-value { font-size: 1.34em; font-weight: 600; font-feature-settings: "tnum"; }
+.home-mode { padding: 0.9em 1em; min-width: 18em; }
 .mode-selector { border-radius: 999px; background: @app_sidebar_bg; padding: 0.27em; }
 .mode-selector button { border-radius: 999px; border: none; box-shadow: none; background: transparent; padding: 0.36em 0.91em; font-weight: 500; }
 .mode-selector button:checked { background: @app_primary_container; color: @app_on_primary_container; }
@@ -57,12 +58,15 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-takeover { padding: 0.18em 1em; min-width: 19em; }
 .home-switch { min-height: 3.09em; }
 .home-switch + .home-switch { border-top: 1px solid alpha(#728292,.16); }
-.home-stat { padding: 0.86em 1em; min-width: 7em; }
-.home-stat-value { font-size: 1.14em; font-weight: 600; font-feature-settings: "tnum"; }
-.aerobox-window button.floating-action { border-radius: 18px; padding: 0; min-width: 3.8em; min-height: 3.8em; box-shadow: 0 3px 10px alpha(#183b50,.16); }
+.home-stat { padding: 0.9em 1em; min-width: 9em; }
+.home-stat-value { font-size: 1.18em; font-weight: 600; font-feature-settings: "tnum"; }
+/* Large icon targets share the same geometry in normal and busy states. */
+.aerobox-window button.floating-action { border-radius: 16px; padding: 0; min-width: 3.8em; min-height: 3.8em; box-shadow: 0 2px 6px alpha(#183b50,.16), 0 5px 12px alpha(#183b50,.08); }
 .floating-action image { -gtk-icon-size: 2.1em; }
-.floating-action.suggested-action { background: @app_primary_container; color: @app_on_primary_container; }
-.dark .floating-action.suggested-action { background: @dark_primary_container; color: @dark_on_primary_container; }
+.floating-action.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
+.dark .floating-action.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
+.floating-action:disabled { background: @app_primary_container; color: @app_on_primary_container; }
+.dark .floating-action:disabled { background: @dark_primary_container; color: @dark_on_primary_container; }
 
 /* Keep one compact control density across the main pages and dialogs. These
  * selectors override libadwaita's generous touch-sized defaults, not the
