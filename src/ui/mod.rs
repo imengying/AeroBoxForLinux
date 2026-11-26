@@ -810,7 +810,8 @@ impl Ui {
         panel.confirm_leave(self, Rc::new(leave))
     }
     fn rules(self: &Rc<Self>, heading: &gtk::Box) {
-        let add = primary("新建规则", "list-add-symbolic");
+        let add = toolbar_action("导入规则");
+        add.set_widget_name("rule-import");
         heading.append(&add);
         let weak = Rc::downgrade(self);
         add.connect_clicked(move |_| {
@@ -1011,8 +1012,7 @@ impl Ui {
                 ui.refresh(Page::Connections)
             }
         });
-        let close = gtk::Button::with_label("关闭全部");
-        close.add_css_class("compact-action");
+        let close = toolbar_action("关闭全部");
         close.set_sensitive(self.service.status().running);
         heading.append(&close);
         let weak = Rc::downgrade(self);
@@ -1177,8 +1177,7 @@ impl Ui {
                 ui.save_text("AeroBox.log", ui.service.logs())
             }
         });
-        let clear = gtk::Button::with_label("清空");
-        clear.add_css_class("compact-action");
+        let clear = toolbar_action("清空");
         heading.append(&clear);
         let weak = Rc::downgrade(self);
         clear.connect_clicked(move |_| {
@@ -1327,8 +1326,71 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button.set_valign(gtk::Align::Center);
     button
 }
+pub(super) struct DialogHeader {
+    pub(super) window: adw::Window,
+    pub(super) root: gtk::Box,
+    pub(super) header: adw::HeaderBar,
+    pub(super) cancel: gtk::Button,
+    pub(super) action: gtk::Button,
+}
+
+/// Shared window and actions for import forms and source editors.
+fn dialog_header(
+    parent: &impl IsA<gtk::Window>,
+    title: &str,
+    action_title: &str,
+    action_icon: &str,
+    width: i32,
+    height: i32,
+) -> DialogHeader {
+    let window = adw::Window::builder()
+        .title(title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(width)
+        .default_height(height)
+        .build();
+    if let Some(app) = parent.application() {
+        window.set_application(Some(&app));
+    }
+    follow_theme(&window);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.add_css_class("editor-root");
+    let header = adw::HeaderBar::new();
+    header.add_css_class("dialog-header");
+    header.set_show_start_title_buttons(false);
+    header.set_show_end_title_buttons(false);
+    header.set_title_widget(Some(&adw::WindowTitle::new(title, "")));
+    let cancel = gtk::Button::with_label("取消");
+    cancel.add_css_class("flat");
+    cancel.add_css_class("compact-action");
+    let weak = window.downgrade();
+    cancel.connect_clicked(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.close();
+        }
+    });
+    let action = primary(action_title, action_icon);
+    action.add_css_class("compact-action");
+    action.set_widget_name("dialog-action");
+    header.pack_start(&cancel);
+    header.pack_end(&action);
+    root.append(&header);
+    window.set_content(Some(&root));
+    window.set_default_widget(Some(&action));
+    DialogHeader {
+        window,
+        root,
+        header,
+        cancel,
+        action,
+    }
+}
+
 fn action_content(icon: &str, title: &str) -> gtk::Box {
-    let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    content.set_halign(gtk::Align::Center);
+    content.set_valign(gtk::Align::Center);
     let image = gtk::Image::from_icon_name(icon);
     content.append(&image);
     let text = label(title, "");
@@ -1337,15 +1399,21 @@ fn action_content(icon: &str, title: &str) -> gtk::Box {
 }
 
 fn update_action(button: &gtk::Button, icon: &str, title: &str) {
-    button.set_icon_name(icon);
+    if button.has_css_class("floating-action") {
+        button.set_icon_name(icon);
+    } else {
+        button.set_child(Some(&action_content(icon, title)));
+    }
     button.set_tooltip_text(Some(title));
     button.update_property(&[gtk::accessible::Property::Label(title)]);
 }
 
 fn floating_button(icon: &str, title: &str) -> gtk::Button {
     let button = gtk::Button::new();
-    button.add_css_class("flat");
+    // Page-level floating actions are secondary by default. The home connection
+    // toggle opts into the one filled primary action; latency testing does not.
     button.add_css_class("floating-action");
+    button.add_css_class("secondary-action");
     update_action(&button, icon, title);
     button
 }
@@ -1390,6 +1458,14 @@ fn follow_theme(window: &impl IsA<gtk::Window>) {
 fn bolt() -> gtk::Image {
     // A real symbolic icon follows foreground colour on the selected blue card.
     gtk::Image::from_icon_name("aerobox-bolt-symbolic")
+}
+
+fn toolbar_action(title: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(title);
+    button.add_css_class("secondary-action");
+    button.add_css_class("compact-action");
+    button.set_valign(gtk::Align::Center);
+    button
 }
 
 fn primary(title: &str, icon: &str) -> gtk::Button {

@@ -428,9 +428,7 @@ impl Ui {
             .title("恢复默认设置")
             .subtitle("保留订阅、节点和规则，仅重置设置")
             .build();
-        let reset_button = gtk::Button::with_label("恢复默认");
-        reset_button.add_css_class("compact-action");
-        reset_button.set_valign(gtk::Align::Center);
+        let reset_button = toolbar_action("恢复默认");
         reset.add_suffix(&reset_button);
         data.add(&reset);
         reset_button.connect_clicked(move |_| {
@@ -504,18 +502,14 @@ impl Ui {
             .title("导出备份")
             .subtitle("包含明文节点凭据，请妥善保管备份文件")
             .build();
-        let export = gtk::Button::with_label("导出");
-        export.add_css_class("compact-action");
-        export.set_valign(gtk::Align::Center);
+        let export = toolbar_action("导出");
         export_row.add_suffix(&export);
         backup_group.add(&export_row);
         let import_row = adw::ActionRow::builder()
             .title("合并恢复备份")
             .subtitle("添加订阅和规则副本，并按备份恢复设置")
             .build();
-        let restore = gtk::Button::with_label("选择文件");
-        restore.add_css_class("compact-action");
-        restore.set_valign(gtk::Align::Center);
+        let restore = toolbar_action("选择文件");
         import_row.add_suffix(&restore);
         backup_group.add(&import_row);
         form.append(&backup_group);

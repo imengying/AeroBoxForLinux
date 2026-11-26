@@ -57,11 +57,14 @@ impl Ui {
             if status.running { "停止" } else { "启动" },
         );
         toggle.set_widget_name("home-start");
+        toggle.remove_css_class("secondary-action");
+        toggle.add_css_class("suggested-action");
         toggle.set_halign(gtk::Align::End);
         toggle.set_valign(gtk::Align::End);
         toggle.set_margin_end(30);
         toggle.set_margin_bottom(24);
         if status.running {
+            toggle.remove_css_class("suggested-action");
             toggle.add_css_class("destructive-action");
         }
         toggle.set_sensitive(
@@ -427,8 +430,23 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
     anyhow::ensure!(
         !descendants(&action)
             .iter()
-            .any(|widget| widget.is::<gtk::Label>()),
-        "启动按钮仍有文字"
+            .any(|widget| widget.is::<gtk::Label>())
+            && action.has_css_class("suggested-action")
+            && !action.has_css_class("secondary-action"),
+        "启动按钮的图标或主操作样式不正确"
+    );
+    let font_px = action
+        .pango_context()
+        .font_description()
+        .map(|font| font.size() as f32 / gtk::pango::SCALE as f32 * 96.0 / 72.0)
+        .unwrap_or(14.7);
+    anyhow::ensure!(
+        action.height() as f32 >= 28.0
+            && (action.height() as f32) < font_px * 3.6
+            && (action.width() - action.height()).abs() <= 1,
+        "启动按钮没有按字号保持紧凑: {}x{}, font={font_px}",
+        action.width(),
+        action.height()
     );
     let title = descendants(&dashboard.network)
         .into_iter()
@@ -711,9 +729,12 @@ impl Dashboard {
             // A running child can be stopped while startup waits for rules or API readiness.
             button.set_sensitive(status.running);
             if status.running {
+                button.remove_css_class("suggested-action");
                 button.add_css_class("destructive-action");
             } else {
                 button.remove_css_class("destructive-action");
+                button.remove_css_class("secondary-action");
+                button.add_css_class("suggested-action");
             }
         }
         if ui.jobs.get() > 0 {

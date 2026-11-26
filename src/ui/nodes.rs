@@ -566,7 +566,24 @@ pub(super) fn smoke_floating_action(ui: &Rc<Ui>) -> Result<()> {
         !descendants(&action)
             .iter()
             .any(|widget| widget.is::<gtk::Label>()),
-        "悬浮测速仍有文字"
+        "悬浮测速应只显示图标"
+    );
+    ensure!(
+        action.has_css_class("secondary-action") && !action.has_css_class("suggested-action"),
+        "测速全部不应与启动争夺主操作层级"
+    );
+    let font_px = action
+        .pango_context()
+        .font_description()
+        .map(|font| font.size() as f32 / gtk::pango::SCALE as f32 * 96.0 / 72.0)
+        .unwrap_or(14.7);
+    ensure!(
+        action.height() as f32 >= 28.0
+            && (action.height() as f32) < font_px * 3.6
+            && (action.width() - action.height()).abs() <= 1,
+        "测速按钮没有按字号保持紧凑: {}x{}, font={font_px}",
+        action.width(),
+        action.height()
     );
     ensure!(
         action.halign() == gtk::Align::End && action.valign() == gtk::Align::End,

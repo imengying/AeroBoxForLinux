@@ -206,6 +206,8 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 13 => "home-compact.png",
                 14 => "home-scrolled.png",
                 15 => "rules.png",
+                65 => "rule-import.png",
+                66 => "rule-import-dark.png",
                 16 => "online-rules-editor.png",
                 18 => "settings.png",
                 19 => "settings-tun.png",
@@ -227,7 +229,11 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 _ => "",
             };
             if !name.is_empty() {
-                let window = if matches!(current, 16 | 20) {
+                let window = if matches!(current, 65 | 66) {
+                    app.windows().into_iter()
+                        .find(|window| window.title().as_deref() == Some("导入规则"))
+                        .context("导入规则窗口未打开")?
+                } else if matches!(current, 16 | 20) {
                     app.active_window().context("编辑窗口未打开")?
                 } else {
                     ui.window.clone().upcast::<gtk::Window>()
@@ -695,6 +701,39 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     ui.navigate(Page::Nodes);
                 }
                 63 => smoke_resize_boundaries(&ui).await?,
+                64 => {
+                    ui.navigate(Page::Rules);
+                    let add = descendants(&ui.body)
+                        .into_iter()
+                        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+                        .find(|button| button.widget_name() == "rule-import")
+                        .context("缺少导入规则入口")?;
+                    add.emit_clicked();
+                    let window = editors::smoke_rule_import(&ui.window)?;
+                    let add = descendants(&ui.body)
+                        .into_iter()
+                        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+                        .find(|button| button.widget_name() == "rule-import")
+                        .context("规则工具栏按钮丢失")?;
+                    anyhow::ensure!(
+                        add.has_css_class("compact-action")
+                            && add.has_css_class("secondary-action")
+                            && !add.has_css_class("suggested-action"),
+                        "规则导入入口层级错误"
+                    );
+                    window.present();
+                }
+                65 => {
+                    apply_theme("dark");
+                }
+                66 => {
+                    let window = app.windows().into_iter()
+                        .find(|window| window.title().as_deref() == Some("导入规则"))
+                        .context("导入规则窗口未保留")?;
+                    apply_theme("light");
+                    window.close();
+                    ui.window.present();
+                }
                 _ => {}
             }
             Ok(())
@@ -713,7 +752,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
             app.quit();
             return;
         }
-        if current == 63 {
+        if current == 66 {
             let clipboard = ui.window.clipboard();
             clipboard.set_text("AeroBox Wayland 剪贴板测试");
             let app = app.clone();

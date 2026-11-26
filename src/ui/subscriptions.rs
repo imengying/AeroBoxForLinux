@@ -44,7 +44,7 @@ impl Ui {
     }
 
     pub(super) fn subscriptions(self: &Rc<Self>, heading: &gtk::Box) {
-        let add = primary("导入订阅", "list-add-symbolic");
+        let add = toolbar_action("导入订阅");
         add.set_widget_name("subscription-import");
         heading.append(&add);
         let weak = Rc::downgrade(self);
@@ -358,36 +358,34 @@ impl Ui {
     }
 
     pub(super) fn import_subscription(self: &Rc<Self>) {
-        let window = adw::Window::builder()
-            .title("导入订阅")
-            .transient_for(&self.window)
-            .modal(true)
-            .default_width(560)
-            .default_height(470)
-            .build();
-        if let Some(app) = self.window.application() {
-            window.set_application(Some(&app));
-        }
-        follow_theme(&window);
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.add_css_class("editor-root");
+        let dialog = dialog_header(
+            &self.window,
+            "导入订阅",
+            "导入",
+            "document-save-symbolic",
+            560,
+            540,
+        );
+        let window = dialog.window;
+        let root = dialog.root;
         root.add_css_class("import-dialog");
-        let header = adw::HeaderBar::new();
-        let import = primary("导入", "document-save-symbolic");
+        let import = dialog.action;
         import.set_widget_name("subscription-import-save");
-        header.pack_end(&import);
-        root.append(&header);
-        let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let form = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        form.add_css_class("dialog-form");
+        form.set_valign(gtk::Align::Start);
         form.set_margin_start(20);
         form.set_margin_end(20);
-        form.set_margin_top(12);
+        form.set_margin_top(16);
         form.set_margin_bottom(20);
+        let basic = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        form.append(&basic);
         let name = LabeledEntry::new("名称（可选）", "");
-        form.append(&name.root);
+        name.entry.set_placeholder_text(Some("留空时自动识别"));
+        basic.append(&name.root);
         let source_title = gtk::Label::new(Some("订阅链接或节点内容"));
         source_title.set_xalign(0.0);
         source_title.add_css_class("labeled-entry-title");
-        form.append(&source_title);
         let source = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .top_margin(9)
@@ -404,9 +402,12 @@ impl Ui {
             .vexpand(false)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        scroll.add_css_class("card");
         scroll.add_css_class("import-source");
-        form.append(&scroll);
+        let source_field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        source_field.add_css_class("source-field");
+        source_field.append(&source_title);
+        source_field.append(&scroll);
+        basic.append(&source_field);
         // Live feedback under the source box: the import button used to be the
         // only place that reported problems, after the user had committed.
         let hint = gtk::Label::builder()
@@ -426,9 +427,12 @@ impl Ui {
         let interval_toggle = interval.root.clone();
         auto_update
             .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
-        let updates = adw::PreferencesGroup::new();
-        updates.add(&auto_update);
-        updates.add(&interval.root);
+        let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        updates.set_visible(false);
+        let update_group = adw::PreferencesGroup::builder().title("更新设置").build();
+        update_group.add(&auto_update);
+        updates.append(&update_group);
+        updates.append(&interval.root);
         form.append(&updates);
         let error = gtk::Label::builder()
             .wrap(true)
@@ -438,6 +442,7 @@ impl Ui {
             .build();
         error.set_widget_name("subscription-import-error");
         error.add_css_class("error");
+        error.add_css_class("dialog-error");
         form.append(&error);
         let form_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -445,7 +450,6 @@ impl Ui {
             .child(&form)
             .build();
         root.append(&form_scroll);
-        window.set_content(Some(&root));
         let busy = Rc::new(Cell::new(false));
         let buffer = source.buffer();
         let validate = {
@@ -456,6 +460,7 @@ impl Ui {
             import.set_sensitive(false);
             let import = import.downgrade();
             let busy = busy.clone();
+            let updates = updates.downgrade();
             let refresh = std::rc::Rc::new(move |buffer: &gtk::TextBuffer| {
                 let (Some(import), Some(hint), Some(error)) =
                     (import.upgrade(), hint.upgrade(), error.upgrade())
@@ -472,11 +477,17 @@ impl Ui {
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     hint.set_visible(false);
+                    if let Some(updates) = updates.upgrade() {
+                        updates.set_visible(false);
+                    }
                     import.set_sensitive(false);
                     return;
                 }
                 match subscription::import_input(trimmed) {
                     Ok(sub) => {
+                        if let Some(updates) = updates.upgrade() {
+                            updates.set_visible(!sub.source.is_empty());
+                        }
                         import.set_sensitive(true);
                         error.set_visible(false);
                         hint.set_text(&if sub.source.is_empty() {
@@ -495,6 +506,9 @@ impl Ui {
                         hint.set_visible(true);
                     }
                     Err(failure) => {
+                        if let Some(updates) = updates.upgrade() {
+                            updates.set_visible(false);
+                        }
                         import.set_sensitive(false);
                         error.set_visible(false);
                         hint.set_text(&format!("无法识别：{failure}"));
@@ -507,6 +521,7 @@ impl Ui {
             refresh
         };
         let weak = Rc::downgrade(self);
+        let cancel = dialog.cancel;
         let weak_window = window.downgrade();
         let close_guard = busy.clone();
         window.connect_close_request(move |_| {
@@ -524,6 +539,7 @@ impl Ui {
                 return;
             }
             form.set_sensitive(false);
+            cancel.set_sensitive(false);
             let buffer = source.buffer();
             let input = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
@@ -533,6 +549,7 @@ impl Ui {
             let interval = interval.text().trim().parse().unwrap_or(0);
             let window = weak_window.clone();
             let error = error.clone();
+            let cancel = cancel.downgrade();
             let busy = busy.clone();
             let form = form.downgrade();
             let validate = validate.clone();
@@ -555,6 +572,9 @@ impl Ui {
                     busy.set(false);
                     if let Some(form) = form.upgrade() {
                         form.set_sensitive(true);
+                    }
+                    if let Some(cancel) = cancel.upgrade() {
+                        cancel.set_sensitive(true);
                     }
                     validate(&buffer);
                     match result {

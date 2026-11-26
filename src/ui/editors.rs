@@ -18,17 +18,11 @@ struct EditorWindow {
 
 impl EditorWindow {
     fn new(parent: &impl IsA<gtk::Window>, title: &str, subtitle: &str) -> Self {
-        let window = adw::Window::builder()
-            .title(title)
-            .transient_for(parent)
-            .modal(true)
-            .default_width(880)
-            .default_height(740)
-            .build();
-        if let Some(app) = parent.application() {
-            window.set_application(Some(&app));
-        }
-        follow_theme(&window);
+        let dialog = dialog_header(parent, title, "保存", "object-select-symbolic", 880, 740);
+        let window = dialog.window;
+        let root = dialog.root;
+        let cancel = dialog.cancel;
+        let save = dialog.action;
         let saving = Rc::new(Cell::new(false));
         let guard = saving.clone();
         window.connect_close_request(move |_| {
@@ -38,29 +32,9 @@ impl EditorWindow {
                 glib::Propagation::Proceed
             }
         });
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.add_css_class("editor-root");
-        let header = adw::HeaderBar::new();
-        header.set_show_end_title_buttons(false);
-        header.set_show_start_title_buttons(false);
-        header.set_title_widget(Some(&adw::WindowTitle::new(title, subtitle)));
-        let cancel = gtk::Button::with_label("取消");
-        cancel.add_css_class("flat");
-        let weak = window.downgrade();
-        cancel.connect_clicked(move |_| {
-            if let Some(w) = weak.upgrade() {
-                w.close();
-            }
-        });
-        let save = gtk::Button::with_label("保存");
-        save.add_css_class("suggested-action");
-        save.add_css_class("primary-action");
-        // Enter inside any entry finishes the dialog instead of silently doing
-        // nothing; Ctrl+Enter in the source view still inserts a newline.
-        window.set_default_widget(Some(&save));
-        header.pack_start(&cancel);
-        header.pack_end(&save);
-        root.append(&header);
+        dialog
+            .header
+            .set_title_widget(Some(&adw::WindowTitle::new(title, subtitle)));
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         body.set_vexpand(true);
         root.append(&body);
@@ -74,9 +48,10 @@ impl EditorWindow {
             .selectable(true)
             .visible(false)
             .build();
+        error.set_widget_name("editor-error");
         error.add_css_class("error");
+        error.add_css_class("dialog-error");
         root.append(&error);
-        window.set_content(Some(&root));
         Self {
             window,
             body,
@@ -98,9 +73,11 @@ fn explain(text: &str) -> gtk::Label {
     label
 }
 fn form_page() -> (gtk::ScrolledWindow, gtk::Box) {
-    let form = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    form.set_margin_top(24);
-    form.set_margin_bottom(32);
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 20);
+    form.add_css_class("dialog-form");
+    form.set_valign(gtk::Align::Start);
+    form.set_margin_top(16);
+    form.set_margin_bottom(24);
     form.set_margin_start(24);
     form.set_margin_end(24);
     let clamp = adw::Clamp::builder()
@@ -216,7 +193,8 @@ pub fn subscription(
 ) {
     let editor = EditorWindow::new(parent, "编辑订阅", "");
     let (scroll, form) = form_page();
-    let source_group = group("订阅来源", "");
+    let fields = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    fields.add_css_class("dialog-fields");
     let name = LabeledEntry::new("名称", &item.name);
     let source = LabeledEntry::new("订阅地址或文件路径", &item.source);
     source.entry.set_tooltip_text(Some("留空可手动添加节点"));
@@ -224,8 +202,6 @@ pub fn subscription(
     choose.set_tooltip_text(Some("选择本地订阅文件"));
     choose.add_css_class("flat");
     source.with_suffix(&choose);
-    let name_row = name.root.clone();
-    let source_row = source.root.clone();
     let source_for_file = source.entry.downgrade();
     let weak = editor.window.downgrade();
     choose.connect_clicked(move |_| {
@@ -239,10 +215,12 @@ pub fn subscription(
             });
         }
     });
-    source_group.add(&name_row);
-    source_group.add(&source_row);
-    form.append(&source_group);
-    let updates = group("更新", "");
+    fields.append(&name.root);
+    fields.append(&source.root);
+    form.append(&fields);
+    let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    updates.set_visible(!item.source.is_empty());
+    let update_group = group("更新设置", "");
     let auto_update = switch("自动更新", "", item.auto_update);
     let interval = number_entry(
         "更新间隔（分钟）",
@@ -251,10 +229,17 @@ pub fn subscription(
     interval.root.set_sensitive(item.auto_update);
     let interval_toggle = interval.root.clone();
     auto_update.connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
-    updates.add(&auto_update);
-    updates.add(&interval.root);
+    update_group.add(&auto_update);
+    updates.append(&update_group);
+    updates.append(&interval.root);
     form.append(&updates);
-    let edit_nodes = gtk::Button::with_label("编辑节点数据");
+    let updates = updates.downgrade();
+    source.entry.connect_changed(move |source| {
+        if let Some(updates) = updates.upgrade() {
+            updates.set_visible(!source.text().trim().is_empty());
+        }
+    });
+    let edit_nodes = toolbar_action("编辑节点数据");
     edit_nodes.set_halign(gtk::Align::Start);
     let weak = editor.window.downgrade();
     let nodes_service = service.clone();
@@ -288,6 +273,7 @@ pub fn subscription(
             return;
         }
         error.set_visible(false);
+        let original_button = button.child();
         let spinner = gtk::Spinner::builder().spinning(true).build();
         let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         progress.append(&spinner);
@@ -352,7 +338,7 @@ pub fn subscription(
             saving.set(false);
             spinner.stop();
             if let Some(button) = button.upgrade() {
-                button.set_label("保存");
+                button.set_child(original_button.as_ref());
                 button.set_sensitive(true);
             }
             if let Some(cancel) = cancel.upgrade() {
@@ -416,15 +402,44 @@ pub fn ruleset(
     item: RuleSet,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑规则", "");
+    let is_new = !service
+        .snapshot()
+        .rulesets
+        .iter()
+        .any(|rule| rule.id == item.id);
+    let editor = EditorWindow::new(
+        parent,
+        if is_new {
+            "导入规则"
+        } else {
+            "编辑规则"
+        },
+        "",
+    );
+    editor.window.set_default_size(
+        if is_new { 560 } else { 880 },
+        if is_new { 570 } else { 740 },
+    );
+    if is_new {
+        editor.save.set_widget_name("rule-import-save");
+        update_action(&editor.save, "document-save-symbolic", "导入");
+    }
     let stack = tabs(&editor.body);
+    let switcher = stack.prev_sibling().expect("editor tabs");
     stack.set_widget_name("ruleset-tabs");
     let (scroll, form) = form_page();
-    let basic = group("规则", "");
     let name = LabeledEntry::new("名称", &item.name);
-    let source = LabeledEntry::new("在线地址或本地文件", &item.source);
-    let name_row = name.root.clone();
-    let source_row = source.root.clone();
+    name.entry.set_widget_name("rule-name");
+    let source = LabeledEntry::new("规则链接或本地文件", &item.source);
+    source.entry.set_widget_name("rule-source");
+    let source_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    source_section.add_css_class("dialog-fields");
+    source_section.append(&name.root);
+    source_section.append(&source.root);
+    form.append(&source_section);
+    let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let format_group = group("来源与格式", "");
+    let options = group("规则选项", "");
     let interval = number_entry(
         "自动更新间隔（分钟）",
         &item.update_interval_minutes.to_string(),
@@ -436,10 +451,10 @@ pub fn ruleset(
         .model(&format_model)
         .selected(u32::from(item.binary))
         .build();
-    basic.add(&name_row);
-    basic.add(&source_row);
-    basic.add(&format);
-    basic.add(&interval.root);
+    format_group.add(&format);
+    updates.append(&format_group);
+    updates.append(&interval.root);
+    form.append(&updates);
     let actions = ["direct", "proxy", "reject"];
     let action = adw::ComboRow::builder()
         .title("匹配后")
@@ -452,9 +467,9 @@ pub fn ruleset(
         )
         .build();
     let enabled = switch("启用", "", item.enabled);
-    basic.add(&action);
-    basic.add(&enabled);
-    form.append(&basic);
+    options.add(&action);
+    options.add(&enabled);
+    form.append(&options);
     stack.add_titled(&scroll, Some("general"), "基本信息");
     let content = SourceEditor::new(&model::pretty(&item.content), "json", true, "");
     let rules = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -479,24 +494,38 @@ pub fn ruleset(
     quick.append(&add_rule);
     rules.append(&quick);
     rules.append(&content.root);
-    let content_page = stack.add_titled(&rules, Some("content"), "规则内容");
-    content_page.set_visible(!item.is_remote());
-    let switcher = stack.prev_sibling().expect("editor tabs");
-    switcher.set_visible(!item.is_remote());
-    let switcher = switcher.downgrade();
-    let remote_interval = interval.root.clone();
-    source.entry.connect_changed(move |source| {
-        let online = model::is_online_source(source.text().trim());
-        remote_interval.set_visible(online);
-        content_page.set_visible(!online);
-        if let Some(switcher) = switcher.upgrade() {
-            switcher.set_visible(!online);
-        }
-    });
-    let content_for_format = rules.clone();
-    content_for_format.set_sensitive(!item.binary);
-    format
-        .connect_selected_notify(move |row| content_for_format.set_sensitive(row.selected() == 0));
+    stack.add_titled(&rules, Some("content"), "规则内容");
+    let refresh_source = {
+        let stack = stack.downgrade();
+        let switcher = switcher.downgrade();
+        let interval = interval.root.downgrade();
+        let source = source.entry.downgrade();
+        let format = format.downgrade();
+        Rc::new(move || {
+            let (Some(stack), Some(switcher), Some(interval), Some(source), Some(format)) = (
+                stack.upgrade(),
+                switcher.upgrade(),
+                interval.upgrade(),
+                source.upgrade(),
+                format.upgrade(),
+            ) else {
+                return;
+            };
+            let source = source.text();
+            let inline = source.trim().is_empty() && format.selected() == 0;
+            interval.set_visible(model::is_online_source(source.trim()));
+            let content = stack.child_by_name("content").expect("rule content");
+            if !inline {
+                stack.set_visible_child_name("general");
+            }
+            stack.page(&content).set_visible(inline);
+            switcher.set_visible(inline);
+        })
+    };
+    refresh_source();
+    let refresh = refresh_source.clone();
+    source.entry.connect_changed(move |_| refresh());
+    format.connect_selected_notify(move |_| refresh_source());
     let buffer = content.buffer.clone();
     let quick_error = editor.error.clone();
     add_rule.connect_clicked(move |_| {
@@ -527,8 +556,7 @@ pub fn ruleset(
             ensure!(!name.text().trim().is_empty(), "请填写规则名称");
             let binary = format.selected() == 1;
             let source_text = source.text().trim().to_owned();
-            let online = model::is_online_source(&source_text);
-            let value = if !binary && !online {
+            let value = if !binary && source_text.is_empty() {
                 let value = parse_json_buffer(&content.buffer)?;
                 validate_rules(&value)?;
                 Some(value)
@@ -539,11 +567,17 @@ pub fn ruleset(
                 .snapshot()
                 .rulesets
                 .into_iter()
-                .find(|r| r.id == item.id)
+                .find(|rule| rule.id == item.id)
                 .unwrap_or_else(|| item.clone());
             next.name = name.text().trim().into();
             next.source = source_text;
-            next.update_interval_minutes = interval.text().trim().parse().unwrap_or(0);
+            if model::is_online_source(&next.source) {
+                next.update_interval_minutes = interval
+                    .text()
+                    .trim()
+                    .parse()
+                    .context("请填写有效的更新间隔")?;
+            }
             next.binary = binary;
             next.action = actions[action.selected() as usize].into();
             next.enabled = enabled.is_active();
@@ -561,11 +595,16 @@ pub fn ruleset(
                 saving.set(true);
                 error.set_visible(false);
                 button.set_sensitive(false);
+                let original = button.child();
                 let spinner = gtk::Spinner::new();
                 spinner.start();
                 let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 progress.append(&spinner);
-                progress.append(&gtk::Label::new(Some("保存中…")));
+                progress.append(&gtk::Label::new(Some(if is_new {
+                    "导入中…"
+                } else {
+                    "保存中…"
+                })));
                 button.set_child(Some(&progress));
                 if let Some(cancel) = cancel.upgrade() {
                     cancel.set_sensitive(false);
@@ -600,7 +639,7 @@ pub fn ruleset(
                     saving.set(false);
                     spinner.stop();
                     if let Some(button) = button.upgrade() {
-                        button.set_label("保存");
+                        button.set_child(original.as_ref());
                         button.set_sensitive(true);
                     }
                     if let Some(cancel) = cancel.upgrade() {
@@ -677,6 +716,7 @@ pub fn code(
                 return;
             }
             err.set_visible(false);
+            let original = button.child();
             let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let spinner = gtk::Spinner::builder().spinning(true).build();
             progress.append(&spinner);
@@ -716,7 +756,7 @@ pub fn code(
                 };
                 saving.set(false);
                 spinner.stop();
-                button.set_label("保存");
+                button.set_child(original.as_ref());
                 button.set_sensitive(true);
                 if let Some(cancel) = cancel.upgrade() {
                     cancel.set_sensitive(true);
@@ -737,7 +777,7 @@ pub fn code(
             });
         });
     } else {
-        editor.save.set_label("完成");
+        update_action(&editor.save, "object-select-symbolic", "完成");
         editor.save.connect_clicked(move |_| {
             if let Some(w) = weak.upgrade() {
                 w.close();
@@ -820,6 +860,7 @@ pub fn rule_content(
                                 show_error(&error, e);
                                 return;
                             }
+                            let original = button.child();
                             button.set_sensitive(false);
                             button.set_label("保存中…");
                             cancel.set_sensitive(false);
@@ -857,7 +898,7 @@ pub fn rule_content(
                                 saving.set(false);
                                 if let Some(button) = button.upgrade() {
                                     button.set_sensitive(true);
-                                    button.set_label("保存");
+                                    button.set_child(original.as_ref());
                                 }
                                 if let Some(cancel) = cancel.upgrade() {
                                     cancel.set_sensitive(true);
@@ -908,6 +949,78 @@ fn validate_rules(value: &Value) -> Result<()> {
 }
 
 #[cfg(feature = "ui-smoke")]
+pub(super) fn smoke_rule_import(parent: &adw::ApplicationWindow) -> Result<gtk::Window> {
+    let window = parent
+        .application()
+        .context("缺少应用")?
+        .windows()
+        .into_iter()
+        .find(|window| window.title().as_deref() == Some("导入规则"))
+        .context("导入规则窗口未打开")?;
+    ensure!(
+        window.title().as_deref() == Some("导入规则"),
+        "导入规则窗口标题错误: {:?}",
+        window.title()
+    );
+    let widgets = descendants(&window);
+    let source = widgets
+        .iter()
+        .find(|widget| widget.widget_name() == "rule-source")
+        .context("缺少规则来源")?
+        .downcast_ref::<gtk::Entry>()
+        .context("规则来源不是输入框")?;
+    let stack = widgets
+        .iter()
+        .find(|widget| widget.widget_name() == "ruleset-tabs")
+        .context("缺少规则页签")?
+        .downcast_ref::<gtk::Stack>()
+        .context("规则页签类型错误")?;
+    let switcher = widgets
+        .iter()
+        .find_map(|widget| widget.downcast_ref::<gtk::StackSwitcher>())
+        .context("缺少本地规则编辑入口")?;
+    ensure!(switcher.is_visible(), "本地规则无法切换到内容编辑");
+    stack.set_visible_child_name("content");
+    source.set_text("https://example.test/rules.json");
+    ensure!(
+        stack.visible_child_name().as_deref() == Some("general") && !switcher.is_visible(),
+        "切换在线来源后仍停留在内容编辑页"
+    );
+    let action = widgets
+        .iter()
+        .find(|widget| widget.widget_name() == "rule-import-save")
+        .context("缺少规则导入按钮")?
+        .clone()
+        .downcast::<gtk::Button>()
+        .unwrap();
+    ensure!(
+        action.has_css_class("suggested-action") && !action.has_css_class("secondary-action"),
+        "规则导入不是主操作"
+    );
+    for (name, value) in [
+        ("rule-name", "导入规则预览"),
+        ("rule-source", "https://example.test/rules.json"),
+    ] {
+        let entry = widgets
+            .iter()
+            .find(|widget| widget.widget_name() == name)
+            .with_context(|| format!("缺少{name}"))?
+            .clone()
+            .downcast::<gtk::Entry>()
+            .unwrap();
+        entry.set_text(value);
+    }
+    ensure!(
+        widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::StackSwitcher>())
+            .all(|switcher| !switcher.is_visible()),
+        "在线规则导入仍显示页签"
+    );
+    Ok(window)
+}
+
+#[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_ruleset(
     parent: &adw::ApplicationWindow,
     service: Arc<Service>,
@@ -955,25 +1068,48 @@ pub(super) fn smoke_ruleset(
     let source = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<gtk::Entry>())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("在线地址或本地文件"))
+        .find(|entry| entry.widget_name() == "rule-source")
         .context("缺少规则来源")?;
     ensure!(
         WidgetExt::is_visible(interval) && !stack.page(&content).is_visible(),
         "在线规则显示了无效的本地编辑器"
     );
     let original_source = source.text();
+    let format = widgets
+        .iter()
+        .find_map(|widget| {
+            widget
+                .downcast_ref::<adw::ComboRow>()
+                .filter(|row| row.title() == "文件格式")
+        })
+        .context("缺少规则格式")?;
+    let original_format = format.selected();
     source.set_text("");
+    format.set_selected(0);
     ensure!(
         !WidgetExt::is_visible(interval) && stack.page(&content).is_visible(),
         "本地规则编辑不可用"
     );
     source.set_text(&original_source);
+    format.set_selected(original_format);
     interval.set_text("120");
     let save = widgets
         .iter()
-        .filter_map(|w| w.downcast_ref::<gtk::Button>())
-        .find(|b| b.label().as_deref() == Some("保存"))
-        .context("缺少保存按钮")?;
+        .find(|w| w.widget_name() == "dialog-action")
+        .context("缺少保存按钮")?
+        .downcast_ref::<gtk::Button>()
+        .context("保存控件不是按钮")?;
+    ensure!(
+        descendants(save)
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
+            .any(|label| label.label() == "保存"),
+        "保存按钮缺少文字"
+    );
+    ensure!(
+        save.has_css_class("suggested-action") && !save.has_css_class("secondary-action"),
+        "弹窗保存按钮不应显示为次操作"
+    );
     save.emit_clicked();
     Ok(())
 }

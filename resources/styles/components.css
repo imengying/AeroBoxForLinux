@@ -25,16 +25,16 @@
 .node-card:active, .subscription-card:active { background: shade(@app_card_bg, .92); }
 .dark .node-card:active, .dark .subscription-card:active { background: shade(@dark_card_bg, 1.20); }
 .node-card.node-selected { background: @accent_bg_color; border-color: @accent_bg_color; color: @accent_fg_color; }
-.subscription-card.subscription-selected { background: @app_primary_container; border-color: @accent_bg_color; box-shadow: none; }
+.subscription-card.subscription-selected { background: @app_primary_container; border-color: transparent; box-shadow: none; }
 .dark .node-card.node-selected { background: @accent_bg_color; border-color: @accent_bg_color; color: @accent_fg_color; }
-.dark .subscription-card.subscription-selected { background: @dark_primary_container; border-color: @dark_on_primary_container; box-shadow: none; }
+.dark .subscription-card.subscription-selected { background: @dark_primary_container; border-color: transparent; box-shadow: none; }
 .node-card.node-selected { box-shadow: none; }
 .node-card.node-selected .muted,
 .node-card.node-selected .node-protocol, .node-card.node-selected .node-delay { color: alpha(@accent_fg_color, .90); }
 .node-card.node-selected .node-test-button { color: @accent_fg_color; }
 .node-card.node-selected:hover { background: shade(@accent_bg_color, 1.09); }
 .node-card.node-selected:active { background: shade(@accent_bg_color, .92); }
-.subscription-card.subscription-selected:hover { background: shade(@app_primary_container, .96); }
+.subscription-card.subscription-selected:hover { background: shade(@app_primary_container, .97); border-color: transparent; }
 .dark .subscription-card.subscription-selected:hover { background: shade(@dark_primary_container, 1.16); }
 .subscription-card.subscription-selected:active { background: shade(@app_primary_container, .90); }
 .dark .subscription-card.subscription-selected:active { background: shade(@dark_primary_container, 1.28); }

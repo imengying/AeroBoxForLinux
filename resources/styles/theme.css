@@ -16,6 +16,10 @@
 @define-color dark_sidebar_bg #1a222d;
 @define-color dark_muted #bdc6d5;
 @define-color dark_outline #454d5b;
+@define-color app_disabled_bg #e0e5ec;
+@define-color app_disabled_fg #727c8b;
+@define-color dark_disabled_bg #303946;
+@define-color dark_disabled_fg #8d99a9;
 @define-color latency_good #237a45;
 @define-color latency_medium #8a5a00;
 @define-color latency_bad #b3261e;
@@ -57,40 +61,53 @@
 .surface-card { border-radius: 16px; background: @app_card_bg; border: 1px solid transparent; box-shadow: none; }
 .dark .surface-card { background: @dark_card_bg; }
 
-/* One action hierarchy: filled primary, quiet tonal secondary, flat inline. */
+/* Geometry and color roles are independent, including in dialogs. */
 .primary-action { border-radius: 999px; padding: 0.55em 1.18em; font-weight: 600; }
+.compact-action { border-radius: 999px; min-height: 2.36em; }
+.aerobox-window button.compact-action:not(.flat),
+.editor-root button.compact-action:not(.flat) { padding: 0.25em 0.82em; font-weight: normal; }
+.aerobox-window .compact-action box,
+.editor-root .compact-action box { margin: 0; }
+.aerobox-window button.secondary-action,
+.editor-root button.secondary-action { background: @app_primary_container; color: @app_on_primary_container; }
+.aerobox-window button.secondary-action:hover,
+.editor-root button.secondary-action:hover { background: shade(@app_primary_container, .96); }
+.aerobox-window button.secondary-action:active,
+.editor-root button.secondary-action:active { background: shade(@app_primary_container, .90); }
+.dark.aerobox-window button.secondary-action,
+.dark .editor-root button.secondary-action { background: @dark_primary_container; color: @dark_on_primary_container; }
+.dark.aerobox-window button.secondary-action:hover,
+.dark .editor-root button.secondary-action:hover { background: shade(@dark_primary_container, 1.16); }
+.dark.aerobox-window button.secondary-action:active,
+.dark .editor-root button.secondary-action:active { background: shade(@dark_primary_container, 1.28); }
 .aerobox-window button.suggested-action,
 .editor-root button.suggested-action { background: @accent_bg_color; color: @accent_fg_color; }
 .aerobox-window button.suggested-action:hover,
-.editor-root button.suggested-action:hover { background: shade(@accent_bg_color, 1.09); color: @accent_fg_color; }
+.editor-root button.suggested-action:hover { background: shade(@accent_bg_color, 1.09); }
 .aerobox-window button.suggested-action:active,
-.editor-root button.suggested-action:active { background: shade(@accent_bg_color, .92); color: @accent_fg_color; }
-.aerobox-window button.suggested-action:disabled,
-.editor-root button.suggested-action:disabled { background: @app_primary_container; color: @app_on_primary_container; }
+.editor-root button.suggested-action:active { background: shade(@accent_bg_color, .92); }
 .aerobox-window button.destructive-action,
 .editor-root button.destructive-action { background: @error_color; color: white; }
 .aerobox-window button.destructive-action:hover,
-.editor-root button.destructive-action:hover { background: shade(@error_color, 1.08); color: white; }
-.aerobox-window button.secondary-action,
-.editor-root button.secondary-action,
-.aerobox-window button.compact-action:not(.flat),
-.editor-root button.compact-action:not(.flat) { background: @app_primary_container; color: @app_on_primary_container; }
-.dark.aerobox-window button.suggested-action:disabled,
-.dark .editor-root button.suggested-action:disabled { background: @dark_primary_container; color: @dark_on_primary_container; }
-.dark.aerobox-window button.secondary-action,
-.dark .editor-root button.secondary-action,
-.dark.aerobox-window button.compact-action:not(.flat),
-.dark .editor-root button.compact-action:not(.flat) { background: @dark_primary_container; color: @dark_on_primary_container; }
-button.secondary-action:hover,
-button.compact-action:not(.flat):hover { background: shade(@app_primary_container, .96); }
-.dark button.secondary-action:hover,
-.dark button.compact-action:not(.flat):hover { background: shade(@dark_primary_container, 1.16); }
-button.secondary-action:active,
-button.compact-action:not(.flat):active { background: shade(@app_primary_container, .90); }
-.dark button.secondary-action:active,
-.dark button.compact-action:not(.flat):active { background: shade(@dark_primary_container, 1.28); }
+.editor-root button.destructive-action:hover { background: shade(@error_color, 1.08); }
+.aerobox-window button.destructive-action:active,
+.editor-root button.destructive-action:active { background: shade(@error_color, .92); }
 .aerobox-window button:disabled,
 .editor-root button:disabled { opacity: 1; filter: none; }
+.aerobox-window button.suggested-action:disabled,
+.editor-root button.suggested-action:disabled,
+.aerobox-window button.secondary-action:disabled,
+.editor-root button.secondary-action:disabled,
+.aerobox-window button.destructive-action:disabled,
+.editor-root button.destructive-action:disabled { background: @app_disabled_bg; color: @app_disabled_fg; box-shadow: none; }
+.dark.aerobox-window button.suggested-action:disabled,
+.dark .editor-root button.suggested-action:disabled,
+.dark.aerobox-window button.secondary-action:disabled,
+.dark .editor-root button.secondary-action:disabled,
+.dark.aerobox-window button.destructive-action:disabled,
+.dark .editor-root button.destructive-action:disabled { background: @dark_disabled_bg; color: @dark_disabled_fg; }
+.aerobox-window button:disabled image,
+.editor-root button:disabled image { color: inherit; opacity: 1; filter: none; -gtk-icon-filter: none; }
 .aerobox-window button.flat:not(:disabled),
 .editor-root button.flat:not(:disabled) { color: inherit; }
 .aerobox-window button.flat:not(:disabled):hover,
@@ -101,6 +118,5 @@ button.compact-action:not(.flat):active { background: shade(@app_primary_contain
 .editor-root button:focus-visible { outline: 2px solid @accent_color; outline-offset: 3px; }
 .aerobox-window .floating-save { border-radius: 16px; padding: 0.58em 1.1em; margin: 0; min-height: 0; box-shadow: 0 3px 8px alpha(#1a202a,.16); }
 .dark .floating-save { box-shadow: 0 3px 8px alpha(#000000,.30); }
-.compact-action { border-radius: 999px; min-height: 2.36em; padding-top: 0.25em; padding-bottom: 0.25em; }
 .row-icon { background: @app_primary_container; color: @app_on_primary_container; border-radius: 12px; -gtk-icon-size: 1.55em; min-width: 3em; min-height: 3em; }
 .dark .row-icon { background: @dark_primary_container; color: @dark_on_primary_container; }
