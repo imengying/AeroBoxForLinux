@@ -20,6 +20,7 @@
 @define-color app_disabled_fg #727c8b;
 @define-color dark_disabled_bg #303946;
 @define-color dark_disabled_fg #8d99a9;
+@define-color home_stop_icon #ff8a80;
 @define-color latency_good #237a45;
 @define-color latency_medium #8a5a00;
 @define-color latency_bad #b3261e;

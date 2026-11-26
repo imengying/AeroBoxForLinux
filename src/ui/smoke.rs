@@ -22,7 +22,7 @@ pub(super) fn seed_smoke(service: &Service) -> Result<()> {
     })
 }
 
-async fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
+pub(super) async fn screenshot(window: &impl IsA<gtk::Window>, path: &Path) -> Result<()> {
     // Timers can run before pending layout/paint work on a busy runner. Wait
     // for complete frames so both the snapshot and following bounds checks
     // observe the allocated page, including responsive column updates.
@@ -201,7 +201,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 7 => "subscriptions-returned.png",
                 8 => "nodes-returned.png",
                 9 => "nodes-dark.png",
-                10 => "connections.png",
+                10 => "home-dark.png",
                 11 => "logs.png",
                 12 => "home-narrow.png",
                 13 => "home-compact.png",
@@ -312,6 +312,11 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     .context("全屏测试缺少订阅")?
                     .id
                     .clone();
+                // The preceding cache check keeps a full-length IPv6 fixture in
+                // memory. Restore the neutral home state before the dark card
+                // screenshot, so it tests normal wrapping rather than a
+                // deliberately wide pre-wrapped address.
+                ui.last_detected.replace(None);
                 ui.service.update(|state| {
                     state.settings.font_size = 11;
                     state.settings.theme = "light".into();
@@ -412,6 +417,11 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 }
                 9 => home::smoke_ip_cache(&ui).await?,
                 10 => {
+                    // The loop captures its screenshot before running a step,
+                    // so home-dark.png above shows the page as step 9 left it.
+                    anyhow::ensure!(ui.page.get() == Page::Home, "深色首页截图不在首页");
+                    home::smoke_home_action_theme(&ui, true)?;
+                    home::smoke_running_action(&ui, &parent.join("home-dark-running.png")).await?;
                     // Real log text with descenders and digits, so the layout
                     // check can see whether the first line is clipped.
                     ui.service.log("info: 出口 IP 已更新 (IPv4 203.0.113.7)");
@@ -423,6 +433,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     anyhow::ensure!(bounds.y() >= 0.0, "日志首行被裁切: {bounds:?}");
                     apply_theme("light");
                     ui.navigate(Page::Home);
+                    home::smoke_home_action_theme(&ui, false)?;
                     ui.window.set_default_size(790, 800);
                 }
                 12 => ui.window.set_default_size(700, 600),
@@ -507,11 +518,19 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 20 | 21 => subscriptions::smoke_import(&ui, current - 19)?,
                 22 => {
                     subscriptions::smoke_import(&ui, 3)?;
+                    subscriptions::smoke_selection(&ui, 0, None).await?;
+                    let state = ui.service.snapshot();
+                    anyhow::ensure!(
+                        state.subscriptions[0].selected_node.as_deref() == Some("日本 · 01"),
+                        "导入订阅改变了原有节点选择"
+                    );
                     ui.navigate(Page::Settings);
                     settings::smoke_section(&ui, "general")?;
                 }
                 23 => {
                     settings::smoke_general(&ui)?;
+                    ui.navigate(Page::Subscriptions);
+                    subscriptions::smoke_selection(&ui, 0, Some(2)).await?;
                     ui.navigate(Page::Nodes);
                 }
                 24 => {

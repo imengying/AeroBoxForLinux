@@ -20,6 +20,16 @@ fn a_closed_vless_peer_reports_response_progress_direction_and_selected_route() 
         let mut request = [0; 4096];
         assert!(stream.read(&mut request).unwrap() > 0);
         stream.write_all(&[0]).unwrap();
+        // Drain whatever the client already sent before closing. Unread data in
+        // the receive buffer turns close() into a reset, so the client would
+        // report ConnectionReset instead of the unexpected end of stream this
+        // check asserts. Only already-queued bytes are drained, so this never
+        // waits for more input.
+        stream
+            .set_nonblocking(true)
+            .expect("fixture socket is non-blocking");
+        let mut drain = [0; 1024];
+        while matches!(stream.read(&mut drain), Ok(read) if read > 0) {}
     });
     let app = App::new();
     app.import("diagnostic fixture", vec![json!({
@@ -185,6 +195,19 @@ fn tls_without_close_notify_is_reported_without_masking_protocol_truncation() {
                 stream.write_all(&[0]).unwrap();
             }
             stream.flush().unwrap();
+            // Wait for the client to finish reading before dropping. Dropping
+            // straight after `flush` races the peer's read: when TCP delivers
+            // FIN ahead of the payload, the client sees EOF with bytes still
+            // queued and reports truncation, which made this check flaky.
+            // Keeping the socket open until the client closes preserves the
+            // intended case (no TLS close_notify) without that race, at the
+            // cost of one bounded wait that the 5 s fixture timeout caps.
+            stream
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(150)))
+                .expect("fixture socket accepts a read timeout");
+            let mut drain = [0; 64];
+            while matches!(stream.read(&mut drain), Ok(read) if read > 0) {}
             // Intentionally drop without a TLS close_notify.
         });
         let app = App::new();

@@ -233,7 +233,10 @@ fn restoring_an_unselected_backup_does_not_choose_an_existing_subscription() {
     service
         .import_subscription(state().subscriptions.remove(0))
         .unwrap();
-    assert!(!service.snapshot().settings.active_subscription.is_empty());
+    assert!(
+        service.snapshot().settings.active_subscription.is_empty(),
+        "导入不应自动选用订阅"
+    );
     let mut imported = state();
     imported.settings.active_subscription.clear();
     let path = service.dir().join("unselected.json");

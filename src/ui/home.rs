@@ -57,6 +57,7 @@ impl Ui {
             if status.running { "停止" } else { "启动" },
         );
         toggle.set_widget_name("home-start");
+        toggle.add_css_class("home-connect");
         toggle.remove_css_class("secondary-action");
         toggle.add_css_class("suggested-action");
         toggle.set_halign(gtk::Align::End);
@@ -64,8 +65,7 @@ impl Ui {
         toggle.set_margin_end(30);
         toggle.set_margin_bottom(24);
         if status.running {
-            toggle.remove_css_class("suggested-action");
-            toggle.add_css_class("destructive-action");
+            toggle.add_css_class("home-running");
         }
         toggle.set_sensitive(
             status.running
@@ -435,6 +435,15 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
             && !action.has_css_class("secondary-action"),
         "启动按钮的图标或主操作样式不正确"
     );
+    let icon = descendants(&action)
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Image>().ok())
+        .context("启动按钮没有图标")?;
+    anyhow::ensure!(
+        !icon.has_css_class("dim-label") && icon.opacity() == 1.0,
+        "启动按钮图标被淡化"
+    );
+    ensure_home_action_state(&action, &icon, false)?;
     let font_px = action
         .pango_context()
         .font_description()
@@ -470,6 +479,61 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
         text.0 <= dashboard.exit_ip.width() && text.1 <= dashboard.exit_ip.height(),
         "出口 IP 内容被裁切"
     );
+    Ok(())
+}
+
+#[cfg(feature = "ui-smoke")]
+fn ensure_home_action_state(action: &gtk::Button, icon: &gtk::Image, running: bool) -> Result<()> {
+    #[allow(deprecated)]
+    let color = icon.style_context().color();
+    anyhow::ensure!(
+        action.has_css_class("suggested-action")
+            && !action.has_css_class("destructive-action")
+            && action.has_css_class("home-running") == running,
+        "启动按钮运行状态样式不正确"
+    );
+    if running {
+        anyhow::ensure!(
+            color.red() > 0.95 && color.green() < 0.85 && color.blue() < 0.85,
+            "运行中图标不是浅红色: {color:?}"
+        );
+    } else {
+        anyhow::ensure!(
+            color.red() > 0.99 && color.green() > 0.99 && color.blue() > 0.99,
+            "未运行图标不是白色: {color:?}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ui-smoke")]
+pub(super) fn smoke_home_action_theme(ui: &Rc<Ui>, dark: bool) -> Result<()> {
+    let action = ui.home_action.borrow().clone().context("缺少启动按钮")?;
+    // GTK exposes the foreground through StyleContext, not the resolved CSS
+    // background. A class assertion here ties the button to the stylesheet;
+    // the paired home-dark.png / home.png screenshots are the visual check of
+    // the surface itself.
+    anyhow::ensure!(
+        action.has_css_class("home-connect"),
+        "启动按钮缺少主题跟随样式"
+    );
+    anyhow::ensure!(
+        ui.window.has_css_class("dark") == dark,
+        "启动按钮主题检查与当前主题不一致"
+    );
+    let icon = descendants(&action)
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Image>().ok())
+        .context("启动按钮没有图标")?;
+    ensure_home_action_state(&action, &icon, false)?;
+    if dark {
+        #[allow(deprecated)]
+        let color = icon.style_context().color();
+        anyhow::ensure!(
+            color.red() > 0.99 && color.green() > 0.99 && color.blue() > 0.99,
+            "深色主题下启动图标不是白色: {color:?}"
+        );
+    }
     Ok(())
 }
 
@@ -601,7 +665,39 @@ pub(super) async fn smoke_controls(ui: &Rc<Ui>) -> Result<()> {
         );
     }
     dashboard.exit_ip.set_text("—");
+    // The running state keeps the same blue floating button and uses a light
+    // red stop icon, so assert both branches before restoring the real class.
+    let action = ui.home_action.borrow().clone().context("缺少启动按钮")?;
+    let icon = descendants(&action)
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Image>().ok())
+        .context("启动按钮没有图标")?;
+    action.add_css_class("home-running");
+    ensure_home_action_state(&action, &icon, true)?;
+    action.remove_css_class("home-running");
+    ensure_home_action_state(&action, &icon, false)?;
     Ok(())
+}
+
+/// The smoke harness never starts a real kernel, so no screenshot shows the
+/// running action on its own. Mirror exactly what `Dashboard::refresh` does
+/// for a running status, capture it, then restore the idle presentation.
+#[cfg(feature = "ui-smoke")]
+pub(super) async fn smoke_running_action(ui: &Rc<Ui>, path: &Path) -> Result<()> {
+    anyhow::ensure!(ui.page.get() == Page::Home, "运行态截图不在首页");
+    let action = ui.home_action.borrow().clone().context("缺少启动按钮")?;
+    let icon = descendants(&action)
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Image>().ok())
+        .context("启动按钮没有图标")?;
+    ensure_home_action_state(&action, &icon, false)?;
+    action.set_icon_name("media-playback-stop-symbolic");
+    action.add_css_class("home-running");
+    ensure_home_action_state(&action, &icon, true)?;
+    super::smoke::screenshot(&ui.window, path).await?;
+    action.set_icon_name("media-playback-start-symbolic");
+    action.remove_css_class("home-running");
+    ensure_home_action_state(&action, &icon, false)
 }
 
 #[cfg(feature = "ui-smoke")]
@@ -705,6 +801,10 @@ pub(super) async fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
     })?;
     // The following narrow-window checks exercise a full-length IPv6 address.
     ui.last_detected.replace(Some((ui.detect_key(), info)));
+    // Leave the dashboard showing so the next loop iteration captures the dark
+    // home page with the floating action, which only exists while this page
+    // is open.
+    ui.navigate(Page::Home);
     Ok(())
 }
 
@@ -729,10 +829,9 @@ impl Dashboard {
             // A running child can be stopped while startup waits for rules or API readiness.
             button.set_sensitive(status.running);
             if status.running {
-                button.remove_css_class("suggested-action");
-                button.add_css_class("destructive-action");
+                button.add_css_class("home-running");
             } else {
-                button.remove_css_class("destructive-action");
+                button.remove_css_class("home-running");
                 button.remove_css_class("secondary-action");
                 button.add_css_class("suggested-action");
             }

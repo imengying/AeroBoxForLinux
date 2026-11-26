@@ -161,6 +161,7 @@ impl NodesPanel {
                     Some("empty"),
                 );
                 let spinner = gtk::Spinner::new();
+                spinner.add_css_class("compact-spinner");
                 indicator.add_named(&spinner, Some("busy"));
                 title.append(&indicator);
                 content.append(&title);
@@ -190,6 +191,7 @@ impl NodesPanel {
                 test_indicator.add_named(&bolt(), Some("icon"));
                 test_indicator.add_named(&delay, Some("result"));
                 let test_spinner = gtk::Spinner::new();
+                test_spinner.add_css_class("compact-spinner");
                 test_indicator.add_named(&test_spinner, Some("busy"));
                 test.set_child(Some(&test_indicator));
                 let weak = Rc::downgrade(ui);
@@ -517,6 +519,21 @@ pub(super) fn smoke_delay_colors(ui: &Rc<Ui>) -> Result<()> {
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
     let cards = panel.cards.borrow();
     ensure!(cards.len() == 2, "延迟配色测试需要两个节点");
+    for card in cards.iter() {
+        ensure!(
+            card.spinner.has_css_class("compact-spinner")
+                && card.test_spinner.has_css_class("compact-spinner"),
+            "延迟测试仍使用默认的大等待圆圈"
+        );
+        for spinner in [&card.spinner, &card.test_spinner] {
+            let (_, width, _, _) = spinner.measure(gtk::Orientation::Horizontal, -1);
+            let (_, height, _, _) = spinner.measure(gtk::Orientation::Vertical, -1);
+            ensure!(
+                width <= 16 && height <= 16,
+                "延迟测试的等待圆圈过大: {width}x{height}"
+            );
+        }
+    }
     for (card, delay, class) in [
         (&cards[0], Some(180), "latency-good"),
         (&cards[1], Some(420), "latency-medium"),

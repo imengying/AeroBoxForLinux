@@ -162,9 +162,9 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
     assert_eq!(state.subscriptions.len(), 1);
     assert_eq!(state.subscriptions[0].name, "Example");
     assert_eq!(state.subscriptions[0].update_interval_minutes, 720);
-    assert_eq!(
-        state.settings.active_subscription,
-        state.subscriptions[0].id
+    assert!(
+        state.settings.active_subscription.is_empty(),
+        "首次导入不应自动选用订阅"
     );
     assert_eq!(state.subscriptions[0].selected_node.as_deref(), Some("one"));
     assert!(
@@ -191,6 +191,50 @@ fn subscription_import_commits_only_valid_nodes_and_uses_optional_server_default
             .is_err()
     );
     assert_eq!(service.snapshot().subscriptions.len(), 1);
+}
+
+#[test]
+fn importing_a_subscription_preserves_the_current_subscription_and_node() {
+    let (_dir, service) = service();
+    let current = Subscription {
+        name: "当前订阅".into(),
+        nodes: vec![
+            json!({"type":"socks","tag":"节点 A","server":"127.0.0.1","server_port":1080}),
+            json!({"type":"socks","tag":"节点 B","server":"127.0.0.1","server_port":1081}),
+        ],
+        selected_node: Some("节点 B".into()),
+        ..Subscription::default()
+    };
+    let current_id = current.id.clone();
+    service.import_subscription(current).unwrap();
+    service.select_subscription(&current_id).unwrap();
+    let before = service.snapshot();
+    service
+        .import_subscription(Subscription {
+            name: "仅导入".into(),
+            nodes: vec![
+                json!({"type":"socks","tag":"新节点","server":"127.0.0.1","server_port":1082}),
+            ],
+            ..Subscription::default()
+        })
+        .unwrap();
+    let after = service.snapshot();
+    assert_eq!(after.settings.active_subscription, current_id);
+    assert_eq!(
+        after
+            .subscriptions
+            .iter()
+            .find(|sub| sub.id == current_id)
+            .unwrap()
+            .selected_node,
+        before.subscriptions[0].selected_node
+    );
+    assert_eq!(
+        after.subscriptions[1].selected_node.as_deref(),
+        Some("新节点"),
+        "新订阅仍应初始化自己的可用默认节点"
+    );
+    assert_eq!(service.snapshot().subscriptions.len(), 2);
 }
 
 #[test]

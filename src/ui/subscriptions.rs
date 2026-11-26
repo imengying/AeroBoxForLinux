@@ -132,6 +132,7 @@ impl Ui {
                 Some("empty"),
             );
             let spinner = gtk::Spinner::new();
+            spinner.add_css_class("compact-spinner");
             indicator.add_named(&spinner, Some("busy"));
             indicator.set_visible_child_name("empty");
             indicators.borrow_mut().push((indicator.clone(), spinner));
@@ -172,23 +173,6 @@ impl Ui {
                 }
             });
             actions.append(&edit);
-            let edit_nodes = icon_button("document-edit-symbolic", "编辑节点配置");
-            edit_nodes.set_widget_name("subscription-edit-nodes");
-            let weak = Rc::downgrade(self);
-            let id = item.id.clone();
-            edit_nodes.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade()
-                    && let Some(sub) = ui
-                        .service
-                        .snapshot()
-                        .subscriptions
-                        .into_iter()
-                        .find(|sub| sub.id == id)
-                {
-                    editors::nodes(&ui.window, ui.service.clone(), sub, ui.saved());
-                }
-            });
-            header.append(&edit_nodes);
             let refresh = gtk::Button::with_label("更新订阅");
             refresh.add_css_class("flat");
             refresh.set_sensitive(!item.source.is_empty());
@@ -831,8 +815,14 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
             "本地导入状态无效"
         );
         ensure!(
-            state.settings.active_subscription == sub.id,
-            "导入的订阅没有选用"
+            state.settings.active_subscription == state.subscriptions[0].id
+                && state.subscriptions[0].selected_node.as_deref() == Some("日本 · 01"),
+            "导入订阅改变了原有订阅或节点选择"
+        );
+        ensure!(
+            state.subscriptions.iter().position(|s| s.id == sub.id) == Some(2)
+                && !sub.id.is_empty(),
+            "导入的订阅没有按新卡片保存"
         );
         return Ok(());
     }
@@ -885,6 +875,12 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         .clone()
         .downcast::<gtk::Button>()
         .unwrap();
+    let before = ui.service.snapshot();
+    ensure!(
+        before.settings.active_subscription == before.subscriptions[0].id
+            && before.subscriptions[0].selected_node.as_deref() == Some("日本 · 01"),
+        "打开导入窗口改变了原有订阅或节点选择"
+    );
     if step == 1 {
         source.buffer().set_text("");
         ensure!(
@@ -941,6 +937,10 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         );
     }
     save.emit_clicked();
+    ensure!(
+        ui.service.snapshot().settings.active_subscription == before.settings.active_subscription,
+        "点击导入后立即改变了当前订阅"
+    );
     ensure!(!save.is_sensitive(), "导入期间按钮没有禁用");
     ensure!(!source.is_sensitive(), "导入期间仍可编辑文本");
     if step == 2 {
@@ -958,23 +958,44 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
 pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
     let mut retained = Vec::<glib::WeakRef<glib::Object>>::new();
     let app = ui.window.application().context("缺少应用")?;
-    // Open the node editor from its visible card action; this must not select
-    // another subscription or route just because the user wants to edit it.
-    let active = ui.service.snapshot().settings.active_subscription;
     ui.navigate(Page::Subscriptions);
-    let edit = descendants(&ui.body)
+    anyhow::ensure!(
+        !descendants(&ui.body)
+            .iter()
+            .any(|widget| widget.widget_name() == "subscription-edit-nodes"),
+        "订阅卡片仍显示节点编辑铅笔"
+    );
+    // The card no longer exposes a pencil. Reach the node data the way a user
+    // does: the card's subscription settings action, then its explicit button.
+    let active = ui.service.snapshot().settings.active_subscription;
+    let open_settings = descendants(&ui.body)
         .into_iter()
-        .find(|w| w.widget_name() == "subscription-edit-nodes")
-        .and_then(|w| w.downcast::<gtk::Button>().ok())
-        .context("缺少节点编辑按钮")?;
-    edit.emit_clicked();
+        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+        .find(|button| button.label().as_deref() == Some("订阅设置"))
+        .context("订阅卡片缺少订阅设置入口")?;
+    open_settings.emit_clicked();
+    let settings = app
+        .windows()
+        .into_iter()
+        .find(|window| window.title().as_deref() == Some("编辑订阅"))
+        .context("订阅设置未打开")?;
+    let edit_nodes = descendants(&settings)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+        .find(|button| button.label().as_deref() == Some("编辑节点数据"))
+        .context("订阅设置缺少编辑节点数据入口")?;
+    edit_nodes.emit_clicked();
     let editor = app
         .windows()
         .into_iter()
-        .find(|w| w.title().is_some_and(|title| title.ends_with(" · 节点")))
-        .context("节点编辑未打开")?;
+        .find(|window| {
+            window
+                .title()
+                .is_some_and(|title| title.ends_with(" · 节点"))
+        })
+        .context("订阅设置没有打开节点编辑")?;
     anyhow::ensure!(
-        descendants(&editor).iter().any(|w| w
+        descendants(&editor).iter().any(|widget| widget
             .downcast_ref::<sourceview::View>()
             .is_some_and(|view| view.is_editable())),
         "节点配置不可编辑"
@@ -994,6 +1015,7 @@ pub(super) fn smoke_dialog_release(ui: &Rc<Ui>) -> Result<()> {
         "编辑节点改变了订阅选择"
     );
     editor.close();
+    settings.close();
     for _ in 0..5 {
         ui.import_subscription();
         let window = smoke_import_window(ui)?;

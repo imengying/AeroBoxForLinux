@@ -968,10 +968,9 @@ impl Service {
             "此订阅已导入"
         );
         let mut candidate = before.clone();
-        candidate.settings.active_subscription = sub.id.clone();
         candidate.subscriptions.push(sub);
         self.commit_state(&before, candidate)?;
-        self.log(format!("订阅「{name}」已导入并选用"));
+        self.log(format!("订阅「{name}」已导入"));
         Ok(())
     }
 
@@ -1577,6 +1576,8 @@ mod tun_activation_tests {
             nodes: vec![serde_json::json!({"type":"socks", "tag":"test", "server":"127.0.0.1", "server_port":9})],
             ..Default::default()
         }).unwrap();
+        let id = service.snapshot().subscriptions[0].id.clone();
+        service.select_subscription(&id).unwrap();
         service.start().unwrap();
         let generation = service.status().generation;
         let state = serde_json::to_value(service.snapshot()).unwrap();

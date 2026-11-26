@@ -75,6 +75,9 @@ impl App {
         };
         let id = sub.id.clone();
         self.service.import_subscription(sub).unwrap();
+        // Test helpers that need a running fixture select it explicitly. The
+        // production import operation only adds data; it never changes choice.
+        self.service.select_subscription(&id).unwrap();
         id
     }
 }
