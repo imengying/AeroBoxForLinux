@@ -296,6 +296,7 @@ impl SocketConnectorImpl {
                 })?;
 
                 let ClientQuicConfig {
+                    transport,
                     options,
                     key_exchange_groups,
                     verify,
@@ -426,6 +427,26 @@ impl SocketConnectorImpl {
                     let mut mtu = quinn::MtuDiscoveryConfig::default();
                     mtu.upper_bound(1452 - crate::quic_client::salamander::OVERHEAD);
                     transport_config.mtu_discovery_config(Some(mtu));
+                }
+
+                if let Some(transport) = transport {
+                    let overhead = if obfs.is_some() {
+                        crate::quic_client::salamander::OVERHEAD
+                    } else {
+                        0
+                    };
+                    transport.apply(&mut transport_config, overhead)?;
+                    if transport.connection_receive_window != 0 {
+                        let previous = match &config.protocol {
+                            crate::config::ResolvedClientProxyConfig::Naiveproxy {
+                                settings,
+                                ..
+                            } => settings.session_receive_window as usize,
+                            _ => limits.quic_receive_window,
+                        };
+                        memory_bytes =
+                            memory_bytes - previous + transport.connection_receive_window as usize;
+                    }
                 }
 
                 let transport_config = Arc::new(transport_config);
@@ -882,7 +903,7 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = peer.local_addr().unwrap().port();
         let config: ResolvedClientConfig = crate::config::test_support::from_yaml(&format!(
-            "address: '127.0.0.1:{port}'\ntransport: quic\nquic_settings: {{verify: false, options: {{handshake_timeout_ms: 40}}}}\nprotocol: {{type: socks}}\n"
+            "address: '127.0.0.1:{port}'\ntransport: quic\nquic_settings: {{verify: false, key_exchange_groups: [X25519MLKEM768], options: {{handshake_timeout_ms: 40}}, transport: {{initial_packet_size: 1280, disable_path_mtu_discovery: true}}}}\nprotocol: {{type: socks}}\n"
         )).unwrap();
         let connector = SocketConnectorImpl::from_config(&config, Some(&config.address)).unwrap();
         let resolver: Arc<dyn Resolver> = Arc::new(FixedResolver(vec![peer.local_addr().unwrap()]));
@@ -898,7 +919,12 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(40));
         let mut packet = [0; 2048];
         let size = peer.try_recv(&mut packet).unwrap();
-        assert!(size >= 1200, "a QUIC Initial must actually reach the peer");
+        // The large hybrid key share fills the Initial to its configured MTU;
+        // a short ClientHello only needs QUIC's minimum 1200-byte padding.
+        assert_eq!(
+            size, 1280,
+            "the configured QUIC Initial size must reach the peer"
+        );
     }
 
     #[tokio::test]

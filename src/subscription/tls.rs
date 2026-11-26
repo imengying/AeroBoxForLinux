@@ -36,6 +36,84 @@ const ECH_FIELDS: &[(&str, &str)] = &[
     ("ech-query-server-name", "query_server_name"),
 ];
 
+pub(super) const CLASH_FIELDS: &[&str] = &[
+    "certificate",
+    "private-key",
+    "fingerprint",
+    "certificate-sha256",
+    "certificate-public-key-sha256",
+    "min-version",
+    "max-version",
+    "cipher-suites",
+    "curve-preferences",
+];
+
+pub(super) fn clash(source: &Value, tls: &mut Value) -> Result<()> {
+    for (from, to) in [
+        ("min-version", "min_version"),
+        ("max-version", "max_version"),
+        ("cipher-suites", "cipher_suites"),
+        ("curve-preferences", "curve_preferences"),
+        ("certificate-sha256", "certificate_sha256"),
+        (
+            "certificate-public-key-sha256",
+            "certificate_public_key_sha256",
+        ),
+    ] {
+        if let Some(value) = source.get(from) {
+            tls[to] = value.clone();
+        }
+    }
+    // Clash certificate/private-key are client credentials, not trust roots.
+    for (from, inline, file) in [
+        (
+            "certificate",
+            "client_certificate",
+            "client_certificate_path",
+        ),
+        ("private-key", "client_key", "client_key_path"),
+    ] {
+        if let Some(value) = source.get(from) {
+            let text = value
+                .as_str()
+                .with_context(|| format!("Clash {from} 须为 PEM 或文件路径"))?;
+            if !text.is_empty() {
+                tls[if text.trim_start().starts_with("-----BEGIN ") {
+                    inline
+                } else {
+                    file
+                }] = value.clone();
+            }
+        }
+    }
+    if let Some(fingerprint) = source.get("fingerprint") {
+        let fingerprint = fingerprint
+            .as_str()
+            .context("Clash fingerprint 须为 SHA-256 十六进制文本")?;
+        if !fingerprint.is_empty() {
+            ensure!(
+                tls.get("certificate_sha256").is_none()
+                    && tls.get("certificate_public_key_sha256").is_none(),
+                "Clash 重复设置证书指纹"
+            );
+            let text: String = fingerprint
+                .chars()
+                .filter(|c| *c != ':' && !c.is_ascii_whitespace())
+                .collect();
+            ensure!(
+                text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()),
+                "Clash fingerprint 须为 32 字节 SHA-256 十六进制值"
+            );
+            let bytes: Vec<_> = (0..text.len())
+                .step_by(2)
+                .map(|offset| u8::from_str_radix(&text[offset..offset + 2], 16).unwrap())
+                .collect();
+            tls["certificate_chain_sha256"] = json!([STANDARD.encode(bytes)]);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn link_fields() -> impl Iterator<Item = &'static str> {
     OPTIONAL_FIELDS
         .iter()

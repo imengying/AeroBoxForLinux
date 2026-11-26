@@ -4,12 +4,14 @@ mod h2_stream;
 mod http1;
 #[cfg(test)]
 mod tests;
+use crate::option_util::NoneOrSome;
 use crate::{
     address::ResolvedLocation,
     async_stream::{AsyncMessageStream, AsyncStream},
     tcp::tcp_handler::{ClientTransport, TcpClientHandler, TcpClientSetupResult},
 };
 use async_trait::async_trait;
+use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,7 +35,7 @@ fn default_method() -> String {
 pub struct Config<P> {
     pub kind: Kind,
     #[serde(default)]
-    pub host: Option<String>,
+    pub host: NoneOrSome<String>,
     #[serde(default = "default_path")]
     pub path: String,
     #[serde(default = "default_method")]
@@ -74,7 +76,7 @@ impl<P> Config<P> {
         self.method
             .parse::<http::Method>()
             .map_err(io::Error::other)?;
-        if let Some(host) = &self.host {
+        for host in self.host.iter() {
             host.parse::<http::uri::Authority>()
                 .map_err(io::Error::other)?;
         }
@@ -139,7 +141,13 @@ impl Handler {
         })
     }
     async fn wrap(&self, mut stream: Box<dyn AsyncStream>) -> io::Result<Box<dyn AsyncStream>> {
-        let host = self.options.host.as_deref().unwrap_or(&self.authority);
+        let host = match &self.options.host {
+            NoneOrSome::One(host) => host.as_str(),
+            NoneOrSome::Some(hosts) => hosts
+                .choose(&mut rand::rng())
+                .map_or(self.authority.as_str(), String::as_str),
+            _ => &self.authority,
+        };
         if self.options.kind == Kind::HttpUpgrade {
             let mut request = format!(
                 "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n",

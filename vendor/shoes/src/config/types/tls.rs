@@ -22,6 +22,13 @@ pub struct TlsClientOptions {
     pub ech: Option<crate::ech::EchOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub root_certificates: Vec<String>,
+    /// Base64 SHA-256 hashes of the complete DER leaf certificate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub certificate_sha256: Vec<String>,
+    /// Clash pins may identify a leaf or a CA in the supplied chain. A pinned
+    /// CA is trusted only after validating the leaf's chain and server name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub certificate_chain_sha256: Vec<String>,
     /// Base64 SHA-256 hashes of the leaf certificate's DER SubjectPublicKeyInfo.
     /// Pins add a restriction to `verify`; with `verify: false`, pins still apply.
     #[serde(skip_serializing_if = "Vec::is_empty")]

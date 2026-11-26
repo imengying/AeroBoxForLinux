@@ -142,6 +142,8 @@ pub struct ServerQuicConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClientQuicConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<ClientQuicTransportConfig>,
     #[serde(
         default,
         skip_serializing_if = "super::tls::TlsClientOptions::is_default"
@@ -169,6 +171,7 @@ pub struct ClientQuicConfig {
 impl Default for ClientQuicConfig {
     fn default() -> Self {
         Self {
+            transport: None,
             options: Default::default(),
             key_exchange_groups: Default::default(),
             verify: true,
@@ -178,6 +181,90 @@ impl Default for ClientQuicConfig {
             key: None,
             cert: None,
         }
+    }
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClientQuicTransportConfig {
+    pub initial_packet_size: u16,
+    pub disable_path_mtu_discovery: bool,
+    pub idle_timeout_ms: u32,
+    pub keep_alive_period_ms: u32,
+    pub stream_receive_window: u32,
+    pub connection_receive_window: u32,
+    pub max_concurrent_streams: u32,
+}
+
+impl ClientQuicTransportConfig {
+    pub(crate) fn validate(&self, overhead: u16) -> std::io::Result<()> {
+        for (field, value, min, max) in [
+            (
+                "initial_packet_size",
+                u32::from(self.initial_packet_size),
+                1200,
+                u32::from(1452 - overhead),
+            ),
+            (
+                "stream_receive_window",
+                self.stream_receive_window,
+                16 * 1024,
+                64 * 1024 * 1024,
+            ),
+            (
+                "connection_receive_window",
+                self.connection_receive_window,
+                16 * 1024,
+                128 * 1024 * 1024,
+            ),
+            (
+                "max_concurrent_streams",
+                self.max_concurrent_streams,
+                1,
+                1024,
+            ),
+        ] {
+            if value != 0 && !(min..=max).contains(&value) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("QUIC {field} must be zero (default) or {min}..{max}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply(
+        &self,
+        config: &mut quinn::TransportConfig,
+        overhead: u16,
+    ) -> std::io::Result<()> {
+        self.validate(overhead)?;
+        if self.initial_packet_size != 0 {
+            config.initial_mtu(self.initial_packet_size);
+        }
+        if self.disable_path_mtu_discovery {
+            config.mtu_discovery_config(None);
+        }
+        if self.idle_timeout_ms != 0 {
+            config.max_idle_timeout(Some(quinn::VarInt::from_u32(self.idle_timeout_ms).into()));
+        }
+        if self.keep_alive_period_ms != 0 {
+            config.keep_alive_interval(Some(std::time::Duration::from_millis(
+                self.keep_alive_period_ms.into(),
+            )));
+        }
+        if self.stream_receive_window != 0 {
+            config.stream_receive_window(self.stream_receive_window.into());
+        }
+        if self.connection_receive_window != 0 {
+            config.receive_window(self.connection_receive_window.into());
+        }
+        if self.max_concurrent_streams != 0 {
+            // sing-quic applies this field to peer-initiated bidirectional streams.
+            config.max_concurrent_bidi_streams(self.max_concurrent_streams.into());
+        }
+        Ok(())
     }
 }
 

@@ -32,6 +32,7 @@ fn http2_receive_windows_are_sent_on_the_wire_with_cronet_semantics() {
     for (window, expected_connection) in [
         (None, 128 * 1024 * 1024),
         (Some(json!(0)), 128 * 1024 * 1024),
+        (Some(json!("")), 128 * 1024 * 1024),
         (Some(json!(2097153)), 2097153),
     ] {
         let tls = config.clone();
@@ -112,6 +113,8 @@ fn naive_windows_validate_protocol_specific_fields_and_memory_limits() {
     }
     for quic in [false, true] {
         let mut value = node(quic);
+        value["insecure_concurrency"] = 0.into();
+        value["quic_congestion_control"] = "".into();
         value["stream_receive_window"] = 0.into();
         value["quic_session_receive_window"] = 0.into();
         protocol::validate(&value).unwrap();

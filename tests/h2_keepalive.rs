@@ -71,7 +71,6 @@ fn keepalive_parameters_survive_subscription_formats_and_validate_units() {
     for (field, value) in [
         ("idle_timeout", json!("-1s")),
         ("idle_timeout", json!("0.1ms")),
-        ("idle_timeout", json!("")),
         ("ping_timeout", json!("4294967296ms")),
         ("ping_timeout", json!(15)),
         ("permit_without_stream", json!("false")),
@@ -83,6 +82,10 @@ fn keepalive_parameters_survive_subscription_formats_and_validate_units() {
             "{field}"
         );
     }
+    let mut defaults = valid.clone();
+    defaults["transport"]["idle_timeout"] = "".into();
+    defaults["transport"]["ping_timeout"] = "".into();
+    protocol::validate(&defaults).unwrap();
     for query in [
         "type=grpc&idle_timeout=1s&idle-timeout=2s",
         "type=grpc&permit_without_stream=true&grpc_permit_without_stream=false",

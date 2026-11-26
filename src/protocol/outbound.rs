@@ -1,4 +1,4 @@
-use super::{Fields, Result, address, error, seconds};
+use super::{Fields, Result, address, error, seconds, strings};
 use serde_json::{Value, json};
 
 /// Convert a single Android/sing-box outbound into a named Rust client group.
@@ -83,7 +83,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             let authenticated_length = f.boolean("authenticated_length", false)?;
             let packet_encoding = packet_encoding(&mut f, false)?;
             let cipher = f.string("security")?.unwrap_or("auto".into());
-            let cipher = if cipher == "auto" {
+            let cipher = if cipher.is_empty() || cipher == "auto" {
                 "any".into()
             } else {
                 cipher
@@ -135,8 +135,11 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                 ),
                 ("idle_session_timeout", "idle_session_timeout_secs"),
             ] {
-                if let Some(v) = f.take(src) {
-                    p[dst] = seconds(v, &format!("{path}.{src}"))?.into();
+                if let Some(v) = f.take(src).filter(|value| value != "") {
+                    let interval = seconds(v, &format!("{path}.{src}"))?;
+                    if interval != 0 {
+                        p[dst] = interval.into();
+                    }
                 }
             }
             f.copy("min_idle_session", &mut p, "min_idle_session");
@@ -149,27 +152,27 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
             for key in ["up_mbps", "down_mbps"] {
                 f.copy(key, &mut p, key);
             }
-            if let Some(ports) = f.take("server_ports") {
-                let values = ports
-                    .as_array()
-                    .ok_or_else(|| error(format!("{path}.server_ports"), "expected array"))?;
-                let ports = values
+            let ports = f
+                .take("server_ports")
+                .map(|ports| strings(ports, &format!("{path}.server_ports")))
+                .transpose()?
+                .unwrap_or_default();
+            if !ports.is_empty() {
+                let ports = ports
                     .iter()
-                    .map(|v| {
-                        v.as_str().map(|s| s.replace(':', "-")).ok_or_else(|| {
-                            error(format!("{path}.server_ports"), "expected port strings")
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?
+                    .map(|v| v.replace(':', "-"))
+                    .collect::<Vec<_>>()
                     .join(",");
                 let mut hopping = json!({"ports":ports});
                 let interval = f
                     .take("hop_interval")
+                    .filter(|value| value != "")
                     .map(|v| seconds(v, &format!("{path}.hop_interval")))
                     .transpose()?
                     .filter(|v| *v != 0);
                 let max = f
                     .take("hop_interval_max")
+                    .filter(|value| value != "")
                     .map(|v| seconds(v, &format!("{path}.hop_interval_max")))
                     .transpose()?
                     .filter(|v| *v != 0);
@@ -180,6 +183,14 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                     hopping["interval_secs"] = interval.into();
                 }
                 p["hopping"] = hopping;
+            } else {
+                for key in ["hop_interval", "hop_interval_max"] {
+                    if let Some(value) = f.take(key).filter(|value| value != "")
+                        && seconds(value, &format!("{path}.{key}"))? != 0
+                    {
+                        return Err(error(format!("{path}.{key}"), "requires server_ports"));
+                    }
+                }
             }
             f.default_only("disable_chrome_parrot", &[json!(true)])?;
             f.default_only("brutal_debug", &[json!(false)])?;
@@ -205,30 +216,42 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                 p["udp_relay_mode"] = mode.into();
             }
             p["udp_over_stream"] = udp_over_stream.into();
-            if let Some(v) = f.take("heartbeat") {
-                let interval = parse_duration_millis(v, &format!("{path}.heartbeat"), true)?;
+            if let Some(v) = f.take("heartbeat").filter(|value| value != "") {
+                let interval = parse_duration_millis(v, &format!("{path}.heartbeat"))?;
                 if interval != 0 {
                     p["heartbeat_interval_ms"] = interval.into();
                 }
             }
             f.copy("zero_rtt_handshake", &mut p, "zero_rtt_handshake");
-            f.copy("congestion_control", &mut p, "congestion_control");
+            if let Some(value) = f
+                .string("congestion_control")?
+                .filter(|value| !value.is_empty())
+            {
+                p["congestion_control"] = value.into();
+            }
             p
         }
         "naive" => {
             let quic = f.boolean("quic", false)?;
             let mut settings = json!({"quic":quic});
-            f.copy(
-                "congestion_control",
-                &mut settings,
-                "quic_congestion_control",
-            );
-            for key in [
-                "extra_headers",
-                "insecure_concurrency",
-                "quic_congestion_control",
-            ] {
-                f.copy(key, &mut settings, key);
+            for key in ["congestion_control", "quic_congestion_control"] {
+                if let Some(value) = f.string(key)?.filter(|value| !value.is_empty()) {
+                    if settings.get("quic_congestion_control").is_some() {
+                        return Err(error(
+                            format!("{path}.{key}"),
+                            "congestion control specified twice",
+                        ));
+                    }
+                    settings["quic_congestion_control"] = value.into();
+                }
+            }
+            f.copy("extra_headers", &mut settings, "extra_headers");
+            if let Some(concurrency) = f.take("insecure_concurrency") {
+                settings["insecure_concurrency"] = if concurrency == 0 {
+                    1.into()
+                } else {
+                    concurrency
+                };
             }
             super::naive::windows(&mut f, &mut settings, quic)?;
             json!({"type":"naiveproxy", "settings":settings, "username":f.string("username")?.unwrap_or_default(), "password":f.string("password")?.unwrap_or_default(), "udp_enabled":udp})
@@ -262,7 +285,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                     }
                 }
                 p["udp_enabled"] = udp.into();
-                f.default_only("version", &[json!("5")])?;
+                f.default_only("version", &[json!(""), json!("5")])?;
             } else {
                 let mut settings = json!({});
                 for key in ["path", "headers"] {
@@ -281,6 +304,19 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     };
     if let Some(v) = f.take("multiplex") {
         let mut mux = Fields::new(v, &format!("{path}.multiplex"))?;
+        let mut out = json!({});
+        for key in [
+            "protocol",
+            "max_connections",
+            "min_streams",
+            "max_streams",
+            "padding",
+        ] {
+            mux.copy(key, &mut out, key);
+        }
+        if out["protocol"] == "" {
+            out.as_object_mut().unwrap().remove("protocol");
+        }
         if mux.boolean("enabled", false)? {
             if vision {
                 return Err(error(&mux.path, "VLESS Vision does not support multiplex"));
@@ -291,21 +327,13 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                     "multiplex requires Shadowsocks, VMess, VLESS or Trojan",
                 ));
             }
-            let mut out = json!({});
-            mux.copy("protocol", &mut out, "protocol");
-            for key in ["max_connections", "min_streams", "max_streams", "padding"] {
-                mux.copy(key, &mut out, key);
-            }
             if kind == "shadowsocks" {
                 protocol = json!({"type":"multiplex","settings":out,"protocol":protocol});
             } else {
                 protocol["h2mux"] = out;
             }
-            mux.finish()?;
-        } else {
-            mux.default_only("protocol", &[json!("smux"), json!("yamux"), json!("h2mux")])?;
-            mux.finish()?;
         }
+        mux.finish()?;
     }
     let tls = f.take("tls");
     let has_tls = tls
@@ -347,7 +375,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
         quic_transport |= quic;
     }
     if let Some(tls) = tls {
-        let (wrapped, quic) = tls_config(
+        let (wrapped, quic) = super::tls::configure(
             tls,
             protocol,
             quic_transport,
@@ -362,6 +390,9 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     }
     if quic_transport {
         client["transport"] = "quic".into();
+    }
+    if matches!(kind.as_str(), "hysteria2" | "tuic") {
+        super::quic::configure(&mut f, &mut client)?;
     }
     dial_options(&mut f, &mut client, quic_transport)?;
     if let Some(uot) = f.take("udp_over_tcp") {
@@ -421,9 +452,11 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
     if !options.as_object().unwrap().is_empty() {
         client["dial_options"] = options;
     }
-    if let Some(value) = f.take("connect_timeout") {
-        client["connect_timeout_ms"] =
-            duration_millis(value, &format!("{}.connect_timeout", f.path))?.into();
+    if let Some(value) = f.take("connect_timeout").filter(|value| value != "") {
+        let millis = parse_duration_millis(value, &format!("{}.connect_timeout", f.path))?;
+        if millis != 0 {
+            client["connect_timeout_ms"] = millis.into();
+        }
     }
     let disable_keep_alive = f.boolean("disable_tcp_keep_alive", false)?;
     if quic && disable_keep_alive {
@@ -440,7 +473,7 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
         ("tcp_keep_alive", "keep_alive_time_secs"),
         ("tcp_keep_alive_interval", "keep_alive_interval_secs"),
     ] {
-        if let Some(value) = f.take(field) {
+        if let Some(value) = f.take(field).filter(|value| value != "") {
             let path = format!("{}.{}", f.path, field);
             if quic {
                 return Err(error(
@@ -448,7 +481,10 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
                     "TCP keepalive does not apply to QUIC transport",
                 ));
             }
-            let millis = duration_millis(value, &path)?;
+            let millis = parse_duration_millis(value, &path)?;
+            if millis == 0 {
+                continue;
+            }
             let seconds = millis.div_ceil(1000);
             if seconds > 32767 {
                 return Err(error(
@@ -467,23 +503,15 @@ fn dial_options(f: &mut Fields, client: &mut Value, quic: bool) -> Result<()> {
 
 /// Android duration strings use Go's unit notation. Preserve fractions and
 /// compound values exactly; socket deadlines have millisecond precision.
-fn duration_millis(value: Value, path: &str) -> Result<u32> {
-    parse_duration_millis(value, path, false)
-}
-
-fn parse_duration_millis(value: Value, path: &str, allow_zero: bool) -> Result<u32> {
+pub(super) fn parse_duration_millis(value: Value, path: &str) -> Result<u32> {
     let invalid = || {
         error(
             path,
-            if allow_zero {
-                "expected a non-negative duration in whole milliseconds (for example 0s, 250ms, 1.5s)"
-            } else {
-                "expected a positive duration in whole milliseconds (for example 250ms, 1.5s, 1m30s)"
-            },
+            "expected a non-negative duration in whole milliseconds (for example 0s, 250ms, 1.5s)",
         )
     };
     let text = value.as_str().ok_or_else(invalid)?;
-    if allow_zero && matches!(text, "0" | "+0") {
+    if matches!(text, "0" | "+0") {
         return Ok(0);
     }
     let mut remaining = text.strip_prefix('+').unwrap_or(text);
@@ -539,9 +567,7 @@ fn parse_duration_millis(value: Value, path: &str, allow_zero: bool) -> Result<u
             .ok_or_else(invalid)?;
         remaining = &rest[unit.len()..];
     }
-    if (nanos == 0 && (!allow_zero || text.is_empty() || text == "+"))
-        || !nanos.is_multiple_of(1_000_000)
-    {
+    if (nanos == 0 && (text.is_empty() || text == "+")) || !nanos.is_multiple_of(1_000_000) {
         return Err(invalid());
     }
     u32::try_from(nanos / 1_000_000)
@@ -634,13 +660,15 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
             out["headers"] = headers.into();
         }
         if let Some(host) = f.take("host") {
-            let host = match host {
-                Value::Array(v) if v.len() == 1 => v[0].clone(),
-                Value::String(_) => host,
-                _ => return Err(error(format!("{}.host", f.path), "requires one host")),
-            };
-            if host != "" {
-                out["host"] = host;
+            let hosts = strings(host, &format!("{}.host", f.path))?;
+            if kind != "http" && hosts.len() > 1 {
+                return Err(error(
+                    format!("{}.host", f.path),
+                    "multiple hosts require HTTP transport",
+                ));
+            }
+            if !hosts.is_empty() {
+                out["host"] = hosts.into();
             }
         }
         if out["kind"] == "http2" || out["kind"] == "grpc" {
@@ -648,9 +676,9 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
                 ("idle_timeout", "idle_timeout_ms"),
                 ("ping_timeout", "ping_timeout_ms"),
             ] {
-                if let Some(value) = f.take(key) {
+                if let Some(value) = f.take(key).filter(|value| value != "") {
                     out[target] =
-                        parse_duration_millis(value, &format!("{}.{key}", f.path), true)?.into();
+                        parse_duration_millis(value, &format!("{}.{key}", f.path))?.into();
                 }
             }
         }
@@ -662,265 +690,6 @@ fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Va
     }
     f.finish()?;
     Ok((out, false))
-}
-fn tls_config(
-    value: Value,
-    protocol: Value,
-    quic: bool,
-    kind: &str,
-    vision: bool,
-    path: &str,
-) -> Result<(Value, Option<Value>)> {
-    let mut f = Fields::new(value, &format!("{path}.tls"))?;
-    if !f.boolean("enabled", false)? {
-        f.finish()?;
-        return Ok((protocol, None));
-    }
-    let mut out =
-        json!({"type":"tls", "protocol":protocol, "verify":!f.boolean("insecure", false)?});
-    if let Some(server_name) = f.string("server_name")?.filter(|name| !name.is_empty()) {
-        out["sni_hostname"] = server_name.into();
-    }
-    let mut options = json!({});
-    if let Some(value) = f.take("handshake_timeout") {
-        options["handshake_timeout_ms"] =
-            parse_duration_millis(value, &format!("{}.handshake_timeout", f.path), true)?.into();
-    }
-    for key in [
-        "disable_sni",
-        "min_version",
-        "max_version",
-        "cipher_suites",
-        "certificate_public_key_sha256",
-    ] {
-        if let Some(v) = f.take(key) {
-            options[key] = if matches!(key, "cipher_suites" | "certificate_public_key_sha256")
-                && v.is_string()
-            {
-                json!([v])
-            } else {
-                v
-            };
-        }
-    }
-    if let Some(v) = f.take("certificate") {
-        options["root_certificates"] = if v.is_string() { json!([v]) } else { v };
-    }
-    if let Some(v) = f.take("certificate_path") {
-        if options.get("root_certificates").is_some() {
-            return Err(error(
-                &f.path,
-                "certificate and certificate_path cannot both be set",
-            ));
-        }
-        options["root_certificates"] = json!([v]);
-    }
-    if !options.as_object().unwrap().is_empty() {
-        out["options"] = options;
-    }
-    f.copy("alpn", &mut out, "alpn_protocols");
-    if out.get("alpn_protocols").is_none() || out["alpn_protocols"] == json!([]) {
-        if kind == "naive" || matches!(out["protocol"]["kind"].as_str(), Some("grpc" | "http2")) {
-            out["alpn_protocols"] = json!([if quic { "h3" } else { "h2" }]);
-        } else if out["protocol"]["type"] == "websocket"
-            || kind == "http"
-            || matches!(
-                out["protocol"]["kind"].as_str(),
-                Some("http_upgrade" | "http1")
-            )
-        {
-            out["alpn_protocols"] = json!(["http/1.1"]);
-        }
-    }
-    if let Some(groups) = f.take("curve_preferences") {
-        out["key_exchange_groups"] = if groups.is_string() {
-            json!([groups])
-        } else {
-            groups
-        };
-    }
-    for (inline, file, target) in [
-        ("client_certificate", "client_certificate_path", "cert"),
-        ("client_key", "client_key_path", "key"),
-    ] {
-        f.copy(inline, &mut out, target);
-        if let Some(v) = f.take(file) {
-            if out.get(target).is_some() {
-                return Err(error(
-                    &f.path,
-                    "inline client credential and path cannot both be set",
-                ));
-            }
-            out[target] = v;
-        }
-    }
-    if let Some(reality) = f.take("reality") {
-        let mut r = Fields::new(reality, &format!("{}.reality", f.path))?;
-        if r.boolean("enabled", false)? {
-            if quic {
-                return Err(error(&r.path, "REALITY requires TCP"));
-            }
-            if let Some(options) = out.as_object_mut().unwrap().remove("options") {
-                let mut options = Fields::new(options, &f.path)?;
-                options.default_only("disable_sni", &[json!(false)])?;
-                options.default_only("min_version", &[json!("1.2"), json!("1.3")])?;
-                options.default_only("max_version", &[json!("1.3")])?;
-                options.copy("cipher_suites", &mut out, "cipher_suites");
-                options.copy("handshake_timeout_ms", &mut out, "handshake_timeout_ms");
-                options.finish()?;
-            }
-            if out.get("cert").is_some() || out.get("key").is_some() {
-                return Err(error(
-                    &f.path,
-                    "ordinary TLS certificate options do not apply to REALITY",
-                ));
-            }
-            if out["verify"] == false {
-                return Err(error(&f.path, "REALITY authentication cannot be disabled"));
-            }
-            out.as_object_mut().unwrap().remove("verify");
-            out["type"] = "reality".into();
-            out["public_key"] = r.required("public_key")?;
-            r.copy("short_id", &mut out, "short_id");
-        }
-        r.finish()?;
-    }
-    if vision {
-        out["vision"] = true.into();
-    }
-    let mut fragmentation = json!({});
-    for key in ["fragment", "record_fragment"] {
-        let enabled = f.boolean(key, false)?;
-        if enabled && quic {
-            return Err(error(
-                format!("{}.{}", f.path, key),
-                "TLS fragmentation requires TCP",
-            ));
-        }
-        fragmentation[key] = enabled.into();
-    }
-    if let Some(delay) = f.string("fragment_fallback_delay")? {
-        if quic {
-            return Err(error(
-                format!("{}.fragment_fallback_delay", f.path),
-                "TLS fragmentation requires TCP",
-            ));
-        }
-        fragmentation["fragment_fallback_delay"] = delay.into();
-    }
-    if fragmentation["fragment"] == true
-        || fragmentation["record_fragment"] == true
-        || fragmentation.get("fragment_fallback_delay").is_some()
-    {
-        if out["type"] == "reality" {
-            out["fragmentation"] = fragmentation;
-        } else {
-            if out.get("options").is_none() {
-                out["options"] = json!({});
-            }
-            out["options"]["fragmentation"] = fragmentation;
-        }
-    }
-    for key in ["kernel_tx", "kernel_rx"] {
-        let enabled = f.boolean(key, false)?;
-        if enabled {
-            if quic || out["type"] == "reality" || out["vision"] == true {
-                return Err(error(
-                    format!("{}.{}", f.path, key),
-                    "kTLS requires ordinary TLS over TCP without Vision",
-                ));
-            }
-            if out.get("options").is_none() {
-                out["options"] = json!({});
-            }
-            out["options"][key] = true.into();
-        }
-    }
-    if let Some(utls) = f.take("utls") {
-        let mut u = Fields::new(utls, &format!("{}.utls", f.path))?;
-        let fingerprint = u
-            .string("fingerprint")?
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "chrome".into());
-        if u.boolean("enabled", false)? {
-            if !matches!(fingerprint.as_str(), "chrome" | "firefox") {
-                return Err(error(
-                    &u.path,
-                    "supported TLS fingerprints: chrome, firefox",
-                ));
-            }
-            if out["type"] == "reality" {
-                out["client_fingerprint"] = fingerprint.into();
-            } else {
-                if out.get("options").is_none() {
-                    out["options"] = json!({});
-                }
-                out["options"]["client_fingerprint"] = fingerprint.into();
-            }
-            // sing-box keeps the browser's default ALPN on raw TCP, while
-            // HTTP transports supply their own ALPN before TLS is constructed.
-            if !quic && (out.get("alpn_protocols").is_none() || out["alpn_protocols"] == json!([]))
-            {
-                out["alpn_protocols"] = json!(["h2", "http/1.1"]);
-            }
-        }
-        u.finish()?;
-    }
-    if let Some(ech) = f.take("ech") {
-        let mut e = Fields::new(ech, &format!("{}.ech", f.path))?;
-        let enabled = e.boolean("enabled", false)?;
-        let config = e
-            .take("config")
-            .map(|config| match config {
-                Value::String(text) => Ok(text),
-                Value::Array(lines) => lines
-                    .iter()
-                    .map(|line| {
-                        line.as_str().ok_or_else(|| {
-                            error(
-                                format!("{}.config", e.path),
-                                "expected PEM text or a list of text lines",
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()
-                    .map(|lines| lines.join("\n")),
-                _ => Err(error(
-                    format!("{}.config", e.path),
-                    "expected PEM text or a list of text lines",
-                )),
-            })
-            .transpose()?;
-        let config_path = e.string("config_path")?;
-        let query_server_name = e.string("query_server_name")?;
-        if enabled {
-            if out["type"] == "reality" {
-                return Err(error(&e.path, "ECH cannot be combined with REALITY"));
-            }
-            let mut options = json!({});
-            if let Some(config) = config.filter(|text| !text.is_empty()) {
-                options["config"] = config.into();
-            } else if let Some(config_path) = config_path.filter(|path| !path.is_empty()) {
-                options["config_path"] = config_path.into();
-            }
-            if let Some(query_server_name) = query_server_name.filter(|name| !name.is_empty()) {
-                options["query_server_name"] = query_server_name.into();
-            }
-            if out.get("options").is_none() {
-                out["options"] = json!({});
-            }
-            out["options"]["ech"] = options;
-        }
-        e.finish()?;
-    }
-    f.finish()?;
-    if quic {
-        let protocol = out.as_object_mut().unwrap().remove("protocol").unwrap();
-        out.as_object_mut().unwrap().remove("type");
-        Ok((protocol, Some(out)))
-    } else {
-        Ok((out, None))
-    }
 }
 
 pub(super) fn byte_size(value: Value, path: &str) -> Result<u32> {

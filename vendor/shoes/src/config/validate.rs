@@ -1860,6 +1860,15 @@ fn validate_client_parameters(
     }
 
     if let Some(ref mut quic_config) = client_config.quic_settings {
+        if let Some(transport) = &quic_config.transport {
+            let overhead = match &client_config.protocol {
+                ClientProxyConfig::Hysteria2(settings) if settings.obfs.is_some() => {
+                    crate::quic_client::salamander::OVERHEAD
+                }
+                _ => 0,
+            };
+            transport.validate(overhead)?;
+        }
         if client_config.transport != Transport::Quic {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

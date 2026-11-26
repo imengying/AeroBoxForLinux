@@ -5,7 +5,9 @@ mod support;
 #[path = "support/udp_policy.rs"]
 mod udp_policy;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -431,6 +433,18 @@ fn android_protocols_exchange_payload_with_an_independent_server() {
             if quic {
                 inbound["tls"]["alpn"] = json!(["h3"]);
                 node["tls"]["alpn"] = json!(["h3"]);
+                node["initial_packet_size"] = 1280.into();
+                node["disable_path_mtu_discovery"] = true.into();
+                node["idle_timeout"] = "45s".into();
+                node["keep_alive_period"] = "10s".into();
+                node["stream_receive_window"] = "64 KiB".into();
+                node["connection_receive_window"] = "256 KiB".into();
+                node["max_concurrent_streams"] = 8.into();
+                if kind == "hysteria2" {
+                    node["tls"].as_object_mut().unwrap().remove("certificate");
+                    node["tls"]["certificate_sha256"] =
+                        STANDARD.encode(Sha256::digest(certified.cert.der())).into();
+                }
             }
         }
         let config = json!({
@@ -515,11 +529,11 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
         ),
         (
             "http2",
-            json!({"type":"http","host":["localhost"],"path":"/aerobox"}),
+            json!({"type":"http","host":["localhost","edge.invalid"],"path":"/aerobox"}),
         ),
         (
             "http1",
-            json!({"type":"http","host":["localhost"],"path":"/aerobox"}),
+            json!({"type":"http","host":["localhost","edge.invalid"],"path":"/aerobox"}),
         ),
     ];
     let mut cases = Vec::new();

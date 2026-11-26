@@ -78,6 +78,24 @@ fn single_transport_text<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
         .with_context(|| format!("{field} 须为文本或仅含一个文本的列表"))
 }
 
+fn http_hosts(transport: &mut Value, value: &Value) -> Result<()> {
+    let hosts = crate::protocol::strings(value.clone(), "Clash HTTP host")?;
+    if !hosts.is_empty() {
+        if let Some(existing) = transport.get("host") {
+            ensure!(
+                crate::protocol::strings(existing.clone(), "Clash HTTP host")? == hosts,
+                "Clash HTTP host 与 headers.Host 不能设置不同的服务器名"
+            );
+        }
+        transport["host"] = if hosts.len() == 1 {
+            hosts[0].clone().into()
+        } else {
+            hosts.into()
+        };
+    }
+    Ok(())
+}
+
 fn decode(text: &str) -> Result<String> {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     for e in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
@@ -882,20 +900,25 @@ fn clash(v: &Value) -> Result<Value> {
     ];
     fields.extend(DIAL_FIELDS);
     fields.extend(DIAL_ALIASES.iter().map(|(alias, _)| *alias));
-    if matches!(typ, "shadowsocks" | "vmess") {
+    if matches!(typ, "shadowsocks" | "vmess" | "vless") {
         fields.push("cipher");
     }
     if typ == "shadowsocks" {
         fields.extend(["plugin", "plugin-opts", "plugin_opts"]);
     }
-    if typ == "vmess" {
+    // Subscription generators also attach VMess fields to VLESS entries.
+    // VLESS ignores them; its encryption and flow have their own fields.
+    if matches!(typ, "vmess" | "vless") {
         fields.push("alterId");
     }
     if typ == "vless" {
         fields.push("encryption");
     }
-    if matches!(typ, "shadowsocks" | "anytls") {
+    if matches!(typ, "shadowsocks" | "anytls" | "socks" | "naive") {
         fields.extend(["udp-over-tcp", "udp_over_tcp", "udp-over-tcp-version"]);
+    }
+    if matches!(typ, "shadowsocks" | "vmess" | "vless" | "trojan") {
+        fields.push("smux");
     }
     if typ == "anytls" {
         fields.extend([
@@ -963,6 +986,7 @@ fn clash(v: &Value) -> Result<Value> {
         );
     }
     if tls_enabled {
+        fields.extend(tls::CLASH_FIELDS);
         fields.push("reality-opts");
         fields.push("handshake-timeout");
         fields.push("ech-opts");
@@ -1092,7 +1116,7 @@ fn clash(v: &Value) -> Result<Value> {
     if typ == "shadowsocks" {
         n["method"] = v["cipher"].clone();
     }
-    if matches!(typ, "shadowsocks" | "anytls") {
+    if matches!(typ, "shadowsocks" | "anytls" | "socks" | "naive") {
         ensure!(
             v.get("udp-over-tcp").is_none() || v.get("udp_over_tcp").is_none(),
             "Clash 节点重复设置 udp-over-tcp"
@@ -1117,6 +1141,34 @@ fn clash(v: &Value) -> Result<Value> {
             n["udp_over_tcp"] = options;
         }
     };
+    if let Some(mux) = v.get("smux") {
+        known_fields(
+            mux,
+            &[
+                "enabled",
+                "protocol",
+                "max-connections",
+                "min-streams",
+                "max-streams",
+                "padding",
+            ],
+            "Clash smux",
+        )?;
+        let mut options = json!({});
+        for (from, to) in [
+            ("enabled", "enabled"),
+            ("protocol", "protocol"),
+            ("max-connections", "max_connections"),
+            ("min-streams", "min_streams"),
+            ("max-streams", "max_streams"),
+            ("padding", "padding"),
+        ] {
+            if let Some(value) = mux.get(from) {
+                options[to] = value.clone();
+            }
+        }
+        n["multiplex"] = options;
+    }
     if v["udp"] == false {
         n["network"] = json!("tcp");
     }
@@ -1166,6 +1218,7 @@ fn clash(v: &Value) -> Result<Value> {
             }
         }
         tls::copy_optional(v, &mut tls, false, "Clash 节点")?;
+        tls::clash(v, &mut tls)?;
         if let Some(ech) = v.get("ech-opts") {
             known_fields(
                 ech,
@@ -1295,14 +1348,7 @@ fn clash(v: &Value) -> Result<Value> {
                 // The transport exposes Host separately from other headers.
                 for (name, value) in headers {
                     if name.eq_ignore_ascii_case("host") {
-                        let host = single_transport_text(value, "Clash HTTP headers.Host")?;
-                        ensure!(
-                            transport.get("host").is_none_or(|v| v == host),
-                            "Clash HTTP headers 重复设置不同的 Host"
-                        );
-                        if !host.is_empty() {
-                            transport["host"] = host.into();
-                        }
+                        http_hosts(&mut transport, value)?;
                         extra.remove(name);
                     }
                 }
@@ -1311,14 +1357,7 @@ fn clash(v: &Value) -> Result<Value> {
                 }
             }
             if let Some(host) = options.get("host") {
-                let host = single_transport_text(host, "Clash HTTP host")?;
-                if !host.is_empty() {
-                    ensure!(
-                        transport.get("host").is_none_or(|v| v == host),
-                        "Clash HTTP host 与 headers.Host 不能设置不同的服务器名"
-                    );
-                    transport["host"] = host.into();
-                }
+                http_hosts(&mut transport, host)?;
             }
             transport_keepalive(options, &mut transport, "Clash HTTP 传输")?;
             n["transport"] = transport
@@ -1375,7 +1414,7 @@ proxies:
     tls: true
     network: h2
     h2-opts:
-      host: [front.example.com]
+      host: [front.example.com, alternate.example.com]
       path: /secret
   - name: http
     type: vmess
@@ -1395,7 +1434,7 @@ proxies:
         .unwrap();
         assert_eq!(
             nodes[0]["transport"],
-            json!({"type":"http","host":"front.example.com","path":"/secret"})
+            json!({"type":"http","host":["front.example.com","alternate.example.com"],"path":"/secret"})
         );
         assert_eq!(
             nodes[1]["transport"],
@@ -1493,15 +1532,17 @@ mod protocol_tests {
     }
 
     #[test]
-    fn reality_does_not_invent_a_browser_fingerprint() {
+    fn reality_uses_default_firefox_without_changing_authentication() {
         let node = uri("vless://00000000-0000-4000-8000-000000000001@example.com:443?security=reality&pbk=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk&sid=ab#R").unwrap();
         assert_eq!(
             node["tls"]["reality"]["public_key"],
             "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk"
         );
         crate::protocol::validate(&node).unwrap();
-        // Import must not add a browser fingerprint that was not requested.
-        assert!(node["tls"].get("utls").is_none());
+        let converted = crate::protocol::convert_outbound(node, "fixture").unwrap();
+        let reality = &converted["client_chains"][0]["chain"][0]["protocol"];
+        assert_eq!(reality["client_fingerprint"], "firefox");
+        assert_eq!(reality["short_id"], "ab");
     }
 
     #[test]
@@ -1577,7 +1618,7 @@ mod native_validation_tests {
     use super::*;
     #[test]
     fn rejects_raw_json_unsupported_options_too() {
-        let source = json!({"outbounds":[{"type":"vless","tag":"unsupported-fingerprint","server":"example.com","server_port":443,"uuid":"00000000-0000-4000-8000-000000000001","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"unknown-browser"}}},{"type":"socks","tag":"local","server":"127.0.0.1","server_port":1080}]});
+        let source = json!({"outbounds":[{"type":"vless","tag":"invalid-fingerprint","server":"example.com","server_port":443,"uuid":"00000000-0000-4000-8000-000000000001","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":true}}},{"type":"socks","tag":"local","server":"127.0.0.1","server_port":1080}]});
         assert!(parse(&source.to_string()).is_err());
         let (nodes, skipped) = parse_with_skips(&source.to_string()).unwrap();
         assert_eq!(nodes.len(), 1);

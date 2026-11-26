@@ -52,6 +52,7 @@ pub(super) fn windows(fields: &mut Fields, settings: &mut Value, quic: bool) -> 
 fn size(fields: &mut Fields, key: &str) -> Result<Option<u32>> {
     fields
         .take(key)
+        .filter(|value| value != "")
         .map(|value| byte_size(value, &format!("{}.{}", fields.path, key)))
         .transpose()
         .map(|value| value.filter(|size| *size != 0))

@@ -117,27 +117,48 @@ pub(super) fn pin_verifier(
     inner: Arc<dyn ServerCertVerifier>,
     options: &TlsClientOptions,
 ) -> io::Result<Arc<dyn ServerCertVerifier>> {
-    if options.certificate_public_key_sha256.is_empty() {
+    if options.certificate_sha256.is_empty()
+        && options.certificate_chain_sha256.is_empty()
+        && options.certificate_public_key_sha256.is_empty()
+    {
         return Ok(inner);
     }
-    let pins = options
-        .certificate_public_key_sha256
+    let certificate_pins = decode_pins(&options.certificate_sha256, "certificate_sha256")?;
+    let chain_pins = decode_pins(
+        &options.certificate_chain_sha256,
+        "certificate_chain_sha256",
+    )?;
+    let public_key_pins = decode_pins(
+        &options.certificate_public_key_sha256,
+        "certificate_public_key_sha256",
+    )?;
+    Ok(Arc::new(PinnedVerifier {
+        inner,
+        certificate_pins,
+        chain_pins,
+        public_key_pins,
+    }))
+}
+
+fn decode_pins(values: &[String], field: &str) -> io::Result<Vec<[u8; 32]>> {
+    values
         .iter()
         .map(|pin| {
             let decoded = STANDARD
                 .decode(pin)
-                .map_err(|_| invalid("certificate_public_key_sha256 must use base64"))?;
+                .map_err(|_| invalid(format!("{field} must use base64")))?;
             <[u8; 32]>::try_from(decoded)
-                .map_err(|_| invalid("certificate_public_key_sha256 must contain 32 bytes"))
+                .map_err(|_| invalid(format!("{field} must contain 32 bytes")))
         })
-        .collect::<io::Result<Vec<_>>>()?;
-    Ok(Arc::new(PinnedVerifier { inner, pins }))
+        .collect()
 }
 
 #[derive(Debug)]
 struct PinnedVerifier {
     inner: Arc<dyn ServerCertVerifier>,
-    pins: Vec<[u8; 32]>,
+    certificate_pins: Vec<[u8; 32]>,
+    chain_pins: Vec<[u8; 32]>,
+    public_key_pins: Vec<[u8; 32]>,
 }
 
 impl ServerCertVerifier for PinnedVerifier {
@@ -151,6 +172,40 @@ impl ServerCertVerifier for PinnedVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         self.inner
             .verify_server_cert(end_entity, intermediates, name, ocsp, now)?;
+        let hash = aerobox_primitives::digest::digest(
+            &aerobox_primitives::digest::SHA256,
+            end_entity.as_ref(),
+        );
+        if matches_pin(&self.certificate_pins, hash.as_ref())
+            || matches_pin(&self.chain_pins, hash.as_ref())
+        {
+            return Ok(ServerCertVerified::assertion());
+        }
+        if !self.chain_pins.is_empty() {
+            for (index, ca) in intermediates.iter().enumerate() {
+                let hash = aerobox_primitives::digest::digest(
+                    &aerobox_primitives::digest::SHA256,
+                    ca.as_ref(),
+                );
+                if matches_pin(&self.chain_pins, hash.as_ref()) {
+                    let mut roots = rustls::RootCertStore::empty();
+                    roots.add(ca.clone())?;
+                    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                        Arc::new(roots),
+                        aerobox_crypto::shared_provider(),
+                    )
+                    .build()
+                    .map_err(|error| rustls::Error::General(error.to_string()))?;
+                    return verifier.verify_server_cert(
+                        end_entity,
+                        &intermediates[..index],
+                        name,
+                        ocsp,
+                        now,
+                    );
+                }
+            }
+        }
         let (remaining, cert) =
             x509_parser::parse_x509_certificate(end_entity.as_ref()).map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
@@ -164,17 +219,11 @@ impl ServerCertVerifier for PinnedVerifier {
             &aerobox_primitives::digest::SHA256,
             cert.public_key().raw,
         );
-        let matches = self
-            .pins
-            .iter()
-            .fold(subtle::Choice::from(0), |found, pin| {
-                found | pin.as_slice().ct_eq(hash.as_ref())
-            });
-        if bool::from(matches) {
+        if matches_pin(&self.public_key_pins, hash.as_ref()) {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(
-                "TLS certificate public key pin mismatch".into(),
+                "TLS certificate pin mismatch".into(),
             ))
         }
     }
@@ -198,6 +247,12 @@ impl ServerCertVerifier for PinnedVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+fn matches_pin(pins: &[[u8; 32]], hash: &[u8]) -> bool {
+    bool::from(pins.iter().fold(subtle::Choice::from(0), |found, pin| {
+        found | pin.as_slice().ct_eq(hash)
+    }))
 }
 
 #[cfg(test)]

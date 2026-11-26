@@ -5,7 +5,7 @@ fn handler(kind: Kind) -> Handler {
     Handler::new(
         Config {
             kind,
-            host: Some("edge.example".into()),
+            host: NoneOrSome::One("edge.example".into()),
             path: "/tunnel?q=1".into(),
             method: "PUT".into(),
             service_name: "GunService".into(),

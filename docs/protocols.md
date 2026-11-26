@@ -2,7 +2,7 @@
 
 支持 Shadowsocks（含 SS2022）、VMess、VLESS、Trojan、AnyTLS、Hysteria2、TUIC、Naive、SOCKS 和 HTTP。受支持的传输和安全参数按实际实现转换；未知字段和未实现参数会明确报告位置，避免导入后静默丢失设置。不提供 ShadowTLS、Snell。
 
-Clash 订阅为未使用 TLS 的节点附带 `client-fingerprint` 时，该字段不参与连接，也不会导致节点被跳过；启用 TLS 后会校验并应用指定指纹。
+Clash 订阅为未使用 TLS 的节点附带 `client-fingerprint` 时，该字段不参与连接，也不会导致节点被跳过。VLESS 中附带的 VMess 模板字段 `alterId`、`cipher` 不参与 VLESS 连接；`encryption`、`flow` 等实际协议参数会保留并校验。
 
 Shadowsocks 支持应用内实现的 `obfs-local`（HTTP / TLS 混淆）和 `v2ray-plugin`（WebSocket、TLS、Xray mux 帧、QUIC）。Clash 的 `plugin-opts` 和 SIP003 分享链接参数会转换到同一实现；插件证书文件在启动时读取。原生 SS UDP 直接使用服务器的 UDP 端口，TCP 插件不会改变 UDP 的线协议。WebSocket mux 当前每个连接使用一个逻辑流，不跨连接共享会话；QUIC 则复用会话中的双向流。
 
@@ -12,7 +12,9 @@ Shadowsocks 支持应用内实现的 `obfs-local`（HTTP / TLS 混淆）和 `v2r
 
 未启用 ECH 时带 GREASE ECH；启用后使用真实加密 ClientHello。REALITY Chrome 握手移除混合交换，只使用参与认证的 X25519 共享；其特殊证书验签规则仅限 REALITY。
 
-启用 `tls.utls` 而未填写指纹时使用 Chrome。普通 TCP 浏览器握手默认 ALPN 为 `h2`、`http/1.1`；WebSocket / HTTP Upgrade / HTTPS 代理默认 `http/1.1`，gRPC / HTTP2 / Naive 默认 `h2`（Naive QUIC 使用 `h3`）。节点显式指定的 ALPN 会保留，传输开始前校验协商结果，避免 HTTP 版本错配。REALITY 支持显式 ALPN 和已实现的 TLS 1.3 密码套件。
+TLS 默认使用 Firefox 指纹；明确指定 `chrome` 时使用 Chrome，其他名称（如 `safari`）按 Firefox 处理。JSON 可通过 `tls.utls.enabled: false` 关闭浏览器指纹。普通 TCP 浏览器握手默认 ALPN 为 `h2`、`http/1.1`；WebSocket / HTTP Upgrade / HTTPS 代理默认 `http/1.1`，gRPC / HTTP2 / Naive 默认 `h2`（Naive QUIC 使用 `h3`）。节点显式指定的 ALPN 会保留，传输开始前校验协商结果，避免 HTTP 版本错配。REALITY 支持显式 ALPN 和已实现的 TLS 1.3 密码套件。
+
+TLS 接收 `P256`、`P384`、`P521`、`X25519` 和 `X25519MLKEM768` 曲线名称，证书与客户端密钥可用 PEM 文本、按行数组或文件路径，非空内联值优先。`certificate_sha256` 校验完整叶证书，`certificate_public_key_sha256` 校验叶证书公钥，均使用 Base64 SHA-256；任一固定哈希匹配即可认证自签名证书，仍验证握手签名，不能与自定义信任证书同用。Clash `fingerprint` 为证书 SHA-256 十六进制值，命中 CA 时还会验证证书链和服务名；`certificate` / `private-key` 为客户端证书和私钥，与浏览器指纹无关。字段语义参考 [sing-box TLS](https://sing-box.sagernet.org/configuration/shared/tls/) 和 [Mihomo TLS](https://wiki.metacubex.one/config/proxies/tls/)。
 
 VMess / VLESS 的用户标识支持 UUID 和字符串。VLESS 支持 `encryption: none` 与 `mlkem768x25519plus` 原生加密（`native` / `xorpub` / `random`，`0rtt` / `1rtt`），Clash、JSON 与分享链接均保留参数。REALITY 未填写 `short-id` 时使用协议的空 ID。AnyTLS 支持 `idle-session-check-interval`、`idle-session-timeout`（整数秒）、`min-idle-session` 和 `client-metadata`，UDP 通过原生 UoT v2 传输；`udp: false` 或 `udp-over-tcp: false` 会禁用 UDP。
 
@@ -28,15 +30,21 @@ VMess / VLESS 支持普通 UDP、XUDP 与 `packetaddr` 编码；VLESS 默认 XUD
 
 Hysteria2 支持 Salamander 混淆、Brutal 带宽参数和端口跳跃。Clash 的 `ports`、`hop-interval`（整数秒或 `15-30` 范围）、`up` / `down`（支持 bps / Kbps / Mbps / Gbps / Tbps 单位）以及分享链接 `mport` 会保留；JSON 使用 `server_ports`、`hop_interval`、`hop_interval_max`、`up_mbps` / `down_mbps`。带宽保留小数，缺省为自动控制。
 
+Hysteria2 / TUIC 支持 [QUIC 字段](https://sing-box.sagernet.org/configuration/shared/quic/)：`initial_packet_size`、`disable_path_mtu_discovery`、`idle_timeout`、`keep_alive_period`、`stream_receive_window`、`connection_receive_window`、`max_concurrent_streams`。时长精确到毫秒，零或空时长使用默认值；单流窗口为 16 KiB–64 MiB，连接窗口为 16 KiB–128 MiB，并计入连接内存预算。初始包为 1200–1452 字节，Salamander 上限扣除 8 字节混淆头；并发参数按 sing-quic 的语义控制对端发起的双向流，上限 1024。`server_ports` 接收单个范围字符串或数组，空数组继续使用 `server_port`。
+
 TUIC 支持 `udp_relay_mode: native`、`udp_relay_mode: quic` 和独立的 `udp_over_stream`（SagerNet UoT v2），后者不能与显式 UDP relay mode 同用。`heartbeat`、Clash `heartbeat-interval` 支持毫秒精度；`disable-sni` 保留证书验证，只控制线上 SNI。TUIC 的 `zero_rtt_handshake` / Clash `reduce-rtt` 启用 TLS 1.3 会话恢复与 0-RTT；首次连接完成完整握手，后续连接使用服务端票据。早期 TCP 数据有界缓存，服务端验证完成且确认拒绝早期数据后才重发；网络错误不会触发盲目重放，UDP 在认证完成后发送。要求仅混合密钥交换的配置不能使用 0-RTT。
 
-节点支持 `connect_timeout`，例如 `250ms`、`1.5s`、`1m30s`，统一限制节点 DNS 解析和连接尝试的耗时。TCP 节点还支持 `disable_tcp_keep_alive`、`tcp_keep_alive` 和 `tcp_keep_alive_interval`；保活时间接受正数毫秒时长，按 Linux 套接字的秒精度向上取整，例如 `250ms` 为 1 秒、`1.5s` 为 2 秒，结果上限 32767 秒。这些 TCP 设置不适用于 QUIC。
+节点支持 `connect_timeout`，例如 `250ms`、`1.5s`、`1m30s`，统一限制节点 DNS 解析和连接尝试的耗时。TCP 节点还支持 `disable_tcp_keep_alive`、`tcp_keep_alive` 和 `tcp_keep_alive_interval`；保活时间按 Linux 套接字的秒精度向上取整，例如 `250ms` 为 1 秒、`1.5s` 为 2 秒，结果上限 32767 秒。零或空时长使用默认值。这些 TCP 设置不适用于 QUIC。
 
 Naive 支持 HTTP/2 与 HTTP/3。HTTP/2 的 `stream_receive_window` 按上游 Naive/Cronet 的语义设置**连接窗口**，单流窗口为其一半（向下取整）；默认分别为 128 MiB、64 MiB。HTTP/3 的 `stream_receive_window` 与 `quic_session_receive_window` 分别控制单流和连接窗口，默认 6 MiB、15 MiB，独立生效。零表示默认；HTTP/2 不接受非零 QUIC 连接窗口。受内存预算限制，单流窗口范围为 16 KiB–64 MiB，连接窗口为 16 KiB–128 MiB，HTTP/2 的连接窗口因此至少 32 KiB。支持这些参数不代表复现 Chromium 的全部网络行为。
 
 `tls.handshake_timeout` 控制 TLS、REALITY 和 QUIC 握手等待时间，支持毫秒精度，缺省为 15 秒；超时会关闭连接。Clash `handshake-timeout` 的数字按秒转换。
 
 gRPC / HTTP2 传输支持 `idle_timeout` 和 `ping_timeout`；gRPC 还支持 `permit_without_stream`。空闲达到设定时间后发送 PING，有接收活动时推迟检查，未在期限内收到确认则关闭失效连接。`idle_timeout` 缺省或为零时关闭检查，`ping_timeout` 缺省或为零时使用 15 秒。
+
+HTTP 传输的 `host` 支持多个候选，每次建立传输时随机选择。Clash 的 `smux` 设置可导入为 smux / yamux / h2mux；关闭时不应用其参数。SOCKS 和 Naive 的 Clash 节点支持导入 UoT 开关与版本。
+
+当前覆盖上述客户端功能，并非 sing-box 全部配置。HTTP 代理出站仍使用 HTTP/1.1 CONNECT，未实现新版 HTTP/2、HTTP/3 和自动版本回退；Hysteria2 Realm、BBR profile、TCP Brutal 多路复用、SOCKS4/4a 及 `network: "udp"` 单独限制 TCP 也尚未实现。Naive 的 HTTP/2、HTTP/3 与 HTTP 代理出站是不同实现。单节点 DNS 由应用设置统一管理。
 
 `tcp_fast_open`、`tcp_multi_path` 使用 Linux 的 TCP Fast Open 和 MPTCP 套接字；它们只适用于 TCP 传输。MPTCP 是否使用多条路径取决于操作系统和服务端配置。`udp_fragment` 控制 IPv4 / IPv6 UDP 套接字的分片策略，并同步作用于 QUIC 和 Hysteria2 端口跳跃创建的套接字。
 

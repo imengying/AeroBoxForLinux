@@ -173,6 +173,97 @@ fn custom_roots_and_leaf_spki_pins_both_apply() {
 }
 
 #[test]
+fn leaf_certificate_and_public_key_pins_are_alternatives_and_never_bypassed() {
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = identity.cert.pem();
+    let key = identity.signing_key.serialize_pem();
+    let (_, parsed) = x509_parser::parse_x509_certificate(identity.cert.der()).unwrap();
+    let hash = |bytes: &[u8]| {
+        STANDARD.encode(aerobox_primitives::digest::digest(
+            &aerobox_primitives::digest::SHA256,
+            bytes,
+        ))
+    };
+    let leaf = hash(identity.cert.der());
+    let spki = hash(parsed.public_key().raw);
+    let wrong = STANDARD.encode([0; 32]);
+    for (certificate, public_key, accepted) in [
+        (vec![leaf.clone()], vec![], true),
+        (vec![wrong.clone(), leaf.clone()], vec![], true),
+        (vec![leaf], vec![wrong.clone()], true),
+        (vec![wrong.clone()], vec![spki], true),
+        (vec![wrong.clone()], vec![wrong], false),
+    ] {
+        let options = TlsClientOptions {
+            certificate_sha256: certificate,
+            certificate_public_key_sha256: public_key,
+            ..Default::default()
+        };
+        // A pin authenticates the self-signed leaf even with a different name;
+        // a bad pin must fail even when ordinary CA validation is disabled.
+        assert_eq!(
+            handshake(
+                client(&options, false, false).unwrap(),
+                &cert,
+                &key,
+                "other.test"
+            )
+            .is_ok(),
+            accepted
+        );
+    }
+}
+
+#[test]
+fn clash_ca_pin_validates_the_chain_and_name() {
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf = rcgen::CertificateParams::new(vec!["localhost".into()])
+        .unwrap()
+        .signed_by(&key, &ca)
+        .unwrap();
+    let options = TlsClientOptions {
+        certificate_chain_sha256: vec![STANDARD.encode(aerobox_primitives::digest::digest(
+            &aerobox_primitives::digest::SHA256,
+            ca.der(),
+        ))],
+        ..Default::default()
+    };
+    let chain = format!("{}{}", leaf.pem(), ca.pem());
+    handshake(
+        client(&options, false, false).unwrap(),
+        &chain,
+        &key.serialize_pem(),
+        "localhost",
+    )
+    .unwrap();
+    assert!(
+        handshake(
+            client(&options, false, false).unwrap(),
+            &chain,
+            &key.serialize_pem(),
+            "wrong.test"
+        )
+        .is_err()
+    );
+    let rogue = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let untrusted = format!("{}{}", rogue.cert.pem(), ca.pem());
+    assert!(
+        handshake(
+            client(&options, false, false).unwrap(),
+            &untrusted,
+            &rogue.signing_key.serialize_pem(),
+            "localhost"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn disabling_sni_preserves_certificate_name_validation_and_tls_bounds() {
     let (cert, key, _) = fixture();
     for (version, suite, expected) in [
@@ -237,6 +328,8 @@ fn invalid_tls_policies_fail_before_any_connection() {
         r#"{"root_certificates":["not a PEM certificate"]}"#,
         r#"{"certificate_public_key_sha256":["invalid base64"]}"#,
         r#"{"certificate_public_key_sha256":["AQID"]}"#,
+        r#"{"certificate_sha256":["invalid base64"]}"#,
+        r#"{"certificate_sha256":["AQID"]}"#,
         r#"{"cipher_suites":["TLS_RSA_WITH_RC4_128_SHA"]}"#,
         r#"{"cipher_suites":["TLS_AES_128_GCM_SHA256","TLS13_AES_128_GCM_SHA256"]}"#,
         r#"{"min_version":"1.3","cipher_suites":["TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"]}"#,

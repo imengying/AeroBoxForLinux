@@ -143,6 +143,21 @@ fn hysteria2_clash_ranges_and_bandwidth_reach_the_runtime() {
     );
     let link = "hy2://test@offline.invalid:443?mport=443,1000-1002#fixture";
     assert_eq!(imported_protocol(link)["hopping"]["ports"], "443,1000-1002");
+    for ports in [json!("1000:1002"), json!(["1000:1002"])] {
+        let source = json!({"outbounds":[{"type":"hysteria2","tag":"range","server":"localhost",
+            "server_ports":ports,"hop_interval":"","password":"test","tls":{"enabled":true}}]});
+        assert_eq!(
+            imported_protocol(&source.to_string())["hopping"]["ports"],
+            "1000-1002"
+        );
+    }
+    let no_hopping = json!({"outbounds":[{"type":"hysteria2","tag":"single","server":"localhost",
+        "server_port":443,"server_ports":[],"hop_interval":"0s","password":"test","tls":{"enabled":true}}]});
+    assert!(
+        imported_protocol(&no_hopping.to_string())
+            .get("hopping")
+            .is_none()
+    );
     for (field, invalid) in [
         ("ports", json!("443-1")),
         ("ports", json!("0")),
@@ -170,6 +185,82 @@ fn hysteria2_clash_ranges_and_bandwidth_reach_the_runtime() {
         subscription::parse(&single.to_string()).is_err(),
         "interval without hopping ports must not be ignored"
     );
+}
+
+#[test]
+fn quic_transport_fields_validate_windows_durations_and_packet_overhead() {
+    let base = json!({"type":"hysteria2","tag":"quic","server":"offline.invalid",
+        "server_port":443,"password":"test","tls":{"enabled":true},
+        "initial_packet_size":1280,"disable_path_mtu_discovery":true,
+        "idle_timeout":"45s","keep_alive_period":"1.25s",
+        "stream_receive_window":"64 KiB","connection_receive_window":"256 KiB",
+        "max_concurrent_streams":8});
+    for kind in ["hysteria2", "tuic"] {
+        let mut node = base.clone();
+        node["type"] = kind.into();
+        if kind == "tuic" {
+            node["uuid"] = UUID.into();
+        }
+        protocol::validate(&node).unwrap();
+        for (field, value) in [
+            ("initial_packet_size", json!(1199)),
+            ("initial_packet_size", json!(1453)),
+            ("idle_timeout", json!("-1s")),
+            ("keep_alive_period", json!("0.1ms")),
+            ("stream_receive_window", json!("65 MiB")),
+            ("connection_receive_window", json!("129 MiB")),
+            ("max_concurrent_streams", json!(1025)),
+        ] {
+            let mut invalid = node.clone();
+            invalid[field] = value;
+            assert!(protocol::validate(&invalid).is_err(), "{kind} {field}");
+        }
+        for (field, value) in [
+            ("initial_packet_size", json!(0)),
+            ("idle_timeout", json!("")),
+            ("keep_alive_period", json!("0s")),
+            ("stream_receive_window", json!("")),
+            ("connection_receive_window", json!(0)),
+            ("max_concurrent_streams", json!(0)),
+        ] {
+            node[field] = value;
+        }
+        protocol::validate(&node).unwrap();
+    }
+    let mut obfs = base;
+    obfs["obfs"] = json!({"type":"salamander","password":"secret"});
+    obfs["initial_packet_size"] = 1444.into();
+    protocol::validate(&obfs).unwrap();
+    obfs["initial_packet_size"] = 1452.into();
+    assert!(protocol::validate(&obfs).is_err());
+}
+
+#[test]
+fn clash_client_credentials_certificate_pins_and_mux_survive_import() {
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let source = json!({"proxies":[{"name":"fixture","type":"trojan","server":"localhost","port":443,
+        "password":"test","certificate":identity.cert.pem(),"private-key":identity.signing_key.serialize_pem(),
+        "fingerprint":"00:".repeat(31)+"00",
+        "smux":{"enabled":true,"protocol":"smux","max-connections":2,"min-streams":1,"max-streams":4,"padding":true}}]});
+    let converted = imported_protocol(&source.to_string());
+    assert_eq!(converted["cert"], identity.cert.pem());
+    assert_eq!(converted["key"], identity.signing_key.serialize_pem());
+    assert_eq!(converted["verify"], false);
+    assert_eq!(
+        converted["options"]["certificate_chain_sha256"],
+        json!([STANDARD.encode([0; 32])])
+    );
+    assert_eq!(converted["protocol"]["h2mux"]["max_connections"], 2);
+    let mut disabled = source;
+    disabled["proxies"][0]["smux"]["enabled"] = false.into();
+    assert!(
+        imported_protocol(&disabled.to_string())["protocol"]
+            .get("h2mux")
+            .is_none()
+    );
+    let uot = json!({"proxies":[{"name":"fixture","type":"socks5","server":"localhost","port":1080,
+        "udp-over-tcp":true,"udp-over-tcp-version":2}]});
+    assert_eq!(imported_protocol(&uot.to_string())["type"], "udp_over_tcp");
 }
 
 #[test]

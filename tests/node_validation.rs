@@ -85,7 +85,7 @@ fn invalid_nodes() -> Vec<(Value, &'static str)> {
     invalid["heartbeat"] = "31s".into();
     cases.push((invalid, "heartbeat"));
     let mut invalid = node("naive");
-    invalid["insecure_concurrency"] = 0.into();
+    invalid["insecure_concurrency"] = 17.into();
     cases.push((invalid, "concurrency"));
     let mut invalid = node("http");
     invalid["headers"] = json!({"X-Bad":"line\nbreak"});
@@ -153,6 +153,27 @@ fn offline_validation_keeps_all_protocols_and_defers_certificate_files() {
     inline["tls"]["client_certificate"] = certified.cert.pem().into();
     inline["tls"]["client_key"] = certified.signing_key.serialize_pem().into();
     protocol::validate(&inline).unwrap();
+    let mut lines = inline.clone();
+    for field in ["certificate", "client_certificate", "client_key"] {
+        lines["tls"][field] = json!(
+            inline["tls"][field]
+                .as_str()
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>()
+        );
+    }
+    // Inline PEM takes precedence over a path and line arrays form one PEM.
+    lines["tls"]["certificate_path"] = "/not-loaded/root.pem".into();
+    lines["tls"]["client_certificate_path"] = "/not-loaded/client.pem".into();
+    lines["tls"]["client_key_path"] = "/not-loaded/client.key".into();
+    lines["tls"]["curve_preferences"] = json!(["X25519", "P256", "P384", "P521"]);
+    lines["tls"]["alpn"] = "h2".into();
+    lines["tls"]["min_version"] = "".into();
+    lines["tls"]["max_version"] = "".into();
+    protocol::validate(&lines).unwrap();
+    lines["tls"]["curve_preferences"] = json!([]);
+    protocol::validate(&lines).unwrap();
     // A source edit must not reuse the prior successful validation result.
     inline["tls"]["client_key"] = "not a private key".into();
     assert!(protocol::validate(&inline).is_err());

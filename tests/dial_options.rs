@@ -63,12 +63,10 @@ fn subscription_dial_options_keep_units_and_reject_invalid_values() {
     }
     for (field, value) in [
         ("connect_timeout", json!(0)),
-        ("connect_timeout", json!("0s")),
         ("connect_timeout", json!("-1s")),
         ("connect_timeout", json!("0.5ms")),
         ("connect_timeout", json!("1..5s")),
         ("connect_timeout", json!("4294967296ms")),
-        ("tcp_keep_alive", json!("0s")),
         ("tcp_keep_alive_interval", json!("32768s")),
         ("disable_tcp_keep_alive", json!("true")),
         ("tcp_fast_open", json!("true")),
@@ -80,6 +78,21 @@ fn subscription_dial_options_keep_units_and_reject_invalid_values() {
         assert_eq!(kept.len(), 1);
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains(field), "{skipped:?}");
+    }
+    for duration in ["", "0", "0s"] {
+        let mut defaults = node.clone();
+        for field in [
+            "connect_timeout",
+            "tcp_keep_alive",
+            "tcp_keep_alive_interval",
+        ] {
+            defaults[field] = duration.into();
+        }
+        protocol::validate(&defaults).unwrap();
+        let converted = protocol::convert_outbound(defaults, "node").unwrap();
+        let client = &converted["client_chains"][0]["chain"][0];
+        assert!(client.get("connect_timeout_ms").is_none());
+        assert!(client.get("tcp_settings").is_none());
     }
     let duplicate = "proxies:\n- {name: dial, type: socks5, server: localhost, port: 1080, connect-timeout: 1s, connect_timeout: 2s}";
     assert!(subscription::parse(duplicate).is_err());

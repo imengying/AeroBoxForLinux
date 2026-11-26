@@ -13,9 +13,9 @@ const REALITY_KEY: &str = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
 // synthetic hosts and credentials. Global Clash DNS/groups are not node data.
 fn clash_sample() -> Value {
     json!({"mixed-port":7890,"mode":"rule","dns":{"enable":true},"proxies":[
-        {"name":"reality-firefox","type":"vless","server":"offline.invalid","port":443,
+        {"name":"reality-default","type":"vless","server":"offline.invalid","port":443,
          "uuid":UUID,"encryption":"none","flow":"xtls-rprx-vision","network":"tcp",
-         "udp":true,"tls":true,"client-fingerprint":"firefox","servername":"offline.invalid",
+         "alterId":0,"cipher":"auto","udp":true,"tls":true,"client-fingerprint":"safari","servername":"offline.invalid",
          "reality-opts":{"public-key":REALITY_KEY}},
         {"name":"websocket-firefox","type":"vless","server":"offline.invalid","port":443,
          "uuid":UUID,"network":"ws","udp":true,"tls":true,"client-fingerprint":"firefox",
@@ -64,14 +64,30 @@ fn clash_browser_profiles_only_apply_when_tls_is_enabled() {
             }
         }
         plain["tls"] = true.into();
-        for fingerprint in ["chrome", "firefox"] {
-            plain["client-fingerprint"] = fingerprint.into();
+        for fingerprint in [
+            None,
+            Some(""),
+            Some("chrome"),
+            Some("firefox"),
+            Some("safari"),
+            Some("random"),
+        ] {
+            if let Some(fingerprint) = fingerprint {
+                plain["client-fingerprint"] = fingerprint.into();
+            } else {
+                plain.as_object_mut().unwrap().remove("client-fingerprint");
+            }
             let imported = subscription::parse(&source(plain.clone())).unwrap();
-            assert_eq!(imported[0]["tls"]["utls"]["fingerprint"], fingerprint);
-            protocol::validate(&imported[0]).unwrap();
+            let converted = protocol::convert_outbound(imported[0].clone(), "fixture").unwrap();
+            assert_eq!(
+                converted["client_chains"][0]["chain"][0]["protocol"]["options"]["client_fingerprint"],
+                if fingerprint == Some("chrome") {
+                    "chrome"
+                } else {
+                    "firefox"
+                }
+            );
         }
-        plain["client-fingerprint"] = "unknown-browser".into();
-        assert!(subscription::parse(&source(plain)).is_err());
     }
 }
 
@@ -141,10 +157,67 @@ fn mixed_clash_profiles_survive_download_storage_and_node_listing() {
 }
 
 #[test]
+fn vless_subscription_template_imports_every_node_with_default_firefox() {
+    let _serial = support::runtime_lock();
+    let mut sample = clash_sample();
+    let servers = ["192.0.2.1", "198.51.100.2", "2001:db8::1", "2001:db8:1::2"];
+    let short_ids = [
+        "fd3e710308",
+        "01fb66541f5df40f",
+        "3d74b0e5793841",
+        "3ccfe96d",
+    ];
+    sample["proxies"] = (0..31)
+        .map(|index| {
+            let mut node = sample["proxies"][0].clone();
+            node["name"] = format!("节点 {index}").into();
+            node["server"] = servers[index % servers.len()].into();
+            node["skip-cert-verify"] = false.into();
+            node["reality-opts"]["short-id"] = short_ids[index % short_ids.len()].into();
+            node
+        })
+        .collect();
+    let (server, _) = support::http(serde_yaml_ng::to_string(&sample).unwrap());
+    let app = support::App::new();
+    let sub = Subscription {
+        source: format!("http://{}/subscription", server.address),
+        ..Default::default()
+    };
+    let id = sub.id.clone();
+    app.service.import_subscription(sub).unwrap();
+    let saved = Store::open(Some(app.dir.path().into())).unwrap();
+    let sub = saved
+        .state
+        .subscriptions
+        .iter()
+        .find(|sub| sub.id == id)
+        .unwrap();
+    assert_eq!(sub.nodes.len(), 31);
+    assert!(sub.import_issues.is_empty());
+    for (index, node) in sub.nodes.iter().enumerate() {
+        assert_eq!(node["server"], servers[index % servers.len()]);
+        assert_eq!(node["encryption"], "none");
+        for field in ["alter_id", "alterId", "cipher", "security"] {
+            assert!(node.get(field).is_none(), "unexpected VLESS field {field}");
+        }
+        let converted = protocol::convert_outbound(node.clone(), "fixture").unwrap();
+        let reality = &converted["client_chains"][0]["chain"][0]["protocol"];
+        assert_eq!(reality["type"], "reality");
+        assert_eq!(reality["client_fingerprint"], "firefox");
+        assert_eq!(reality["vision"], true);
+        assert_eq!(reality["public_key"], REALITY_KEY);
+        assert_eq!(reality["short_id"], short_ids[index % short_ids.len()]);
+        assert_eq!(reality["protocol"]["udp_enabled"], true);
+    }
+    let reopened = support::service(saved);
+    assert_eq!(reopened.subscription_nodes(&id).unwrap().len(), 31);
+}
+
+#[test]
 fn import_reports_are_persisted_and_replaced_after_successful_refresh() {
     let _serial = support::runtime_lock();
     let mut sample = clash_sample();
-    sample["proxies"][0]["client-fingerprint"] = "unknown-browser".into();
+    sample["proxies"][0]["client-fingerprint"] = true.into();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("subscription.yaml");
     std::fs::write(&path, sample.to_string()).unwrap();
@@ -171,11 +244,23 @@ fn import_reports_are_persisted_and_replaced_after_successful_refresh() {
 
 #[test]
 fn share_links_keep_browser_profiles_and_anytls_udp_policy() {
-    let link = format!(
-        "vless://{UUID}@offline.invalid:443?security=tls&fp=firefox&type=ws&path=%2Ffixture#vless"
-    );
-    let nodes = subscription::parse(&link).unwrap();
-    assert_eq!(nodes[0]["tls"]["utls"]["fingerprint"], "firefox");
+    for fingerprint in ["", "firefox", "chrome", "safari"] {
+        let link = format!(
+            "vless://{UUID}@offline.invalid:443?security=tls&fp={fingerprint}&type=ws&path=%2Ffixture#vless"
+        );
+        let nodes = subscription::parse(&link).unwrap();
+        let converted = protocol::convert_outbound(nodes[0].clone(), "fixture").unwrap();
+        let tls = &converted["client_chains"][0]["chain"][0]["protocol"];
+        assert_eq!(
+            tls["options"]["client_fingerprint"],
+            if fingerprint == "chrome" {
+                "chrome"
+            } else {
+                "firefox"
+            }
+        );
+        assert_eq!(tls["alpn_protocols"], json!(["http/1.1"]));
+    }
     let mut sample = clash_sample();
     sample["proxies"][3]["udp-over-tcp"] = false.into();
     let nodes = subscription::parse(&sample.to_string()).unwrap();
@@ -224,13 +309,21 @@ fn transport_alpn_defaults_override_browser_defaults_and_keep_explicit_values() 
         (json!({"type":"grpc","service_name":"test"}), json!(["h2"])),
         (json!({"type":"http","path":"/"}), json!(["h2"])),
     ] {
-        for fingerprint in ["", "chrome", "firefox"] {
+        for fingerprint in [
+            None,
+            Some(""),
+            Some("chrome"),
+            Some("firefox"),
+            Some("safari"),
+        ] {
             for alpn in [None, Some(json!([])), Some(json!(["custom-protocol"]))] {
                 let mut node = json!({
                     "type":"vless","tag":"alpn","server":"offline.invalid","server_port":443,
-                    "uuid":UUID,"tls":{"enabled":true,"server_name":"offline.invalid",
-                        "utls":{"enabled":true,"fingerprint":fingerprint}}
+                    "uuid":UUID,"tls":{"enabled":true,"server_name":"offline.invalid"}
                 });
+                if let Some(fingerprint) = fingerprint {
+                    node["tls"]["utls"] = json!({"enabled":true,"fingerprint":fingerprint});
+                }
                 if !transport.is_null() {
                     node["transport"] = transport.clone();
                 }
@@ -243,14 +336,14 @@ fn transport_alpn_defaults_override_browser_defaults_and_keep_explicit_values() 
                     tls["alpn_protocols"],
                     alpn.filter(|value| value != &json!([]))
                         .unwrap_or_else(|| expected.clone()),
-                    "transport={transport}, fingerprint={fingerprint}"
+                    "transport={transport}, fingerprint={fingerprint:?}"
                 );
                 assert_eq!(
                     tls["options"]["client_fingerprint"],
-                    if fingerprint.is_empty() {
+                    if fingerprint == Some("chrome") {
                         "chrome"
                     } else {
-                        fingerprint
+                        "firefox"
                     }
                 );
             }

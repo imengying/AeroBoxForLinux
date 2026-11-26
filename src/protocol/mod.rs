@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 mod naive;
 mod outbound;
+mod quic;
 pub(crate) mod ss_plugin;
+mod tls;
 use anyhow::Context;
 pub use outbound::convert_outbound;
 use serde_json::{Map, Value};
@@ -112,10 +114,12 @@ pub(crate) fn address(host: &str, port: u64, path: &str) -> Result<String> {
 pub(crate) fn server_port(node: &Value) -> Option<u16> {
     let port = if node["type"] == "hysteria2"
         && let Some(ports) = node.get("server_ports")
+        && ports != ""
+        && ports.as_array().is_none_or(|ports| !ports.is_empty())
     {
         ports
-            .as_array()?
-            .first()?
+            .as_array()
+            .map_or(Some(ports), |ports| ports.first())?
             .as_str()?
             .split(':')
             .next()?
@@ -125,6 +129,26 @@ pub(crate) fn server_port(node: &Value) -> Option<u16> {
         u16::try_from(node["server_port"].as_u64()?).ok()?
     };
     (port != 0).then_some(port)
+}
+
+pub(super) fn strings(value: Value, path: &str) -> Result<Vec<String>> {
+    match value {
+        Value::String(value) => Ok(if value.is_empty() {
+            vec![]
+        } else {
+            vec![value]
+        }),
+        Value::Array(values) => values
+            .into_iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| error(path, "expected text or an array of text"))
+            })
+            .collect(),
+        _ => Err(error(path, "expected text or an array of text")),
+    }
 }
 pub(crate) fn seconds(value: Value, path: &str) -> Result<u64> {
     let text = value
