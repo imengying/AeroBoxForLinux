@@ -69,6 +69,7 @@ fn subscription_updates_preserve_all_original_node_names() {
     });
     let sub = Subscription {
         source: format!("http://{address}"),
+        expires: 123,
         ..Subscription::default()
     };
     let id = sub.id.clone();
@@ -84,6 +85,7 @@ fn subscription_updates_preserve_all_original_node_names() {
     assert_eq!(sub.nodes[0]["tag"], "keep");
     assert_eq!(sub.nodes[1]["tag"], "drop");
     assert_eq!(sub.total, 100);
+    assert_eq!(sub.expires, 0, "missing expiration must clear the old date");
 }
 
 #[test]
@@ -92,6 +94,10 @@ fn update_all_subscriptions_skips_local_content_and_updates_remote_sources() {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let remote = Subscription {
         source: format!("http://{}", server.local_addr().unwrap()),
+        upload: 1,
+        download: 2,
+        total: 3,
+        expires: 4,
         ..Subscription::default()
     };
     let local = Subscription {
@@ -124,6 +130,12 @@ fn update_all_subscriptions_skips_local_content_and_updates_remote_sources() {
     assert_eq!(state.subscriptions[0].nodes[0]["tag"], "local");
     assert_eq!(state.subscriptions[0].updated, 0);
     assert_eq!(state.subscriptions[1].nodes[0]["tag"], "downloaded");
+    let remote = &state.subscriptions[1];
+    assert_eq!(
+        (remote.upload, remote.download, remote.total, remote.expires),
+        (0, 0, 0, 0),
+        "missing metadata must not retain the previous response"
+    );
     assert!(service.update_subscription(&local_id).is_err());
 }
 
@@ -245,6 +257,7 @@ fn subscription_form_preserves_live_download_data_and_rejects_stale_edits() {
             current.download = 2;
             current.total = 3;
             current.expires = 4;
+            current.import_issues = vec!["fresh import issue".into()];
             Ok(())
         })
         .unwrap();
@@ -267,6 +280,7 @@ fn subscription_form_preserves_live_download_data_and_rejects_stale_edits() {
     assert!(!saved.auto_update);
     assert_eq!(saved.update_interval_minutes, 720);
     assert_eq!(saved.nodes[0]["tag"], "fresh");
+    assert_eq!(saved.import_issues, ["fresh import issue"]);
     assert_eq!(saved.selected_node.as_deref(), Some("fresh"));
     assert_eq!(saved.updated, 0, "a changed source must be refreshed");
     assert_eq!(
@@ -631,7 +645,7 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
             .subscription_nodes(&first)
             .unwrap()
             .iter()
-            .all(|node| !node.available && !node.selected)
+            .all(|node| !node.selected)
     );
     assert!(app.service.subscription_nodes(&second).unwrap()[0].selected);
     app.service.restart().unwrap();

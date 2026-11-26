@@ -72,14 +72,14 @@ kTLS 测试显式运行，要求 Linux 6.14+、`CONFIG_TLS` 以及 AES-GCM / Cha
 - `tests/`：应用的集成测试与测试服务端。
 - `tools/protocol-checks/`：网络任务静态检查与 Vision 状态机模糊测试。
 - `examples/network-bench.rs`：基准测试使用的隔离应用进程，由 `scripts/bench-network.py` 驱动。
-- `vendor/`、`licenses/`：第三方源码及许可。
+- `vendor/`：第三方源码及对应许可，`support/` 保存共享密码组件。
 - `scripts/`：安装、卸载、打包和 Wayland 验证。
-- `docs/`：开发说明和协议支持。
+- `docs/`：开发说明、协议支持、网络验证和第三方来源。
 - `target/`：编译产物、安装包和截图，不提交到 Git。
 
 AeroBox 作为一个应用构建、测试和发布；连接管理和界面共用同一份状态，没有独立内核的安装或升级流程。
 
-安装包使用明确的文件清单，只包含正式程序、安装与卸载脚本、图标和许可声明。使用与开发文档保留在仓库，源码、测试、截图、基准工具及已嵌入程序的规则数据不重复打包。`scripts/check-package.py` 在 CI 中检查归档内容，并在临时目录验证安装与卸载。
+安装包使用明确的文件清单，只包含正式程序、安装与卸载脚本和图标。许可、使用与开发文档保留在仓库，源码、测试、截图、基准工具及已嵌入程序的规则数据不重复打包。`scripts/check-package.py` 在 CI 中检查归档内容，并在临时目录验证安装与卸载。
 
 界面参考 [Material 3 色彩角色](https://m3.material.io/styles/color/roles)，使用 GTK 原生控件及桌面字体渲染；配色、卡片、选中状态和间距统一在 `resources/styles/` 管理。
 

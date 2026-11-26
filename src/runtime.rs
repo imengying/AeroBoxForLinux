@@ -140,18 +140,8 @@ pub(crate) fn prepare(
         .context("当前订阅没有选中的可用节点")?;
     entries.push(json!({"client_group":"proxy", "type":"selector", "default":selected.tag, "client_chains":members}));
 
-    let direct = dns_endpoint(&settings.direct_dns)?;
     let remote = dns_endpoint(&settings.remote_dns)?;
-    let mut direct_dns = json!({"url":direct, "ip_strategy":strategy(settings)});
-    // Bootstrap is always a real underlay resolver; it never refers back to the proxy.
-    if crate::config::parse_dns_server(&settings.direct_dns)?
-        .server
-        .parse::<std::net::IpAddr>()
-        .is_err()
-    {
-        direct_dns["bootstrap_url"] = "system".into();
-    }
-    entries.push(json!({"dns_group":"dns-direct", "dns_servers":[direct_dns]}));
+    entries.push(direct_dns(settings)?);
     entries.push(json!({"dns_group":"dns-remote", "dns_servers":[{"url":remote,"client_chain":"proxy","bootstrap_url":"dns-direct","ip_strategy":strategy(settings)}]}));
 
     let mut rules = vec![];
@@ -220,6 +210,34 @@ pub(crate) fn prepare(
         selected_node,
         settings: settings.clone(),
     })
+}
+
+pub(crate) fn prepare_probe(
+    source: &Value,
+    settings: &Settings,
+) -> Result<Vec<shoes::config::Config>> {
+    let mut node = source.clone();
+    node["tag"] = "probe-node".into();
+    node["domain_resolver"] = json!({"server":"dns-direct", "ip_strategy":strategy(settings)});
+    parse(&json!([
+        protocol::convert_outbound(node, "测速节点")?,
+        {"client_group":"probe", "type":"selector", "client_chains":[{"chain":["probe-node"]}]},
+        direct_dns(settings)?,
+    ]))
+}
+
+fn direct_dns(settings: &Settings) -> Result<Value> {
+    let mut server =
+        json!({"url":dns_endpoint(&settings.direct_dns)?, "ip_strategy":strategy(settings)});
+    // Bootstrap always uses the physical network, never the tested node.
+    if crate::config::parse_dns_server(&settings.direct_dns)?
+        .server
+        .parse::<std::net::IpAddr>()
+        .is_err()
+    {
+        server["bootstrap_url"] = "system".into();
+    }
+    Ok(json!({"dns_group":"dns-direct", "dns_servers":[server]}))
 }
 
 fn strategy(settings: &Settings) -> &'static str {

@@ -230,9 +230,7 @@ impl SettingsPanel {
 impl Ui {
     fn diagnostics_row(self: &Rc<Self>, group: &adw::PreferencesGroup) {
         let row = adw::ActionRow::builder().title("连接诊断").build();
-        let button = gtk::Button::with_label("检测");
-        button.add_css_class("secondary-action");
-        button.set_valign(gtk::Align::Center);
+        let button = toolbar_action("检测");
         button.set_widget_name("connection-diagnostics");
         row.add_suffix(&button);
         row.set_activatable_widget(Some(&button));
@@ -287,9 +285,9 @@ impl Ui {
         form.set_widget_name("settings-form");
         self.body.append(&form);
         self.body.set_margin_bottom(84);
-        let appearance = group("外观与启动");
+        let appearance = group("常规");
         let theme = combo(
-            "外观",
+            "主题",
             &["跟随系统", "浅色", "深色"],
             match settings.theme.as_str() {
                 "light" => 1,
@@ -304,7 +302,7 @@ impl Ui {
             .map(|size| format!("{size} pt"))
             .collect();
         let font_size = adw::ComboRow::builder()
-            .title("字体大小")
+            .title("字号")
             .model(&gtk::StringList::new(
                 &sizes.iter().map(String::as_str).collect::<Vec<_>>(),
             ))
@@ -331,28 +329,28 @@ impl Ui {
         });
         let autostart = switch_row("登录时启动", "", platform::autostart_enabled());
         appearance.add(&autostart);
-        let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
-        appearance.add(&detect_ip);
         form.append(&appearance);
 
-        let network = group("代理");
-        let proxy = switch_row("连接时启用系统代理", "", settings.system_proxy);
+        let network = group("网络");
+        let proxy = switch_row("自动设置系统代理", "", settings.system_proxy);
+        proxy.set_tooltip_text(Some("连接时设置系统代理，停止时恢复"));
         network.add(&proxy);
         let ipv6 = switch_row("IPv6", "", settings.ipv6);
         network.add(&ipv6);
-        form.append(&network);
-        let routing = group("分流");
         let bypass = switch_row("绕过局域网", "", settings.bypass_lan);
-        routing.add(&bypass);
+        bypass.set_tooltip_text(Some("规则模式下，局域网地址直接连接"));
+        network.add(&bypass);
         let sniff = switch_row("流量嗅探", "", settings.sniff);
-        routing.add(&sniff);
+        sniff.set_tooltip_text(Some("识别连接中的域名，用于规则匹配"));
+        network.add(&sniff);
+        let mtu = number_entry("TUN MTU", &settings.tun_mtu.to_string());
+        network.add(&mtu.root);
+        form.append(&network);
+
         let dns = group("DNS");
-        dns.set_description(Some(
-            "支持 udp://、tcp://、tls://、https:// 和 quic://；远程 DNS 经所选节点查询。",
-        ));
         let direct_dns = LabeledEntry::new("直连 DNS", &settings.direct_dns);
         direct_dns.root.set_tooltip_text(Some(
-            "例如 udp://223.5.5.5 或 https://dns.alidns.com/dns-query",
+            "直接连接；支持 udp://、tcp://、tls://、https:// 和 quic://",
         ));
         dns.add(&direct_dns.root);
         let remote_dns = LabeledEntry::new("远程 DNS", &settings.remote_dns);
@@ -360,19 +358,20 @@ impl Ui {
             .root
             .set_tooltip_text(Some("远程 DNS 经代理查询；域名型服务器使用直连 DNS 解析"));
         dns.add(&remote_dns.root);
-        let hijack = switch_row("DNS 劫持", "拦截局域网 DNS 查询", settings.dns_hijack);
+        let hijack = switch_row("接管 DNS", "", settings.dns_hijack);
+        hijack.set_tooltip_text(Some("接管进入代理或虚拟网卡的 53 端口查询"));
         dns.add(&hijack);
-        let cache = switch_row("DNS 缓存", "缓存域名解析结果", settings.dns_cache);
+        let cache = switch_row("缓存", "", settings.dns_cache);
         dns.add(&cache);
-        form.append(&routing);
         form.append(&dns);
 
-        let tun_group = group("虚拟网卡");
-        let mtu = number_entry("MTU", &settings.tun_mtu.to_string());
-        tun_group.add(&mtu.root);
-        form.append(&tun_group);
-
-        let logging = group("日志与诊断");
+        let testing = group("检测");
+        let detect_ip = switch_row("自动检测出口 IP", "", settings.auto_detect_ip);
+        testing.add(&detect_ip);
+        let test_url = LabeledEntry::new("测速地址", &settings.test_url);
+        testing.add(&test_url.root);
+        let timeout = number_entry("测速超时（毫秒）", &settings.test_timeout.to_string());
+        testing.add(&timeout.root);
         let levels = ["trace", "debug", "info", "warn", "error"];
         let log = combo(
             "日志级别",
@@ -382,17 +381,10 @@ impl Ui {
                 .position(|l| *l == settings.log_level)
                 .unwrap_or(4) as u32,
         );
-        logging.add(&log);
-        self.diagnostics_row(&logging);
-        form.append(&logging);
-
-        let testing = group("测速");
-        let test_url = LabeledEntry::new("测试地址", &settings.test_url);
-        testing.add(&test_url.root);
-        let timeout = number_entry("超时（毫秒）", &settings.test_timeout.to_string());
-        testing.add(&timeout.root);
+        testing.add(&log);
+        self.diagnostics_row(&testing);
         form.append(&testing);
-        let data = group("应用");
+        let data = group("数据");
         let dir = adw::ActionRow::builder()
             .title("配置目录")
             .subtitle(self.service.dir().to_string_lossy().as_ref())
@@ -416,21 +408,11 @@ impl Ui {
             }
         });
         data.add(&dir);
-        data.add(
-            &adw::ActionRow::builder()
-                .title("AeroBox 版本")
-                .subtitle(option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
-                .build(),
-        );
         form.append(&data);
         let weak = Rc::downgrade(self);
-        let reset = adw::ActionRow::builder()
-            .title("恢复默认设置")
-            .subtitle("保留订阅、节点和规则，仅重置设置")
-            .build();
+        let reset = adw::ActionRow::builder().title("重置设置").build();
         let reset_button = toolbar_action("恢复默认");
         reset.add_suffix(&reset_button);
-        data.add(&reset);
         reset_button.connect_clicked(move |_| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -494,25 +476,29 @@ impl Ui {
             });
             SettingsPanel::request_save(&ui, "恢复默认设置", ready);
         });
-        let backup_group = group("数据管理");
-        backup_group.set_description(Some(
-            "备份包含订阅、节点、规则和设置；恢复保留现有资源并添加备份副本。",
-        ));
         let export_row = adw::ActionRow::builder()
             .title("导出备份")
-            .subtitle("包含明文节点凭据，请妥善保管备份文件")
+            .subtitle("含节点凭据，请妥善保管")
             .build();
         let export = toolbar_action("导出");
         export_row.add_suffix(&export);
-        backup_group.add(&export_row);
+        data.add(&export_row);
         let import_row = adw::ActionRow::builder()
-            .title("合并恢复备份")
-            .subtitle("添加订阅和规则副本，并按备份恢复设置")
+            .title("恢复备份")
+            .subtitle("合并订阅和规则，替换设置")
             .build();
         let restore = toolbar_action("选择文件");
         import_row.add_suffix(&restore);
-        backup_group.add(&import_row);
-        form.append(&backup_group);
+        data.add(&import_row);
+        data.add(&reset);
+        let about = group("关于");
+        about.add(
+            &adw::ActionRow::builder()
+                .title("AeroBox")
+                .subtitle(option_env!("AEROBOX_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
+                .build(),
+        );
+        form.append(&about);
         let weak = Rc::downgrade(self);
         export.connect_clicked(move |button| {
             let Some(ui) = weak.upgrade() else {
@@ -592,7 +578,9 @@ impl Ui {
                         }
                         match result {
                             Ok((subscriptions, rules)) => {
-                                ui.notify(&format!("已恢复 {subscriptions} 个订阅、{rules} 个规则"));
+                                ui.notify(&format!(
+                                    "已恢复 {subscriptions} 个订阅、{rules} 个规则"
+                                ));
                                 let settings = ui.service.snapshot().settings;
                                 ui.apply_font_size(settings.font_size);
                                 apply_theme(&settings.theme);
@@ -605,13 +593,12 @@ impl Ui {
             });
             let ready = Rc::new(move |ui: &Rc<Ui>, login: bool| {
                 let dialog = alert_dialog(
-                    "合并恢复备份？",
-                    "保留现有订阅和规则并添加备份副本，当前设置将被备份替换。运行中的连接会先校验新配置，失败则保留原连接。",
+                    "恢复备份？",
+                    "合并订阅和规则，替换当前设置。登录启动和窗口大小保持不变。",
                 );
                 dialog.add_response("cancel", "取消");
                 dialog.add_response("restore", "选择备份");
                 dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
-                dialog.set_body("备份含明文节点凭据与订阅地址，请只选择可信的本机备份。\n合并恢复保留现有资源；登录启动和窗口尺寸保留本机设置。");
                 dialog.set_close_response("cancel");
                 let weak = Rc::downgrade(ui);
                 let restore_file = restore_file.clone();
@@ -627,7 +614,9 @@ impl Ui {
                         restore_file(&ui, dir.join("smoke-backup.json"), login);
                         return;
                     }
-                    let chooser = gtk::FileDialog::builder().title("选择 AeroBox 备份").build();
+                    let chooser = gtk::FileDialog::builder()
+                        .title("选择 AeroBox 备份")
+                        .build();
                     let weak = Rc::downgrade(&ui);
                     let restore_file = restore_file.clone();
                     chooser.open(Some(&ui.window), None::<&gio::Cancellable>, move |result| {
@@ -643,7 +632,7 @@ impl Ui {
                 ui.settings_prompt.replace(Some(dialog.clone()));
                 dialog.present(Some(&ui.window));
             });
-            SettingsPanel::request_save(&ui, "合并恢复备份", ready);
+            SettingsPanel::request_save(&ui, "恢复备份", ready);
         });
         let weak = Rc::downgrade(self);
         let saved = settings.clone();
@@ -811,9 +800,10 @@ async fn smoke_respond(ui: &Ui, response: &str) -> Result<()> {
 #[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_section(ui: &Ui, section: &str) -> Result<()> {
     let title = match section {
-        "general" => "外观与启动",
+        "general" => "常规",
         "network" => "DNS",
-        "tun" => "虚拟网卡",
+        "tun" => "网络",
+        "testing" => "检测",
         _ => anyhow::bail!("未知设置分组"),
     };
     let group = descendants(&ui.body)
@@ -873,7 +863,7 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
         }
         2 => {
             let before = ui.service.snapshot();
-            smoke_data_button(ui, "恢复默认设置")?.emit_clicked();
+            smoke_data_button(ui, "重置设置")?.emit_clicked();
             smoke_respond(ui, "reset").await?;
             smoke_saving(ui)?;
             ensure!(before.subscriptions.len() == ui.service.snapshot().subscriptions.len());
@@ -899,7 +889,7 @@ pub(super) async fn smoke_data_action(ui: &Rc<Ui>, step: u32) -> Result<()> {
             );
         }
         4 => {
-            smoke_data_button(ui, "合并恢复备份")?.emit_clicked();
+            smoke_data_button(ui, "恢复备份")?.emit_clicked();
             smoke_respond(ui, "restore").await?;
             ensure!(ui.jobs.get() > 0, "选择备份后没有执行合并恢复");
         }
@@ -939,9 +929,9 @@ pub(super) async fn smoke_autostart(ui: &Rc<Ui>, step: u32) -> Result<()> {
             smoke_data_button(
                 ui,
                 if step == 2 {
-                    "合并恢复备份"
+                    "恢复备份"
                 } else {
-                    "恢复默认设置"
+                    "重置设置"
                 },
             )?
             .emit_clicked();
@@ -1030,7 +1020,7 @@ pub(super) async fn smoke_tun_settings(ui: &Rc<Ui>) -> Result<()> {
     let mtu = widgets
         .iter()
         .filter_map(|w| w.downcast_ref::<gtk::Entry>())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .find(|entry| entry.placeholder_text().as_deref() == Some("TUN MTU"))
         .context("缺少 MTU")?;
     let original = ui.service.snapshot().settings;
     for value in [
@@ -1147,7 +1137,7 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     let mtu = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<gtk::Entry>().ok())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .find(|entry| entry.placeholder_text().as_deref() == Some("TUN MTU"))
         .context("缺少 MTU 输入")?;
     mtu.set_text(&(saved.tun_mtu + 100).to_string());
     ensure!(panel.is_dirty.get(), "修改后没有未保存标记");
@@ -1164,13 +1154,13 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
     let theme = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<adw::ComboRow>().ok())
-        .find(|row| row.title() == "外观")
+        .find(|row| row.title() == "主题")
         .context("缺少外观控件")?;
     theme.set_selected(2);
     let font_size = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<adw::ComboRow>().ok())
-        .find(|row| row.title() == "字体大小")
+        .find(|row| row.title() == "字号")
         .context("缺少字体大小控件")?;
     font_size.set_selected(if saved.font_size == model::FONT_SIZE_MIN {
         model::FONT_SIZE_MAX - model::FONT_SIZE_MIN
@@ -1202,9 +1192,9 @@ pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     );
     let widgets = descendants(&ui.body);
     for (title, selected) in [
-        ("字体大小", saved.font_size - model::FONT_SIZE_MIN),
+        ("字号", saved.font_size - model::FONT_SIZE_MIN),
         (
-            "外观",
+            "主题",
             match saved.theme.as_str() {
                 "light" => 1,
                 "dark" => 2,
@@ -1325,7 +1315,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         return Ok(());
     }
     let body = descendants(&ui.body);
-    for (title, value) in [("IPv6", false), ("DNS 缓存", false)] {
+    for (title, value) in [("IPv6", false), ("缓存", false)] {
         let row = body
             .iter()
             .filter_map(|w| w.clone().downcast::<adw::SwitchRow>().ok())
@@ -1342,13 +1332,13 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
     let mtu = body
         .iter()
         .filter_map(|w| w.clone().downcast::<gtk::Entry>().ok())
-        .find(|entry| entry.placeholder_text().as_deref() == Some("MTU"))
+        .find(|entry| entry.placeholder_text().as_deref() == Some("TUN MTU"))
         .context("缺少 MTU 输入")?;
     ensure!(mtu.is_sensitive(), "无法设置 MTU");
     mtu.set_text("1400");
     body.iter()
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
-        .find(|row| row.title() == "字体大小")
+        .find(|row| row.title() == "字号")
         .context("缺少字体大小控件")?
         .set_selected(model::FONT_SIZE_MAX - model::FONT_SIZE_MIN);
     for (title, text) in [

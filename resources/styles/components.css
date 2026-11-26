@@ -41,7 +41,7 @@
 .node-card:focus-visible, .subscription-card:focus-visible { outline: 2px solid @accent_color; outline-offset: 3px; }
 /* Card innards share one padding so selected and unselected cards stay the
  * same height; the selected state only swaps colours, never box metrics. */
-.node-card-content { padding: 0.55em 0.7em; }
+.node-card-content { padding: 0.55em 0.4em 0.55em 0.7em; }
 .subscription-card-content { padding: 1em 1em; }
 .node-name { font-size: 1em; font-weight: 600; }
 .subscription-name { font-size: 1em; font-weight: 600; }

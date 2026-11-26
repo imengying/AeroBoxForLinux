@@ -59,12 +59,37 @@ pub(crate) fn timed(stage: &'static str, began: Instant, source: io::Error) -> i
     )
 }
 
+#[derive(Debug)]
+struct VlessResponse {
+    received: usize,
+    expected: usize,
+    source: io::Error,
+}
+
+impl fmt::Display for VlessResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "stage=vless_response received={} expected={}: {}",
+            self.received, self.expected, self.source
+        )
+    }
+}
+
+impl Error for VlessResponse {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 pub(crate) fn vless_response(source: io::Error, received: &[u8]) -> io::Error {
-    let expected = received.get(1).map_or(2, |length| 2 + usize::from(*length));
-    stage_context(
-        "vless_response",
-        format!("received={} expected={expected}", received.len()),
-        source,
+    io::Error::new(
+        source.kind(),
+        VlessResponse {
+            received: received.len(),
+            expected: received.get(1).map_or(2, |length| 2 + usize::from(*length)),
+            source,
+        },
     )
 }
 
@@ -132,7 +157,7 @@ pub(crate) fn connection_level(error: &io::Error) -> log::Level {
         return Level::Debug;
     }
     let mut relay = false;
-    let mut protocol_header = false;
+    let mut vless_response = None;
     let mut dns_code = None;
     walk(error, |cause| {
         if let Some(context) = cause.downcast_ref::<Context>() {
@@ -140,7 +165,9 @@ pub(crate) fn connection_level(error: &io::Error) -> log::Level {
                 context.stage,
                 Some("relay" | "relay_upload" | "relay_download")
             );
-            protocol_header |= context.stage == Some("vless_response");
+        }
+        if let Some(response) = cause.downcast_ref::<VlessResponse>() {
+            vless_response = Some((response.received, response.source.kind()));
         }
         if let Some(response) = cause.downcast_ref::<DnsResponse>() {
             dns_code = Some(response.0);
@@ -162,8 +189,25 @@ pub(crate) fn connection_level(error: &io::Error) -> log::Level {
             Level::Warn
         };
     }
-    if protocol_header {
-        return Level::Error;
+    if let Some((received, kind)) = vless_response {
+        // VLESS has no target-connect failure status. Servers can close before
+        // sending a response when the destination is unreachable (including an
+        // IPv6-only target). Keep the failed connection, but distinguish it
+        // from malformed or partially received protocol headers.
+        return if received == 0
+            && matches!(
+                kind,
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+                    | ErrorKind::TimedOut
+            ) {
+            Level::Warn
+        } else {
+            Level::Error
+        };
     }
     if relay && contains::<TlsTruncation>(error) {
         return Level::Warn;
@@ -303,6 +347,21 @@ mod tests {
         );
         assert_eq!(
             connection_level(&stage("tls_handshake", tls_eof())),
+            Level::Error
+        );
+        for kind in [
+            ErrorKind::UnexpectedEof,
+            ErrorKind::ConnectionReset,
+            ErrorKind::TimedOut,
+        ] {
+            for (received, level) in [(&[][..], Level::Warn), (&[0][..], Level::Error)] {
+                let error = stage("relay_download", vless_response(kind.into(), received));
+                assert_eq!(error.kind(), kind);
+                assert_eq!(connection_level(&error), level);
+            }
+        }
+        assert_eq!(
+            connection_level(&vless_response(ErrorKind::InvalidData.into(), &[])),
             Level::Error
         );
         assert_eq!(

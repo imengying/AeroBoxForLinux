@@ -75,6 +75,57 @@ impl Drop for Dns {
 }
 
 #[test]
+fn stopped_node_tests_run_concurrently_without_listeners_tun_or_proxy_changes() {
+    let _serial = runtime_lock();
+    let app = App::new();
+    let (first, first_hits) = support::socks_http(b"first".to_vec());
+    let (second, second_hits) = support::socks_http(b"second".to_vec());
+    let id = app.import(
+        "probe nodes",
+        vec![
+            socks_node("first", first.address),
+            socks_node("second", second.address),
+        ],
+    );
+    let mut settings = app.service.snapshot().settings;
+    settings.test_url = "http://1.1.1.1:12345/probe".into();
+    settings.system_proxy = true;
+    settings.tun_enabled = true;
+    app.service.apply_settings(settings).unwrap();
+    let before = serde_json::to_value(app.service.snapshot()).unwrap();
+    // A listener already owns the app's port: outbound probes must not bind it.
+    let _port = std::net::TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
+    thread::scope(|scope| {
+        let tasks: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|tag| {
+                let service = &app.service;
+                let id = &id;
+                scope.spawn(move || service.test_subscription_node(id, tag))
+            })
+            .collect();
+        for task in tasks {
+            assert!(task.join().unwrap().unwrap() > 0);
+        }
+    });
+    assert_eq!(first_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(second_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        serde_json::to_value(app.service.snapshot()).unwrap(),
+        before
+    );
+    assert!(!app.service.status().running && !app.service.status().proxy);
+    assert!(app.service.status().generation.is_none());
+    assert!(
+        app.service
+            .subscription_nodes(&id)
+            .unwrap()
+            .iter()
+            .all(|node| node.delay_ms.is_some())
+    );
+}
+
+#[test]
 fn node_hostnames_use_the_configured_direct_resolver() {
     let _serial = runtime_lock();
     let app = App::new();
@@ -88,6 +139,13 @@ fn node_hostnames_use_the_configured_direct_resolver() {
     settings.test_url = "http://1.1.1.1:12345/probe".into();
     app.service.apply_settings(settings).unwrap();
     let id = app.import("domain node", vec![json!({"type":"socks","tag":"resolved","server":hostname,"server_port":node.address.port()})]);
+    let delay = app.service.test_subscription_node(&id, "resolved").unwrap();
+    assert!(delay > 0);
+    assert!(!app.service.status().running);
+    assert_eq!(
+        app.service.subscription_nodes(&id).unwrap()[0].delay_ms,
+        Some(delay)
+    );
     app.service.start().unwrap();
     assert_eq!(
         support::request(&app.service, "http://127.0.0.1:12345/probe").unwrap(),
@@ -101,7 +159,7 @@ fn node_hostnames_use_the_configured_direct_resolver() {
     );
     assert_eq!(
         hits.load(Ordering::Relaxed),
-        2,
+        3,
         "measurement must traverse the selected hostname node"
     );
     assert!(direct_dns.queries.load(Ordering::Relaxed) > 0);
@@ -115,7 +173,7 @@ fn node_hostnames_use_the_configured_direct_resolver() {
     assert!(app.service.test_subscription_node(&id, "resolved").is_err());
     assert_eq!(
         hits.load(Ordering::Relaxed),
-        2,
+        3,
         "named DNS bypassed probe destination policy"
     );
 }
@@ -161,7 +219,20 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
     let _serial = runtime_lock();
     let app = App::new();
     let origin_body = r#"{"outbounds":[{"type":"socks","tag":"downloaded directly","server":"127.0.0.1","server_port":9}]}"#;
-    let (origin, origin_hits) = support::http(origin_body.as_bytes().to_vec());
+    let origin_hits = Arc::new(AtomicUsize::new(0));
+    let direct_hits = origin_hits.clone();
+    let origin = Server::spawn(move |mut stream| {
+        let Ok(request) = support::headers(&mut stream) else {
+            return;
+        };
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("user-agent: flclash/v0.9.4 clash-verge platform/linux\r\n")
+        );
+        direct_hits.fetch_add(1, Ordering::Relaxed);
+        let _ = support::respond(&mut stream, origin_body.as_bytes());
+    });
     let requests = Arc::new(AtomicUsize::new(0));
     let counted = requests.clone();
     let node = Server::spawn(move |mut stream| {
@@ -172,9 +243,12 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
             return;
         };
         counted.fetch_add(1, Ordering::Relaxed);
+        let lower = request.to_ascii_lowercase();
         let body = if request.contains("/rules") {
+            assert!(lower.contains("user-agent: aerobox/"));
             r#"{"version":3,"rules":[{"domain":["proxied.example.test"]}]}"#
         } else {
+            assert!(lower.contains("user-agent: flclash/v0.9.4 clash-verge platform/linux\r\n"));
             r#"{"outbounds":[{"type":"socks","tag":"downloaded through proxy","server":"127.0.0.1","server_port":9}]}"#
         };
         let _ = support::respond(&mut stream, body.as_bytes());
@@ -230,6 +304,9 @@ fn subscription_and_rule_downloads_follow_the_running_proxy_then_use_direct_when
     );
     assert_eq!(origin_hits.load(Ordering::Relaxed), 2);
     assert_eq!(requests.load(Ordering::Relaxed), 2);
+    let subscription_id = app.service.snapshot().subscriptions[3].id.clone();
+    app.service.update_subscription(&subscription_id).unwrap();
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 3);
 }
 
 #[test]

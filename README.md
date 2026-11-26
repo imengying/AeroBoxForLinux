@@ -24,7 +24,7 @@ cd AeroBoxForLinux-linux-amd64
 1. 导入订阅链接、文件或节点内容。支持常见 Clash YAML、sing-box JSON、Base64 和节点分享链接，导入成功后自动选用该订阅。
 2. 点击订阅卡片切换订阅，点击节点卡片选择节点。每个订阅分别记住所选节点；运行中切换失败会恢复原连接。
 3. 在首页选择「规则」或「全局」，点击右下角「启动」。全局使用所选节点；规则按启用的规则分流，未匹配的连接使用所选节点。模式切换会断开旧连接。
-4. 节点卡片下方可单独测速，右下角悬浮按钮测试当前订阅。连接页可查看和断开连接，设置页提供日志级别与连接诊断。
+4. 节点卡片下方可单独测速，右下角悬浮按钮测试当前订阅，未启动连接时也可测速。连接页可查看和断开连接，设置页提供日志级别与连接诊断。
 
 首页显示出口 IP、上传下载、连接数、运行时间及 AeroBox 整体内存。IPv4 在上方，启用 IPv6 后同时检测并显示 IPv6；两个地址分别更新，点击 IP 卡片重新检测。IPv6 开关位于设置中；字体大小支持 9–18 pt，布局随字体和 Wayland 缩放调整。日志级别默认 `error`。
 
@@ -62,8 +62,8 @@ TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络�
 
 ## 开发
 
-使用 Rust 1.100、GTK ≥ 4.10、libadwaita ≥ 1.5 和 GtkSourceView ≥ 5.6。执行 `make test` 检查代码，`make package` 生成安装包。依赖安装、文件布局和验证方式见[开发说明](https://github.com/imengying/AeroBoxForLinux/blob/main/docs/development.md)。
+使用 Rust 1.100、GTK ≥ 4.10、libadwaita ≥ 1.5 和 GtkSourceView ≥ 5.6。执行 `make test` 检查代码，`make package` 生成安装包。依赖安装、文件布局和验证方式见[开发说明](docs/development.md)。
 
 ## 来源与许可
 
-项目源于 GUI-for-Cores / GUI.for.SingBox，遵循 [GPL-3.0](LICENSE)。界面参考 [Material 3](https://m3.material.io) 和 [FlClash](https://github.com/chen08209/FlClash)，订阅流程参考 [Hiddify](https://github.com/hiddify/hiddify-app)。第三方代码来源见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 `licenses/`；相关许可随安装包分发。
+项目源于 GUI-for-Cores / GUI.for.SingBox，遵循 [GPL-3.0](LICENSE)。界面参考 [Material 3](https://m3.material.io) 和 [FlClash](https://github.com/chen08209/FlClash)，订阅流程参考 [Hiddify](https://github.com/hiddify/hiddify-app)。第三方代码来源见[来源与许可](docs/third-party.md)，各组件许可与对应源码保存在一起。

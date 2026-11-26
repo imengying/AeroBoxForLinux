@@ -172,12 +172,12 @@ impl NodesPanel {
                 footer.add_css_class("node-card-footer");
                 footer.append(&protocol);
                 let delay = label("", "node-delay");
-                delay.set_xalign(0.5);
-                delay.set_width_chars(7);
+                delay.set_xalign(1.0);
                 let test = gtk::Button::new();
                 test.add_css_class("flat");
                 test.add_css_class("node-test-button");
                 test.set_widget_name("node-test");
+                test.set_halign(gtk::Align::End);
                 test.set_valign(gtk::Align::Center);
                 test.set_tooltip_text(Some("测试此节点延迟"));
                 test.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -185,6 +185,7 @@ impl NodesPanel {
                     node.name
                 ))]);
                 let test_indicator = gtk::Stack::new();
+                test_indicator.set_hhomogeneous(false);
                 test_indicator.set_size_request(16, 16);
                 test_indicator.add_named(&bolt(), Some("icon"));
                 test_indicator.add_named(&delay, Some("result"));
@@ -262,18 +263,12 @@ impl NodesPanel {
             !self.selecting.get()
                 && !self.testing.get()
                 && pending.is_empty()
-                && self.data.borrow().iter().any(|n| n.available),
+                && !self.data.borrow().is_empty(),
         );
         for (node, card) in self.data.borrow().iter().zip(self.cards.borrow().iter()) {
             let busy = pending.contains(&node.node_tag);
-            card.test.set_sensitive(
-                node.available && !self.selecting.get() && !self.testing.get() && !busy,
-            );
-            card.test.set_tooltip_text(Some(if node.available {
-                "测试此节点延迟"
-            } else {
-                "启动后测速"
-            }));
+            card.test
+                .set_sensitive(!self.selecting.get() && !self.testing.get() && !busy);
             card.test_spinner.set_spinning(busy);
             card.test_indicator.set_visible_child_name(if busy {
                 "busy"
@@ -367,9 +362,6 @@ impl NodesPanel {
         else {
             return;
         };
-        if !node.available {
-            return;
-        }
         self.pending.borrow_mut().insert(tag.into());
         self.revision.set(self.revision.get() + 1);
         self.controls();
@@ -388,12 +380,12 @@ impl NodesPanel {
                     panel.reload_local(ui);
                     return;
                 }
-                panel.show_delay(&tag, result, generation.is_none());
+                panel.show_delay(&tag, result);
             },
         );
     }
 
-    fn show_delay(&self, tag: &str, result: Result<u64>, stopped: bool) {
+    fn show_delay(&self, tag: &str, result: Result<u64>) {
         let mut data = self.data.borrow_mut();
         let cards = self.cards.borrow();
         if let Some((node, card)) = data
@@ -410,7 +402,7 @@ impl NodesPanel {
                 Err(error) => {
                     node.delay_ms = None;
                     update_delay(card, None);
-                    card.delay.set_text(if stopped { "未启动" } else { "失败" });
+                    card.delay.set_text("失败");
                     card.test_indicator.set_visible_child_name("result");
                     card.delay.add_css_class("latency-bad");
                     card.delay.set_tooltip_text(Some(&format!("{error:#}")));
@@ -427,7 +419,6 @@ impl NodesPanel {
             .data
             .borrow()
             .iter()
-            .filter(|n| n.available)
             .map(|n| (n.subscription_id.clone(), n.node_tag.clone()))
             .collect();
         if nodes.is_empty() {
@@ -483,7 +474,7 @@ impl NodesPanel {
                 match result {
                     Ok(results) => {
                         for (tag, result) in results {
-                            panel.show_delay(&tag, result, false);
+                            panel.show_delay(&tag, result);
                         }
                     }
                     Err(error) => ui.error("测速失败", error),
@@ -934,10 +925,9 @@ pub(super) async fn smoke_selection_navigation(ui: &Rc<Ui>) -> Result<()> {
     Ok(())
 }
 
-/// Exercise the actual icon handler, including its disabled stopped-core guard.
-/// The next smoke step checks the selected node after any async work finishes.
+/// Exercise stopped-state testing without changing selection or starting a listener.
 #[cfg(feature = "ui-smoke")]
-pub(super) fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
+pub(super) async fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
     use anyhow::ensure;
     ensure!(ui.jobs.get() == 0, "节点任务未完成");
     let panel = ui.node_panel.borrow().clone().context("节点页未打开")?;
@@ -955,33 +945,28 @@ pub(super) fn smoke_test_node(ui: &Rc<Ui>, index: usize) -> Result<()> {
         .context("缺少节点卡片")?
         .test
         .clone();
-    ensure!(
-        button.is_sensitive() == node.available,
-        "独立测速按钮状态错误"
-    );
+    let generation = ui.service.status().generation;
+    ensure!(button.is_sensitive(), "停止状态不能测速");
     button.emit_clicked();
     ensure!(!panel.selecting.get(), "测速图标误触节点选择");
-    if node.available {
-        ensure!(
-            panel.pending.borrow().contains(&node.node_tag),
-            "独立测速没有开始"
-        );
-        ensure!(
-            panel.cards.borrow()[index].test_spinner.is_spinning(),
-            "独立测速缺少忙状态"
-        );
-    } else {
-        ensure!(
-            !panel.pending.borrow().contains(&node.node_tag),
-            "未启动仍发起了测速"
-        );
-        ensure!(
-            button
-                .tooltip_text()
-                .is_some_and(|text| text.contains("启动后测速")),
-            "未说明测速需要先启动"
-        );
+    ensure!(
+        panel.pending.borrow().contains(&node.node_tag),
+        "独立测速没有开始"
+    );
+    ensure!(
+        panel.cards.borrow()[index].test_spinner.is_spinning(),
+        "独立测速缺少忙状态"
+    );
+    let began = std::time::Instant::now();
+    while ui.jobs.get() > 0 {
+        ensure!(began.elapsed() < Duration::from_secs(10), "节点测速未结束");
+        glib::timeout_future(Duration::from_millis(20)).await;
     }
+    ensure!(
+        ui.service.status().generation == generation,
+        "测速启动了连接"
+    );
+    ensure!(button.is_sensitive(), "测速结束后按钮未恢复");
     let after = ui.service.snapshot();
     ensure!(
         before.settings.active_subscription == after.settings.active_subscription

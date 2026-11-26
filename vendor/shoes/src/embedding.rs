@@ -16,6 +16,7 @@ use std::{
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;
+pub use crate::control::probes::probe_outbound;
 
 /// Android must supply the current physical network's DNS servers and protect
 /// every outgoing socket before connect/bind. Callbacks must not reenter the core.

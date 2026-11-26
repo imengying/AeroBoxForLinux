@@ -15,10 +15,7 @@ name = "AeroBoxForLinux-linux-amd64"
 app_id = "io.github.imengying.AeroBoxForLinux"
 expected = {
     "AeroBox", "install.sh", "uninstall.sh", f"{app_id}.png",
-    "LICENSE", "THIRD_PARTY.md", "resources/rules/sing-geoip-LICENSE",
-    "resources/rules/sing-geosite-LICENSE",
 }
-expected.update(str(path.relative_to(root)) for path in (root / "licenses").rglob("*") if path.is_file())
 
 with tempfile.TemporaryDirectory(prefix="aerobox-package-") as temporary:
     directory = Path(temporary)

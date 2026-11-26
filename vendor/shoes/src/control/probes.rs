@@ -310,6 +310,55 @@ pub async fn probe(
     .await
 }
 
+/// Measure an outbound without listeners, routing changes or a running core.
+pub async fn probe_outbound(
+    configs: Vec<crate::config::Config>,
+    name: &str,
+    url: &str,
+    timeout_ms: u64,
+) -> io::Result<u16> {
+    static PROBES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(PROBE_CONCURRENCY);
+    let query = ProbeQuery::parse(
+        &HashMap::from([
+            ("url".into(), url.into()),
+            ("timeout".into(), timeout_ms.to_string()),
+        ]),
+        false,
+    )?;
+    let network = crate::network_tasks::NetworkLifetime::default();
+    let result = network
+        .scope(tokio::time::timeout(query.timeout, async {
+            let _permit = PROBES.acquire().await.map_err(io::Error::other)?;
+            let validated = crate::config::compile_configs(configs).await?;
+            let catalog = validated.catalog.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing probe outbound catalog",
+                )
+            })?;
+            let mut dns = crate::dns::build_dns_registry_with_limits(
+                validated.dns_groups,
+                validated.global_limits,
+            )
+            .await?;
+            let transports =
+                ProbeTransports::new(dns.get_or_create_default(), dns.forbidden_ranges().to_vec());
+            let (delay, _) = request_with_transports(
+                &transports,
+                &catalog,
+                name,
+                &query,
+                crate::rustls_config_util::create_dns_client_config,
+            )
+            .await?;
+            Ok(delay)
+        }))
+        .await;
+    network.cancel();
+    network.wait().await;
+    result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "delay test timed out"))?
+}
+
 pub async fn probe_group(
     runtime: &ControlRuntime,
     generation: &Generation,
@@ -847,7 +896,10 @@ impl Resolver for ProbeResolver {
         // A node's endpoint resolver must survive the probe wrapper while
         // retaining the same target policy if the requested names coincide.
         self.inner.named(name).map(|inner| {
-            Arc::new(Self { inner, ..self.clone() }) as Arc<dyn Resolver>
+            Arc::new(Self {
+                inner,
+                ..self.clone()
+            }) as Arc<dyn Resolver>
         })
     }
 

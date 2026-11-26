@@ -213,6 +213,15 @@ mod tests {
             let mut stream = VlessResponseStream::new(io);
             let error = stream.read(&mut [0; 1]).await.unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof, "len={len}");
+            assert_eq!(
+                crate::diagnostics::connection_level(&error),
+                if len == 0 {
+                    log::Level::Warn
+                } else {
+                    log::Level::Error
+                },
+                "len={len}"
+            );
             assert!(error.to_string().contains(&format!(
                 "stage=vless_response received={len} expected={}",
                 if len < 2 { 2 } else { header.len() }

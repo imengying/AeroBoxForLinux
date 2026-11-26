@@ -11,6 +11,9 @@ mod quic;
 mod ss_plugin;
 mod tls;
 
+/// Subscription format negotiation follows FlClash's Linux request identifier.
+pub(crate) const USER_AGENT: &str = "FlClash/v0.9.4 clash-verge Platform/linux";
+
 const DIAL_FIELDS: [&str; 8] = [
     "tcp_fast_open",
     "tcp_multi_path",

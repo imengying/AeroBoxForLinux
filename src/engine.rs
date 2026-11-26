@@ -37,7 +37,6 @@ pub struct SubscriptionNode {
     pub protocol: String,
     pub selected: bool,
     pub delay_ms: Option<u64>,
-    pub available: bool,
 }
 #[derive(Default)]
 struct Running {
@@ -414,7 +413,6 @@ impl Service {
                     name: tag.into(),
                     protocol: source["type"].as_str().unwrap_or_default().into(),
                     selected,
-                    available,
                     delay_ms: run.delays.get(&key).copied(),
                 }
             })
@@ -452,20 +450,60 @@ impl Service {
         self.commit_state(&before, candidate)
     }
     pub fn test_subscription_node(&self, id: &str, tag: &str) -> Result<u64> {
-        let state = self.snapshot();
-        let generation = self.status().generation;
-        let revision = self.subscription_revision();
+        let (state, generation, revision) = {
+            let _op = self.operation.lock().unwrap();
+            ensure!(!self.closing.load(Ordering::SeqCst), "应用正在退出");
+            (
+                self.snapshot(),
+                self.status().generation,
+                self.subscription_revision(),
+            )
+        };
         let key = NodeSelection {
             subscription_id: id.into(),
             node_tag: tag.into(),
         };
-        let prepared = self.running_config()?;
-        let node = prepared.nodes.get(&key).context("请先选择此订阅")?;
-        let delay = runtime::executor().block_on(self.core()?.urltest(
-            node.tag.clone(),
-            state.settings.test_url,
-            u64::from(state.settings.test_timeout),
-        ))? as u64;
+        let source = state
+            .subscriptions
+            .iter()
+            .find(|sub| sub.id == id)
+            .and_then(|sub| model::selectable_nodes(&sub.nodes).find(|node| node["tag"] == tag))
+            .context("节点不存在")?;
+        let active = {
+            let run = self.running.lock().unwrap();
+            run.core
+                .as_ref()
+                .filter(|core| core.is_running())
+                .and_then(|core| {
+                    run.prepared
+                        .as_ref()?
+                        .nodes
+                        .get(&key)
+                        .filter(|node| node.source == *source)
+                        .map(|node| (core.clone(), node.tag.clone()))
+                })
+        };
+        let delay = runtime::executor().block_on(async {
+            if let Some((core, name)) = active {
+                Ok::<_, anyhow::Error>(
+                    core.urltest(
+                        name,
+                        state.settings.test_url.clone(),
+                        u64::from(state.settings.test_timeout),
+                    )
+                    .await?,
+                )
+            } else {
+                let configs = runtime::prepare_probe(source, &state.settings)?;
+                Ok(shoes::embedding::probe_outbound(
+                    configs,
+                    "probe-node",
+                    &state.settings.test_url,
+                    u64::from(state.settings.test_timeout),
+                )
+                .await?)
+            }
+        })? as u64;
         let _op = self.operation.lock().unwrap();
         ensure!(
             self.status().generation == generation && self.subscription_revision() == revision,
@@ -825,7 +863,11 @@ impl Service {
     fn client(&self) -> Result<Client> {
         self.client_with_timeout(Duration::from_secs(60))
     }
-    fn download(&self, url: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap)> {
+    fn download(
+        &self,
+        url: &str,
+        user_agent: &str,
+    ) -> Result<(Vec<u8>, reqwest::header::HeaderMap)> {
         let parsed = url::Url::parse(url)?;
         ensure!(
             ["http", "https"].contains(&parsed.scheme()),
@@ -834,6 +876,7 @@ impl Service {
         let r = self
             .client()?
             .get(url)
+            .header(reqwest::header::USER_AGENT, user_agent)
             .send()
             .map_err(reqwest::Error::without_url)?
             .error_for_status()
@@ -877,13 +920,8 @@ impl Service {
             .find(|sub| sub.id == original.id)
             .context("订阅已被删除")?;
         let mut next = next;
-        next.nodes = current.nodes.clone();
+        copy_subscription_data(&mut next, current);
         next.selected_node = current.selected_node.clone();
-        next.updated = current.updated;
-        next.upload = current.upload;
-        next.download = current.download;
-        next.total = current.total;
-        next.expires = current.expires;
         if next.source != current.source {
             next.updated = 0;
         }
@@ -1226,8 +1264,9 @@ impl Service {
 
     fn fetch_subscription(&self, sub: &mut model::Subscription, importing: bool) -> Result<()> {
         ensure!(!sub.source.trim().is_empty(), "请填写订阅来源");
+        (sub.upload, sub.download, sub.total, sub.expires) = (0, 0, 0, 0);
         let bytes = if model::is_online_source(&sub.source) {
-            let (bytes, headers) = self.download(&sub.source)?;
+            let (bytes, headers) = self.download(&sub.source, subscription::USER_AGENT)?;
             if importing {
                 if sub.name == "新订阅"
                     && let Some(title) = headers
@@ -1382,7 +1421,8 @@ impl Service {
     fn download_rule(&self, rule: &mut RuleSet) -> Result<Vec<u8>> {
         ensure!(!rule.source.is_empty(), "请填写规则集来源");
         let bytes = if rule.is_remote() {
-            self.download(&rule.source)?.0
+            self.download(&rule.source, concat!("AeroBox/", env!("CARGO_PKG_VERSION")))?
+                .0
         } else {
             fs::read(&rule.source).context("无法读取规则文件")?
         };

@@ -26,12 +26,13 @@ connection peer=127.0.0.1:12345 kind=UnexpectedEof: target=example.test:443 rout
 | 主动取消连接、规则拦截、DNS NXDOMAIN / 无地址回答 | DEBUG |
 | 已进入转发阶段的连接重置、断管、对端断开 | DEBUG |
 | DNS SERVFAIL、请求超时、连接拒绝或网络不可达 | WARN |
+| VLESS 对端在返回响应头之前关闭连接或超时 | WARN |
 | 用户态 TLS 已建立后缺少 `close_notify` 的截断 | WARN |
-| 证书 / 认证失败、损坏的协议数据、VLESS 响应头不完整、其他未分类故障 | ERROR |
+| 证书 / 认证失败、损坏的协议数据、已收到部分 VLESS 响应头后截断、其他未分类故障 | ERROR |
 
 参考 [sing-box 的连接关闭分级](https://github.com/SagerNet/sing-box/blob/testing/route/conn.go)及 [Mihomo 的连接诊断](https://github.com/MetaCubeX/mihomo/blob/Meta/tunnel/tunnel.go)，避免把取消或普通连接结束全记为 ERROR。判断使用错误类型与上下文，不匹配日志字符串；握手阶段的重置仍保留为 ERROR。NXDOMAIN 是否来自广告拦截无法仅凭响应码判断。
 
-降低日志级别不改变失败结果、超时或重试语义。TLS 异常关闭前已经读取的有效载荷先转发、刷新，再返回原始错误；缺少关闭通知不会被转换成成功 EOF，VLESS 头截断仍为 ERROR。主动取消立即终止转发。双栈 DNS 查询都未得到地址时，保留较严重的失败，避免另一个地址族的空回答掩盖超时或 SERVFAIL。
+降低日志级别不改变失败结果、超时或重试语义。TLS 异常关闭前已经读取的有效载荷先转发、刷新，再返回原始错误；缺少关闭通知不会被转换成成功 EOF。VLESS 没有目标连接失败的状态码，因此零字节响应保留为连接警告；已收到部分响应头后截断仍为 ERROR。主动取消立即终止转发。双栈 DNS 查询都未得到地址时，保留较严重的失败，避免另一个地址族的空回答掩盖超时或 SERVFAIL。
 
 `tests/diagnostics.rs` 使用真实本地 DNS/TLS/代理连接检查分级、设置即时生效和响应数据；组件测试另外检查错误链及反压下的转发。排查具体节点时可临时使用 WARN 或 DEBUG；ERROR 默认不显示上表中的警告和调试事件。
 

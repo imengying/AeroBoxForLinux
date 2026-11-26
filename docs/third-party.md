@@ -12,22 +12,24 @@ TLS wire preferences and transport defaults were checked against [sing-box v1.14
 
 Independent VMess, Shadowsocks-plugin, TUIC/UoT and ECH fixtures in `vendor/shoes/tests/fixtures` use pinned SagerNet Go modules. The plugin fixture includes two unmodified MIT-licensed go-gost/x obfuscation connection implementations, with their license retained in `obfs-peer/gost/LICENSE`. The TLS fragmentation fixture uses Go’s standard TLS implementation. These peers only run during protocol interoperability tests.
 
-Vendored component license texts are shipped alongside packaged builds:
+Licenses are retained beside the source they cover. Release archives contain the application, icon and installation scripts; license texts and documentation stay in this repository:
 
-- blake3: [LICENSE_A2](licenses/blake3/LICENSE_A2), [LICENSE_A2LLVM](licenses/blake3/LICENSE_A2LLVM), [LICENSE_CC0](licenses/blake3/LICENSE_CC0)
-- gotatun: [LICENSE](licenses/gotatun/LICENSE), [LICENSE-CLOUDFLARE](licenses/gotatun/LICENSE-CLOUDFLARE)
-- h3: [LICENSE](licenses/h3/LICENSE)
-- hickory-dns: [LICENSE-APACHE](licenses/hickory-dns/LICENSE-APACHE), [LICENSE-MIT](licenses/hickory-dns/LICENSE-MIT)
-- ml-dsa: [LICENSE-MIT](licenses/ml-dsa/LICENSE-MIT), [LICENSE-APACHE](licenses/ml-dsa/LICENSE-APACHE)
-- nix: [LICENSE](licenses/nix/LICENSE)
-- quinn: [LICENSE-MIT](licenses/quinn/LICENSE-MIT), [LICENSE-APACHE](licenses/quinn/LICENSE-APACHE)
-- quinn-proto: [LICENSE-MIT](licenses/quinn-proto/LICENSE-MIT), [LICENSE-APACHE](licenses/quinn-proto/LICENSE-APACHE)
-- quinn-udp: [LICENSE-MIT](licenses/quinn-udp/LICENSE-MIT), [LICENSE-APACHE](licenses/quinn-udp/LICENSE-APACHE)
-- rcgen: [LICENSE](licenses/rcgen/LICENSE)
-- rustls: [LICENSE](licenses/rustls/LICENSE), [LICENSE-APACHE](licenses/rustls/LICENSE-APACHE), [LICENSE-ISC](licenses/rustls/LICENSE-ISC), [LICENSE-MIT](licenses/rustls/LICENSE-MIT)
-- shoes: [LICENSE](licenses/shoes/LICENSE)
-- smoltcp: [LICENSE-0BSD.txt](licenses/smoltcp/LICENSE-0BSD.txt)
-- tendns: [LICENSE](licenses/tendns/LICENSE)
+- aerobox-crypto: [LICENSE](../vendor/support/aerobox-crypto/LICENSE)
+- aerobox-primitives: [LICENSE](../vendor/support/aerobox-primitives/LICENSE)
+- blake3: [LICENSE_A2](../vendor/blake3/LICENSE_A2), [LICENSE_A2LLVM](../vendor/blake3/LICENSE_A2LLVM), [LICENSE_CC0](../vendor/blake3/LICENSE_CC0)
+- gotatun: [LICENSE](../vendor/gotatun/LICENSE), [LICENSE-CLOUDFLARE](../vendor/gotatun/LICENSE-CLOUDFLARE)
+- h3: [LICENSE](../vendor/h3/LICENSE)
+- hickory-dns: [LICENSE-APACHE](../vendor/hickory-dns/LICENSE-APACHE), [LICENSE-MIT](../vendor/hickory-dns/LICENSE-MIT)
+- ml-dsa: [LICENSE-MIT](../vendor/ml-dsa/LICENSE-MIT), [LICENSE-APACHE](../vendor/ml-dsa/LICENSE-APACHE)
+- nix: [LICENSE](../vendor/nix/LICENSE)
+- quinn: [LICENSE-MIT](../vendor/quinn/LICENSE-MIT), [LICENSE-APACHE](../vendor/quinn/LICENSE-APACHE)
+- quinn-proto: [LICENSE-MIT](../vendor/quinn-proto/LICENSE-MIT), [LICENSE-APACHE](../vendor/quinn-proto/LICENSE-APACHE)
+- quinn-udp: [LICENSE-MIT](../vendor/quinn-udp/LICENSE-MIT), [LICENSE-APACHE](../vendor/quinn-udp/LICENSE-APACHE)
+- rcgen: [LICENSE](../vendor/rcgen/LICENSE)
+- rustls: [LICENSE](../vendor/rustls/LICENSE), [LICENSE-APACHE](../vendor/rustls/LICENSE-APACHE), [LICENSE-ISC](../vendor/rustls/LICENSE-ISC), [LICENSE-MIT](../vendor/rustls/LICENSE-MIT)
+- shoes: [LICENSE](../vendor/shoes/LICENSE)
+- smoltcp: [LICENSE-0BSD.txt](../vendor/smoltcp/LICENSE-0BSD.txt)
+- tendns: [LICENSE](../vendor/tendns/LICENSE)
 
 Other Cargo dependencies retain their respective upstream licenses. The embedded rule datasets come from [SagerNet/sing-geoip](https://github.com/SagerNet/sing-geoip) and [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite), both GPL-3.0-or-later, with license texts in `resources/rules`. AeroBox application code is GPL-3.0-only.
 

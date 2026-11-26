@@ -219,9 +219,9 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 27 => "subscriptions-narrow.png",
                 29 => "nodes-narrow.png",
                 30 => "settings-unsaved.png",
-                38 => "settings-data.png",
+                43 => "settings-data.png",
                 45 => "settings-network.png",
-                46 => "settings-network-scrolled.png",
+                46 => "settings-detection.png",
                 48 => "settings-tun-permission.png",
                 59 => "nodes-fullscreen.png",
                 60 => "home-fullscreen.png",
@@ -403,7 +403,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 8 => {
                     nodes::smoke_delay_failure(&ui)?;
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
-                    nodes::smoke_test_node(&ui, 0)?;
+                    nodes::smoke_test_node(&ui, 0).await?;
                     nodes::smoke_selection_navigation(&ui).await?;
                     apply_theme("dark");
                 }
@@ -542,7 +542,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 29 => {
                     nodes::smoke_nodes(&ui, "日常连接", 6, Some("日本 · 01"), None)?;
                     nodes::smoke_floating_action(&ui)?;
-                    nodes::smoke_test_node(&ui, 0)?;
+                    nodes::smoke_test_node(&ui, 0).await?;
                     ui.window.set_default_size(1000, 680);
                     ui.navigate(Page::Settings);
                     settings::smoke_unsaved(&ui, None).await?;
@@ -682,7 +682,10 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     );
                     settings::smoke_section(&ui, "network")?;
                 }
-                45 => settings::smoke_network(&ui).await?,
+                45 => {
+                    settings::smoke_network(&ui).await?;
+                    settings::smoke_section(&ui, "testing")?;
+                }
                 47 => {
                     settings::smoke_section(&ui, "tun")?;
                 }

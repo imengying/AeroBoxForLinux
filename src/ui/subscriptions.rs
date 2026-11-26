@@ -424,12 +424,20 @@ impl Ui {
             "更新间隔（分钟）",
             &model::UPDATE_INTERVAL_DEFAULT_MINUTES.to_string(),
         );
-        let interval_toggle = interval.root.clone();
-        auto_update
-            .connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
+        let interval_toggle = interval.root.downgrade();
+        auto_update.connect_active_notify(move |row| {
+            if let Some(interval) = interval_toggle.upgrade() {
+                interval.set_visible(row.is_active() && row.is_sensitive());
+            }
+        });
+        let interval_toggle = interval.root.downgrade();
+        auto_update.connect_sensitive_notify(move |row| {
+            if let Some(interval) = interval_toggle.upgrade() {
+                interval.set_visible(row.is_active() && row.is_sensitive());
+            }
+        });
         let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        updates.set_visible(false);
-        let update_group = adw::PreferencesGroup::builder().title("更新设置").build();
+        let update_group = adw::PreferencesGroup::new();
         update_group.add(&auto_update);
         updates.append(&update_group);
         updates.append(&interval.root);
@@ -460,11 +468,14 @@ impl Ui {
             import.set_sensitive(false);
             let import = import.downgrade();
             let busy = busy.clone();
-            let updates = updates.downgrade();
+            let auto_update = auto_update.downgrade();
             let refresh = std::rc::Rc::new(move |buffer: &gtk::TextBuffer| {
-                let (Some(import), Some(hint), Some(error)) =
-                    (import.upgrade(), hint.upgrade(), error.upgrade())
-                else {
+                let (Some(import), Some(hint), Some(error), Some(auto_update)) = (
+                    import.upgrade(),
+                    hint.upgrade(),
+                    error.upgrade(),
+                    auto_update.upgrade(),
+                ) else {
                     return;
                 };
                 if busy.get() {
@@ -477,17 +488,13 @@ impl Ui {
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     hint.set_visible(false);
-                    if let Some(updates) = updates.upgrade() {
-                        updates.set_visible(false);
-                    }
+                    auto_update.set_sensitive(true);
                     import.set_sensitive(false);
                     return;
                 }
                 match subscription::import_input(trimmed) {
                     Ok(sub) => {
-                        if let Some(updates) = updates.upgrade() {
-                            updates.set_visible(!sub.source.is_empty());
-                        }
+                        auto_update.set_sensitive(!sub.source.is_empty());
                         import.set_sensitive(true);
                         error.set_visible(false);
                         hint.set_text(&if sub.source.is_empty() {
@@ -506,9 +513,7 @@ impl Ui {
                         hint.set_visible(true);
                     }
                     Err(failure) => {
-                        if let Some(updates) = updates.upgrade() {
-                            updates.set_visible(false);
-                        }
+                        auto_update.set_sensitive(false);
                         import.set_sensitive(false);
                         error.set_visible(false);
                         hint.set_text(&format!("无法识别：{failure}"));
@@ -538,15 +543,19 @@ impl Ui {
             if busy.replace(true) {
                 return;
             }
-            form.set_sensitive(false);
-            cancel.set_sensitive(false);
             let buffer = source.buffer();
             let input = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
                 .to_string();
             let name = name.text().trim().to_owned();
-            let auto_update = auto_update.is_active();
-            let interval = interval.text().trim().parse().unwrap_or(0);
+            let auto_update = auto_update.is_active() && auto_update.is_sensitive();
+            let interval = if auto_update {
+                interval.text().trim().parse().unwrap_or(0)
+            } else {
+                model::UPDATE_INTERVAL_DEFAULT_MINUTES
+            };
+            form.set_sensitive(false);
+            cancel.set_sensitive(false);
             let window = weak_window.clone();
             let error = error.clone();
             let cancel = cancel.downgrade();
@@ -861,6 +870,11 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         interval.text() == model::UPDATE_INTERVAL_DEFAULT_MINUTES.to_string(),
         "导入窗口的默认更新间隔无效"
     );
+    let auto_update = widgets
+        .iter()
+        .filter_map(|widget| widget.downcast_ref::<adw::SwitchRow>())
+        .find(|row| row.title() == "自动更新")
+        .context("缺少自动更新开关")?;
     let source = widgets
         .iter()
         .find(|w| w.widget_name() == "subscription-import-source")
@@ -876,6 +890,28 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         .downcast::<gtk::Button>()
         .unwrap();
     if step == 1 {
+        source.buffer().set_text("");
+        ensure!(
+            auto_update.is_visible() && auto_update.is_sensitive(),
+            "空白导入窗口隐藏或禁用了自动更新"
+        );
+        auto_update.set_active(false);
+        ensure!(
+            !interval.parent().unwrap().is_visible(),
+            "关闭自动更新仍显示间隔"
+        );
+        source
+            .buffer()
+            .set_text("https://subscription.example.test/link");
+        ensure!(
+            auto_update.is_sensitive() && !auto_update.is_active(),
+            "输入链接重置了更新选择"
+        );
+        auto_update.set_active(true);
+        ensure!(
+            interval.parent().unwrap().is_visible(),
+            "开启自动更新未显示间隔"
+        );
         source.buffer().set_text("invalid input");
     } else {
         ensure!(
@@ -900,6 +936,12 @@ pub(super) fn smoke_import(ui: &Rc<Ui>, step: u32) -> Result<()> {
         );
         source.buffer().set_text(
             r#"[{"type":"socks","tag":"导入检查","server":"127.0.0.1","server_port":1080}]"#,
+        );
+        ensure!(
+            auto_update.is_visible()
+                && !auto_update.is_sensitive()
+                && !interval.parent().unwrap().is_visible(),
+            "粘贴节点时自动更新没有保持可见且禁用"
         );
     }
     save.emit_clicked();
