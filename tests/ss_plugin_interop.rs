@@ -73,6 +73,10 @@ fn imported_plugins_carry_payload_through_the_application() {
         app.service
             .import_subscription(subscription::import_input(&source.to_string()).unwrap())
             .unwrap();
+        // Importing only adds data; the fixture selects the subscription it
+        // just created before starting the connection.
+        let id = app.service.snapshot().subscriptions[0].id.clone();
+        app.service.select_subscription(&id).unwrap();
         app.service.start().unwrap();
         let mut stream = support::echo_tunnel(&app.service, "192.0.2.1:443".parse().unwrap());
         for size in [1, 1400, 32768] {
