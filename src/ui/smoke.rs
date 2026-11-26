@@ -1,4 +1,5 @@
 use super::*;
+use sourceview::prelude::BufferExt as _;
 use std::time::Instant;
 
 pub(super) fn seed_smoke(service: &Service) -> Result<()> {
@@ -365,6 +366,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 2 => {
                     let window = subscriptions::smoke_import_window(&ui)?;
                     screenshot(&window, &parent.join("subscription-import-default.png")).await?;
+                    let form_size = (window.width(), window.height());
                     apply_theme("dark");
                     glib::timeout_future(Duration::from_millis(80)).await;
                     anyhow::ensure!(window.has_css_class("dark"), "导入弹窗没有跟随深色模式");
@@ -373,6 +375,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                     screenshot(&window, &parent.join("subscription-import-dark.png")).await?;
                     apply_theme("light");
                     window.close();
+                    smoke_form_dialogs(&ui, &parent, form_size).await?;
                 }
                 3 => {
                     subscriptions::smoke_selection(&ui, 0, Some(1)).await?;
@@ -769,6 +772,102 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
         }
         current += 1;
     }
+}
+
+async fn smoke_form_dialogs(ui: &Rc<Ui>, path: &Path, size: (i32, i32)) -> Result<()> {
+    let app = ui.window.application().context("缺少应用")?;
+    for (file, title) in [
+        ("subscription-edit", "编辑订阅"),
+        ("rule-edit", "编辑规则"),
+        ("rule-import-local", "导入规则"),
+    ] {
+        let state = ui.service.snapshot();
+        match file {
+            "subscription-edit" => {
+                let mut item = state.subscriptions[0].clone();
+                item.source = "https://subscription.example.test/link".into();
+                editors::subscription(&ui.window, ui.service.clone(), item, ui.saved());
+            }
+            "rule-edit" => editors::ruleset(
+                &ui.window,
+                ui.service.clone(),
+                state.rulesets[0].clone(),
+                ui.saved(),
+            ),
+            _ => editors::ruleset(
+                &ui.window,
+                ui.service.clone(),
+                RuleSet::default(),
+                ui.saved(),
+            ),
+        }
+        let window = app
+            .windows()
+            .into_iter()
+            .find(|window| window.title().as_deref() == Some(title))
+            .with_context(|| format!("{title}未打开"))?;
+        screenshot(&window, &path.join(format!("{file}.png"))).await?;
+        anyhow::ensure!(
+            (window.width(), window.height()) == size,
+            "{title}尺寸与导入订阅不同: {}x{} / {}x{}",
+            window.width(),
+            window.height(),
+            size.0,
+            size.1
+        );
+        let widgets = descendants(&window);
+        let form = widgets
+            .iter()
+            .find(|widget| widget.has_css_class("dialog-form"))
+            .context("缺少表单容器")?;
+        let bounds = form.compute_bounds(&window).context("表单未布局")?;
+        anyhow::ensure!(
+            bounds.x() >= 19.0 && bounds.x() + bounds.width() <= window.width() as f32 - 19.0,
+            "{title}表单越过统一边距"
+        );
+        if title == "编辑订阅" {
+            let toggle = widgets
+                .iter()
+                .find_map(|widget| widget.downcast_ref::<adw::SwitchRow>())
+                .context("订阅设置缺少自动更新")?;
+            let interval = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Entry>())
+                .find(|entry| entry.placeholder_text().as_deref() == Some("更新间隔（分钟）"))
+                .context("订阅设置缺少更新间隔")?;
+            toggle.set_active(false);
+            anyhow::ensure!(
+                !interval.parent().unwrap().is_visible(),
+                "关闭更新后仍显示间隔"
+            );
+            toggle.set_active(true);
+            anyhow::ensure!(
+                interval.parent().unwrap().is_visible(),
+                "开启更新后未显示间隔"
+            );
+        }
+        let source_schemes: Vec<_> = widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<sourceview::View>())
+            .filter_map(|view| view.buffer().downcast::<sourceview::Buffer>().ok())
+            .map(|buffer| {
+                let scheme = buffer.style_scheme().map(|scheme| scheme.id());
+                (buffer, scheme)
+            })
+            .collect();
+        apply_theme("dark");
+        for (buffer, previous) in source_schemes {
+            anyhow::ensure!(
+                buffer.style_scheme().map(|scheme| scheme.id()) != previous,
+                "{title}源码配色未跟随深色模式"
+            );
+        }
+        screenshot(&window, &path.join(format!("{file}-dark.png"))).await?;
+        anyhow::ensure!(window.has_css_class("dark"), "{title}未跟随深色模式");
+        window.close();
+        apply_theme("light");
+    }
+    Ok(())
 }
 
 async fn smoke_resize_boundaries(ui: &Rc<Ui>) -> Result<()> {

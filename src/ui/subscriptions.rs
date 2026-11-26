@@ -363,22 +363,16 @@ impl Ui {
             "导入订阅",
             "导入",
             "document-save-symbolic",
-            560,
-            540,
+            DialogLayout::Form,
         );
         let window = dialog.window;
         let root = dialog.root;
         root.add_css_class("import-dialog");
         let import = dialog.action;
         import.set_widget_name("subscription-import-save");
-        let form = gtk::Box::new(gtk::Orientation::Vertical, 16);
-        form.add_css_class("dialog-form");
-        form.set_valign(gtk::Align::Start);
-        form.set_margin_start(20);
-        form.set_margin_end(20);
-        form.set_margin_top(16);
-        form.set_margin_bottom(20);
+        let (form_scroll, form) = dialog_form();
         let basic = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        basic.add_css_class("dialog-fields");
         form.append(&basic);
         let name = LabeledEntry::new("名称（可选）", "");
         name.entry.set_placeholder_text(Some("留空时自动识别"));
@@ -419,28 +413,8 @@ impl Ui {
         hint.add_css_class("muted");
         hint.add_css_class("small");
         form.append(&hint);
-        let auto_update = switch_row("自动更新", "", true);
-        let interval = number_entry(
-            "更新间隔（分钟）",
-            &model::UPDATE_INTERVAL_DEFAULT_MINUTES.to_string(),
-        );
-        let interval_toggle = interval.root.downgrade();
-        auto_update.connect_active_notify(move |row| {
-            if let Some(interval) = interval_toggle.upgrade() {
-                interval.set_visible(row.is_active() && row.is_sensitive());
-            }
-        });
-        let interval_toggle = interval.root.downgrade();
-        auto_update.connect_sensitive_notify(move |row| {
-            if let Some(interval) = interval_toggle.upgrade() {
-                interval.set_visible(row.is_active() && row.is_sensitive());
-            }
-        });
-        let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        let update_group = adw::PreferencesGroup::new();
-        update_group.add(&auto_update);
-        updates.append(&update_group);
-        updates.append(&interval.root);
+        let (updates, auto_update, interval) =
+            update_controls(true, model::UPDATE_INTERVAL_DEFAULT_MINUTES);
         form.append(&updates);
         let error = gtk::Label::builder()
             .wrap(true)
@@ -452,11 +426,6 @@ impl Ui {
         error.add_css_class("error");
         error.add_css_class("dialog-error");
         form.append(&error);
-        let form_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
-            .child(&form)
-            .build();
         root.append(&form_scroll);
         let busy = Rc::new(Cell::new(false));
         let buffer = source.buffer();
@@ -612,6 +581,33 @@ impl Ui {
         });
         window.present();
     }
+}
+
+pub(super) fn update_controls(
+    active: bool,
+    minutes: u32,
+) -> (gtk::Box, adw::SwitchRow, LabeledEntry) {
+    let toggle = switch_row("自动更新", "", active);
+    let interval = number_entry("更新间隔（分钟）", &minutes.to_string());
+    interval.root.set_visible(active);
+    let weak_interval = interval.root.downgrade();
+    toggle.connect_active_notify(move |row| {
+        if let Some(interval) = weak_interval.upgrade() {
+            interval.set_visible(row.is_active() && row.is_sensitive());
+        }
+    });
+    let weak_interval = interval.root.downgrade();
+    toggle.connect_sensitive_notify(move |row| {
+        if let Some(interval) = weak_interval.upgrade() {
+            interval.set_visible(row.is_active() && row.is_sensitive());
+        }
+    });
+    let group = adw::PreferencesGroup::new();
+    group.add(&toggle);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.append(&group);
+    root.append(&interval.root);
+    (root, toggle, interval)
 }
 
 fn format_timestamp(timestamp: u64, pattern: &str) -> String {

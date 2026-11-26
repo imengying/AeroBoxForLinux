@@ -560,16 +560,8 @@ impl Ui {
         done: impl FnOnce(&Rc<Self>, Result<T>) + 'static,
     ) {
         let original = button.child();
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let spinner = gtk::Spinner::new();
-        spinner.set_size_request(18, 18);
-        spinner.start();
-        content.append(&spinner);
-        if !button.has_css_class("floating-action") {
-            content.append(&label(busy, ""));
-        }
-        content.set_halign(gtk::Align::Center);
-        content.set_valign(gtk::Align::Center);
+        let (content, spinner) =
+            busy_content((!button.has_css_class("floating-action")).then_some(busy));
         button.set_child(Some(&content));
         button.set_sensitive(false);
         let weak_button = button.downgrade();
@@ -1334,15 +1326,30 @@ pub(super) struct DialogHeader {
     pub(super) action: gtk::Button,
 }
 
+#[derive(Clone, Copy)]
+enum DialogLayout {
+    Form,
+    Source,
+}
+
+impl DialogLayout {
+    fn size(self) -> (i32, i32) {
+        match self {
+            Self::Form => (560, 540),
+            Self::Source => (880, 740),
+        }
+    }
+}
+
 /// Shared window and actions for import forms and source editors.
 fn dialog_header(
     parent: &impl IsA<gtk::Window>,
     title: &str,
     action_title: &str,
     action_icon: &str,
-    width: i32,
-    height: i32,
+    layout: DialogLayout,
 ) -> DialogHeader {
+    let (width, height) = layout.size();
     let window = adw::Window::builder()
         .title(title)
         .transient_for(parent)
@@ -1387,6 +1394,19 @@ fn dialog_header(
     }
 }
 
+fn dialog_form() -> (gtk::ScrolledWindow, gtk::Box) {
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    form.add_css_class("dialog-form");
+    form.set_valign(gtk::Align::Start);
+    margin(&form, 20, 20, 16, 20);
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&form)
+        .build();
+    (scroll, form)
+}
+
 fn action_content(icon: &str, title: &str) -> gtk::Box {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
     content.set_halign(gtk::Align::Center);
@@ -1396,6 +1416,19 @@ fn action_content(icon: &str, title: &str) -> gtk::Box {
     let text = label(title, "");
     content.append(&text);
     content
+}
+
+fn busy_content(title: Option<&str>) -> (gtk::Box, gtk::Spinner) {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let spinner = gtk::Spinner::builder().spinning(true).build();
+    spinner.set_size_request(18, 18);
+    content.append(&spinner);
+    if let Some(title) = title {
+        content.append(&label(title, ""));
+    }
+    content.set_halign(gtk::Align::Center);
+    content.set_valign(gtk::Align::Center);
+    (content, spinner)
 }
 
 fn update_action(button: &gtk::Button, icon: &str, title: &str) {

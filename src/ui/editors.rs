@@ -17,8 +17,13 @@ struct EditorWindow {
 }
 
 impl EditorWindow {
-    fn new(parent: &impl IsA<gtk::Window>, title: &str, subtitle: &str) -> Self {
-        let dialog = dialog_header(parent, title, "保存", "object-select-symbolic", 880, 740);
+    fn new(
+        parent: &impl IsA<gtk::Window>,
+        title: &str,
+        subtitle: &str,
+        layout: DialogLayout,
+    ) -> Self {
+        let dialog = dialog_header(parent, title, "保存", "object-select-symbolic", layout);
         let window = dialog.window;
         let root = dialog.root;
         let cancel = dialog.cancel;
@@ -41,8 +46,8 @@ impl EditorWindow {
         let error = gtk::Label::builder()
             .wrap(true)
             .xalign(0.0)
-            .margin_start(24)
-            .margin_end(24)
+            .margin_start(20)
+            .margin_end(20)
             .margin_top(8)
             .margin_bottom(16)
             .selectable(true)
@@ -71,39 +76,6 @@ fn explain(text: &str) -> gtk::Label {
         .build();
     label.add_css_class("dim-label");
     label
-}
-fn form_page() -> (gtk::ScrolledWindow, gtk::Box) {
-    let form = gtk::Box::new(gtk::Orientation::Vertical, 20);
-    form.add_css_class("dialog-form");
-    form.set_valign(gtk::Align::Start);
-    form.set_margin_top(16);
-    form.set_margin_bottom(24);
-    form.set_margin_start(24);
-    form.set_margin_end(24);
-    let clamp = adw::Clamp::builder()
-        .maximum_size(740)
-        .tightening_threshold(600)
-        .child(&form)
-        .build();
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&clamp)
-        .build();
-    (scroll, form)
-}
-fn group(title: &str, description: &str) -> adw::PreferencesGroup {
-    adw::PreferencesGroup::builder()
-        .title(title)
-        .description(description)
-        .build()
-}
-fn switch(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
-    adw::SwitchRow::builder()
-        .title(title)
-        .subtitle(subtitle)
-        .active(active)
-        .build()
 }
 fn show_error(label: &gtk::Label, error: impl std::fmt::Display) {
     label.set_text(&format!("{error:#}"));
@@ -137,10 +109,7 @@ struct SourceEditor {
 impl SourceEditor {
     fn new(text: &str, language: &str, editable: bool, hint: &str) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        root.set_margin_top(16);
-        root.set_margin_bottom(24);
-        root.set_margin_start(24);
-        root.set_margin_end(24);
+        margin(&root, 20, 20, 16, 20);
         root.set_vexpand(true);
         if !hint.is_empty() {
             root.append(&explain(hint));
@@ -149,12 +118,20 @@ impl SourceEditor {
         buffer.set_text(text);
         let language = sourceview::LanguageManager::default().language(language);
         buffer.set_language(language.as_ref());
-        let manager = sourceview::StyleSchemeManager::default();
-        let dark = adw::StyleManager::default().is_dark();
-        let scheme = manager
-            .scheme(if dark { "Adwaita-dark" } else { "Adwaita" })
-            .or_else(|| manager.scheme(if dark { "oblivion" } else { "classic" }));
-        buffer.set_style_scheme(scheme.as_ref());
+        let manager = adw::StyleManager::default();
+        source_theme(&buffer, manager.is_dark());
+        let weak = buffer.downgrade();
+        let handler = manager.connect_dark_notify(move |manager| {
+            if let Some(buffer) = weak.upgrade() {
+                source_theme(&buffer, manager.is_dark());
+            }
+        });
+        let handler = RefCell::new(Some(handler));
+        root.connect_destroy(move |_| {
+            if let Some(handler) = handler.borrow_mut().take() {
+                manager.disconnect(handler);
+            }
+        });
         let view = sourceview::View::with_buffer(&buffer);
         view.set_monospace(true);
         view.set_editable(editable);
@@ -183,6 +160,14 @@ impl SourceEditor {
     }
 }
 
+fn source_theme(buffer: &sourceview::Buffer, dark: bool) {
+    let manager = sourceview::StyleSchemeManager::default();
+    let scheme = manager
+        .scheme(if dark { "Adwaita-dark" } else { "Adwaita" })
+        .or_else(|| manager.scheme(if dark { "oblivion" } else { "classic" }));
+    buffer.set_style_scheme(scheme.as_ref());
+}
+
 /// Common fields update only the fields the user actually changed. The full JSON
 /// remains authoritative for every other field, including unknown core options.
 pub fn subscription(
@@ -191,8 +176,8 @@ pub fn subscription(
     item: Subscription,
     on_saved: Saved,
 ) {
-    let editor = EditorWindow::new(parent, "编辑订阅", "");
-    let (scroll, form) = form_page();
+    let editor = EditorWindow::new(parent, "编辑订阅", "", DialogLayout::Form);
+    let (scroll, form) = dialog_form();
     let fields = gtk::Box::new(gtk::Orientation::Vertical, 0);
     fields.add_css_class("dialog-fields");
     let name = LabeledEntry::new("名称", &item.name);
@@ -218,25 +203,14 @@ pub fn subscription(
     fields.append(&name.root);
     fields.append(&source.root);
     form.append(&fields);
-    let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    updates.set_visible(!item.source.is_empty());
-    let update_group = group("更新设置", "");
-    let auto_update = switch("自动更新", "", item.auto_update);
-    let interval = number_entry(
-        "更新间隔（分钟）",
-        &item.update_interval_minutes.to_string(),
-    );
-    interval.root.set_sensitive(item.auto_update);
-    let interval_toggle = interval.root.clone();
-    auto_update.connect_active_notify(move |row| interval_toggle.set_sensitive(row.is_active()));
-    update_group.add(&auto_update);
-    updates.append(&update_group);
-    updates.append(&interval.root);
+    let (updates, auto_update, interval) =
+        subscriptions::update_controls(item.auto_update, item.update_interval_minutes);
+    auto_update.set_sensitive(!item.source.trim().is_empty());
     form.append(&updates);
-    let updates = updates.downgrade();
+    let toggle = auto_update.downgrade();
     source.entry.connect_changed(move |source| {
-        if let Some(updates) = updates.upgrade() {
-            updates.set_visible(!source.text().trim().is_empty());
+        if let Some(toggle) = toggle.upgrade() {
+            toggle.set_sensitive(!source.text().trim().is_empty());
         }
     });
     let edit_nodes = toolbar_action("编辑节点数据");
@@ -274,10 +248,7 @@ pub fn subscription(
         }
         error.set_visible(false);
         let original_button = button.child();
-        let spinner = gtk::Spinner::builder().spinning(true).build();
-        let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        progress.append(&spinner);
-        progress.append(&gtk::Label::new(Some("保存中…")));
+        let (progress, spinner) = busy_content(Some("保存中…"));
         button.set_child(Some(&progress));
         button.set_sensitive(false);
         if let Some(cancel) = cancel.upgrade() {
@@ -290,8 +261,12 @@ pub fn subscription(
         let original = item.clone();
         let name = name.text().trim().to_owned();
         let input = source.text().trim().to_owned();
-        let auto_update = auto_update.is_active();
-        let update_interval_minutes = interval.text().trim().parse().unwrap_or(0);
+        let auto_update = auto_update.is_active() && !input.is_empty();
+        let update_interval_minutes = if auto_update {
+            interval.text().trim().parse().unwrap_or(0)
+        } else {
+            original.update_interval_minutes
+        };
         let saving = saving.clone();
         let button = button.downgrade();
         let (tx, rx) = mpsc::channel();
@@ -415,10 +390,7 @@ pub fn ruleset(
             "编辑规则"
         },
         "",
-    );
-    editor.window.set_default_size(
-        if is_new { 560 } else { 880 },
-        if is_new { 570 } else { 740 },
+        DialogLayout::Form,
     );
     if is_new {
         editor.save.set_widget_name("rule-import-save");
@@ -427,7 +399,7 @@ pub fn ruleset(
     let stack = tabs(&editor.body);
     let switcher = stack.prev_sibling().expect("editor tabs");
     stack.set_widget_name("ruleset-tabs");
-    let (scroll, form) = form_page();
+    let (scroll, form) = dialog_form();
     let name = LabeledEntry::new("名称", &item.name);
     name.entry.set_widget_name("rule-name");
     let source = LabeledEntry::new("规则链接或本地文件", &item.source);
@@ -438,8 +410,8 @@ pub fn ruleset(
     source_section.append(&source.root);
     form.append(&source_section);
     let updates = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    let format_group = group("来源与格式", "");
-    let options = group("规则选项", "");
+    let format_group = adw::PreferencesGroup::new();
+    let options = adw::PreferencesGroup::new();
     let interval = number_entry(
         "自动更新间隔（分钟）",
         &item.update_interval_minutes.to_string(),
@@ -466,7 +438,7 @@ pub fn ruleset(
                 .unwrap_or(0) as u32,
         )
         .build();
-    let enabled = switch("启用", "", item.enabled);
+    let enabled = switch_row("启用", "", item.enabled);
     options.add(&action);
     options.add(&enabled);
     form.append(&options);
@@ -474,8 +446,8 @@ pub fn ruleset(
     let content = SourceEditor::new(&model::pretty(&item.content), "json", true, "");
     let rules = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let quick = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    quick.set_margin_start(24);
-    quick.set_margin_end(24);
+    quick.set_margin_start(20);
+    quick.set_margin_end(20);
     let kinds = [
         "domain",
         "domain_suffix",
@@ -596,15 +568,11 @@ pub fn ruleset(
                 error.set_visible(false);
                 button.set_sensitive(false);
                 let original = button.child();
-                let spinner = gtk::Spinner::new();
-                spinner.start();
-                let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                progress.append(&spinner);
-                progress.append(&gtk::Label::new(Some(if is_new {
+                let (progress, spinner) = busy_content(Some(if is_new {
                     "导入中…"
                 } else {
                     "保存中…"
-                })));
+                }));
                 button.set_child(Some(&progress));
                 if let Some(cancel) = cancel.upgrade() {
                     cancel.set_sensitive(false);
@@ -702,6 +670,7 @@ pub fn code(
         } else {
             "只读预览"
         },
+        DialogLayout::Source,
     );
     let source = SourceEditor::new(text, language, on_save.is_some(), "");
     editor.body.append(&source.root);
@@ -717,10 +686,7 @@ pub fn code(
             }
             err.set_visible(false);
             let original = button.child();
-            let progress = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let spinner = gtk::Spinner::builder().spinning(true).build();
-            progress.append(&spinner);
-            progress.append(&gtk::Label::new(Some("保存中…")));
+            let (progress, spinner) = busy_content(Some("保存中…"));
             button.set_child(Some(&progress));
             button.set_sensitive(false);
             if let Some(cancel) = cancel.upgrade() {
@@ -810,7 +776,12 @@ pub fn rule_content(
         );
         return;
     }
-    let editor = EditorWindow::new(parent, &format!("{} · 规则", item.name), "");
+    let editor = EditorWindow::new(
+        parent,
+        &format!("{} · 规则", item.name),
+        "",
+        DialogLayout::Source,
+    );
     editor.save.set_sensitive(false);
     let loading = gtk::Spinner::builder()
         .spinning(true)
@@ -862,7 +833,8 @@ pub fn rule_content(
                             }
                             let original = button.child();
                             button.set_sensitive(false);
-                            button.set_label("保存中…");
+                            let (progress, spinner) = busy_content(Some("保存中…"));
+                            button.set_child(Some(&progress));
                             cancel.set_sensitive(false);
                             source.root.set_sensitive(false);
                             saving.set(true);
@@ -896,6 +868,7 @@ pub fn rule_content(
                                     return glib::ControlFlow::Break;
                                 };
                                 saving.set(false);
+                                spinner.stop();
                                 if let Some(button) = button.upgrade() {
                                     button.set_sensitive(true);
                                     button.set_child(original.as_ref());
