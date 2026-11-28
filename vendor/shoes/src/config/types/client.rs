@@ -240,6 +240,8 @@ pub struct ClientRecord<P> {
         skip_serializing_if = "crate::dial_options::DialOptions::is_default"
     )]
     pub dial_options: crate::dial_options::DialOptions,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub tcp_enabled: bool,
     pub protocol: P,
     #[serde(default, skip_serializing_if = "Transport::is_default")]
     pub transport: Transport,
@@ -273,6 +275,8 @@ impl<'de> Deserialize<'de> for ClientConfig {
             connect_timeout_ms: Option<std::num::NonZeroU32>,
             #[serde(default)]
             dial_options: crate::dial_options::DialOptions,
+            #[serde(default = "default_true")]
+            tcp_enabled: bool,
             protocol: ClientProxyConfig,
             #[serde(default, deserialize_with = "explicit_transport")]
             transport: Option<Transport>,
@@ -299,6 +303,7 @@ impl<'de> Deserialize<'de> for ClientConfig {
             domain_resolver: fields.domain_resolver,
             connect_timeout_ms: fields.connect_timeout_ms,
             dial_options: fields.dial_options,
+            tcp_enabled: fields.tcp_enabled,
             protocol: fields.protocol,
             transport,
             tcp_settings: fields.tcp_settings,
@@ -317,6 +322,7 @@ impl Default for ClientConfig {
             domain_resolver: None,
             connect_timeout_ms: None,
             dial_options: Default::default(),
+            tcp_enabled: true,
             protocol: ClientProxyConfig::Direct,
             transport: Transport::default(),
             tcp_settings: None,
@@ -925,6 +931,7 @@ mod tests {
 
     fn create_test_client_config() -> ClientConfig {
         ClientConfig {
+            tcp_enabled: true,
             domain_resolver: None,
             connect_timeout_ms: None,
             dial_options: Default::default(),

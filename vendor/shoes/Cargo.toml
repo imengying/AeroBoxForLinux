@@ -156,7 +156,7 @@ memory-stats = "1.2.0"
 indexmap = "*"
 ipnetwork = { version = "0.21", features = ["serde"] }
 libc = "*"
-log = { version = "*", features = ["std", "release_max_level_info"] }
+log = { version = "*", features = ["std"] }
 lru = "*"
 md-5 = "*"
 memchr = "*"
@@ -197,7 +197,7 @@ tokio = { version = "*", features = [
     "time",
 ] }
 tokio-util = { version = "*", features = ["time", "io", "rt", "compat"] }
-tracing = { version = "0.1", default-features = false, features = ["release_max_level_info"] }
+tracing = { version = "0.1", default-features = false }
 tun = { version = "*", features = ["async"] }
 url = "*"
 uuid = "1"

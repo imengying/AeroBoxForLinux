@@ -68,7 +68,6 @@ fn exit_detection_waits_for_cold_proxy_setup_and_respects_disabled_ipv6() {
     let result = detect_with_endpoints(
         &client,
         false,
-        true,
         &["https://exit.example.test/"],
         &[&ipv6_endpoint],
         EXIT_TOTAL_TIMEOUT,
@@ -78,7 +77,6 @@ fn exit_detection_waits_for_cold_proxy_setup_and_respects_disabled_ipv6() {
     let result = result.unwrap();
     assert_eq!(result.ipv4.as_deref(), Some("203.0.113.7"));
     assert!(result.ipv6.is_none());
-    assert!(result.via_proxy);
     assert_eq!(
         unused.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -168,7 +166,6 @@ fn exit_detection_falls_back_only_when_needed_and_respects_family_and_body_limit
     let result = detect_with_endpoints(
         &client,
         false,
-        false,
         &endpoints,
         &[&v6],
         Duration::from_secs(2),
@@ -181,7 +178,6 @@ fn exit_detection_falls_back_only_when_needed_and_respects_family_and_body_limit
     let result = detect_with_endpoints(
         &client,
         true,
-        false,
         &[&v6],
         &[&v6],
         Duration::from_secs(2),
@@ -194,7 +190,6 @@ fn exit_detection_falls_back_only_when_needed_and_respects_family_and_body_limit
     assert!(
         detect_with_endpoints(
             &client,
-            false,
             false,
             &[&probes.url("/bad")],
             &[&v6],
@@ -214,7 +209,6 @@ fn exit_detection_has_one_total_deadline_and_keeps_a_failed_proxy_route() {
         detect_with_endpoints(
             &client,
             false,
-            false,
             &[&probes.url("/slow"), &probes.url("/v4")],
             &[&probes.url("/v6")],
             Duration::from_millis(50),
@@ -231,7 +225,6 @@ fn exit_detection_has_one_total_deadline_and_keeps_a_failed_proxy_route() {
         detect_with_endpoints(
             &client,
             false,
-            true,
             &[&probes.url("/v4")],
             &[],
             Duration::from_secs(1),
@@ -269,7 +262,6 @@ fn exit_detection_publishes_ipv4_before_slow_ipv6_and_keeps_both_addresses() {
     let result = detect_with_endpoints(
         &exit_client(None).unwrap(),
         true,
-        false,
         &[&ipv4.url("/v4")],
         &[&v6],
         Duration::from_secs(3),

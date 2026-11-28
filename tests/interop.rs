@@ -1,5 +1,6 @@
 //! Optional interoperability against an independently implemented local server.
-//! Run with AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored.
+//! Set AEROBOX_TEST_PEER (sing-box) and AEROBOX_TEST_XRAY (Xray), then run
+//! cargo test --test interop -- --ignored.
 //! The application and ordinary test suite never invoke this executable.
 mod support;
 #[path = "support/udp_policy.rs"]
@@ -29,13 +30,28 @@ struct Peer {
 }
 impl Peer {
     fn start(executable: &Path, dir: &Path, config: &serde_json::Value, ready: u16) -> Self {
+        Self::start_with_args(
+            executable,
+            dir,
+            config,
+            ready,
+            &["run", "--disable-color", "-c"],
+        )
+    }
+    fn start_with_args(
+        executable: &Path,
+        dir: &Path,
+        config: &serde_json::Value,
+        ready: u16,
+        args: &[&str],
+    ) -> Self {
         let config_path = dir.join("peer.json");
         let log = dir.join("peer.log");
         fs::write(&config_path, serde_json::to_vec_pretty(config).unwrap()).unwrap();
         let output = fs::File::create(&log).unwrap();
         let mut peer = Self {
             child: Command::new(executable)
-                .args(["run", "--disable-color", "-c"])
+                .args(args)
                 .arg(&config_path)
                 .current_dir(dir)
                 .stdin(Stdio::null())
@@ -832,5 +848,137 @@ fn subscription_transports_exchange_payload_with_an_independent_server() {
         let _released =
             std::net::TcpListener::bind(("127.0.0.1", app.service.local_proxy_port())).unwrap();
         eprintln!("independent peer: {name} TCP payload and UDP policy passed");
+    }
+}
+
+#[test]
+#[ignore = "requires an independent Xray server in AEROBOX_TEST_XRAY"]
+fn xhttp_subscriptions_reach_xray_through_application_start_and_selection() {
+    let _serial = support::runtime_lock();
+    let executable =
+        PathBuf::from(std::env::var_os("AEROBOX_TEST_XRAY").expect("set AEROBOX_TEST_XRAY"))
+            .canonicalize()
+            .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<_> = std::iter::once("localhost".to_owned())
+        .chain((0..32).map(|i| format!("xhttp-{i}.test")))
+        .collect();
+    let certified = rcgen::generate_simple_self_signed(names).unwrap();
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    fs::write(&cert, certified.cert.pem()).unwrap();
+    fs::write(&key, certified.signing_key.serialize_pem()).unwrap();
+    let mut target_tls =
+        rustls::ServerConfig::builder_with_provider(aerobox_crypto::shared_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certified.cert.der().clone()],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der())
+                    .into(),
+            )
+            .unwrap();
+    target_tls.alpn_protocols = vec![b"h2".to_vec()];
+    target_tls.send_tls13_tickets = 0;
+    let target_tls = Arc::new(target_tls);
+    let reality_target = support::Server::spawn(move |socket| {
+        let session = rustls::ServerConnection::new(target_tls.clone()).unwrap();
+        let mut stream = rustls::StreamOwned::new(session, socket);
+        // REALITY reads the target's TLS flight, then closes its cover connection.
+        let _ = stream.read(&mut [0; 1]);
+    });
+    let keys = Command::new(&executable).arg("x25519").output().unwrap();
+    assert!(keys.status.success());
+    let keys = String::from_utf8(keys.stdout).unwrap();
+    let key_value = |name: &str| {
+        keys.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let private_key = key_value("PrivateKey:");
+    let public_key = key_value("Password (PublicKey):");
+    let (origin, _) = support::http(vec![b'x'; 65537]);
+    for (version, alpn, fingerprint) in [
+        ("h1", "http/1.1", "firefox"),
+        ("h2", "h2", "firefox"),
+        ("h3", "h3", "firefox"),
+        ("reality", "h2", "firefox"),
+        ("reality", "h2", "chrome"),
+    ] {
+        for mode in ["packet-up", "stream-up", "stream-one", "auto"] {
+            let port = support::free_port();
+            let ready = support::free_port();
+            let mut stream = json!({"network":"xhttp","security":"tls","tlsSettings":{"alpn":[alpn],"certificates":[{"certificateFile":cert,"keyFile":key}]},
+                "xhttpSettings":{"path":"/aerobox","mode":mode,"extra":{"scMaxEachPostBytes":32768}}});
+            let mut uri =
+                url::Url::parse(&format!("vless://{UUID}@127.0.0.1:{port}#XHTTP")).unwrap();
+            uri.query_pairs_mut().extend_pairs([
+                ("type", "xhttp"),
+                ("path", "/aerobox"),
+                ("mode", mode),
+                ("sni", "localhost"),
+                ("alpn", alpn),
+                ("fp", fingerprint),
+            ]);
+            if version == "reality" {
+                stream.as_object_mut().unwrap().remove("tlsSettings");
+                stream["security"] = "reality".into();
+                stream["realitySettings"] = json!({"target":reality_target.address.to_string(),"serverNames":["localhost"],"privateKey":private_key,"shortIds":["0123456789abcdef"]});
+                uri.query_pairs_mut().extend_pairs([
+                    ("security", "reality"),
+                    ("pbk", &public_key),
+                    ("sid", "0123456789abcdef"),
+                ]);
+            } else {
+                uri.query_pairs_mut().append_pair("security", "tls");
+            }
+            let config = json!({"log":{"loglevel":"warning"},"inbounds":[
+                {"listen":"127.0.0.1","port":port,"protocol":"vless","settings":{"clients":[{"id":UUID}],"decryption":"none"},"streamSettings":stream},
+                {"listen":"127.0.0.1","port":ready,"protocol":"socks","settings":{"auth":"noauth"}}],
+                "outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"allow","ip":["127.0.0.1"]}]}}]});
+            let peer =
+                Peer::start_with_args(&executable, dir.path(), &config, ready, &["run", "-config"]);
+            let mut node = aerobox_for_linux::subscription::parse(uri.as_str())
+                .unwrap()
+                .remove(0);
+            if version != "reality" {
+                node["tls"]["certificate"] = certified.cert.pem().into();
+            }
+            node["transport"]["sc_max_each_post_bytes"] = 32768.into();
+            node["transport"]["sc_min_posts_interval_ms"] = 1.into();
+            let app = App::new();
+            app.import("XHTTP", vec![node]);
+            app.service
+                .start()
+                .unwrap_or_else(|error| panic!("{version}/{mode}: {error:#}\n{}", peer.logs()));
+            let port = app.service.local_proxy_port();
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}")).unwrap())
+                .timeout(Duration::from_secs(8))
+                .build()
+                .unwrap();
+            for _ in 0..2 {
+                let body = client
+                    .get(format!("http://{}/xray", origin.address))
+                    .send()
+                    .and_then(|r| r.bytes())
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{version}/{mode}/{fingerprint}: {error:?}\n{}\n{}",
+                            app.service.logs(),
+                            peer.logs()
+                        )
+                    });
+                assert_eq!(body.as_ref(), vec![b'x'; 65537]);
+                support::udp_roundtrip(port).unwrap_or_else(|error| {
+                    panic!("{version}/{mode} UDP: {error}\n{}", peer.logs())
+                });
+            }
+            app.service.stop().unwrap();
+        }
     }
 }

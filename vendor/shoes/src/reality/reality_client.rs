@@ -20,20 +20,13 @@ pub struct RealityClientConfig {
 
 impl RealityClientConfig {
     pub fn create_connection(self) -> io::Result<TlsConnection> {
-        let mut crypto =
+        let crypto =
             if self.client_fingerprint == Some(crate::config::tls::TlsClientFingerprint::Chrome) {
                 crate::rustls_config_util::browser::validate_reality_suites(&self.cipher_suites)?;
                 crate::rustls_config_util::browser::provider()
             } else {
                 provider(&self.cipher_suites)
             };
-        if self.client_fingerprint.is_some() {
-            // sing-box removes ML-KEM from its REALITY browser handshake:
-            // authentication and the target TLS exchange must use X25519.
-            crypto
-                .kx_groups
-                .retain(|group| group.name() != rustls::NamedGroup::X25519MLKEM768);
-        }
         let schemes = crypto.signature_verification_algorithms.supported_schemes();
         self.create_connection_with_options(crypto, schemes, Arc::new(rustls::NoKeyLog {}))
     }
@@ -70,6 +63,12 @@ impl RealityClientConfig {
             }
             Some(crate::config::tls::TlsClientFingerprint::Firefox) => {
                 tls.client_hello_profile = Some(rustls::client::ClientHelloProfile::Firefox);
+                // REALITY authenticates with the independent X25519 exchange;
+                // the target may negotiate either offered group for TLS.
+                tls.initial_key_share_groups = vec![
+                    rustls::NamedGroup::X25519MLKEM768,
+                    rustls::NamedGroup::X25519,
+                ];
             }
             None => {}
         }

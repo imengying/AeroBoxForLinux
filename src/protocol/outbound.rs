@@ -47,13 +47,18 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
     }
     f.copy("bind_interface", &mut client, "bind_interface");
     f.copy("domain_resolver", &mut client, "domain_resolver");
-    let udp = match f.string("network")?.as_deref() {
+    let network = f.string("network")?;
+    let udp = match network.as_deref() {
         None | Some("") | Some("tcp,udp") | Some("udp,tcp") => true,
         Some("tcp") => false,
+        Some("udp") => {
+            client["tcp_enabled"] = false.into();
+            true
+        }
         Some(_) => {
             return Err(error(
                 format!("{path}.network"),
-                "UDP-only policy needs an explicit routing network rule",
+                "expected tcp, udp or tcp,udp",
             ));
         }
     };
@@ -291,6 +296,51 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                 for key in ["path", "headers"] {
                     f.copy(key, &mut settings, key);
                 }
+                let h1_options = settings["path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                    || settings["headers"].as_object().is_some_and(|headers| {
+                        headers.keys().any(|name| name.eq_ignore_ascii_case("host"))
+                    });
+                let tls = f
+                    .values
+                    .get("tls")
+                    .is_some_and(|tls| tls["enabled"] == true);
+                let version = f.take("version").unwrap_or(json!(0));
+                let version = match version.as_u64() {
+                    Some(0) => {
+                        if h1_options || !tls {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    Some(version @ (1 | 2)) => version,
+                    _ => {
+                        return Err(error(
+                            format!("{path}.version"),
+                            "expected HTTP version 1 or 2",
+                        ));
+                    }
+                };
+                if version != 1 && h1_options {
+                    return Err(error(
+                        path,
+                        "HTTP/2 CONNECT cannot carry a path or Host header",
+                    ));
+                }
+                let disable_fallback = f.boolean("disable_version_fallback", false)?;
+                settings["alpn_fallback"] = (version == 2 && tls && !disable_fallback).into();
+                p["http_version"] = if version == 1 { "h1" } else { "h2" }.into();
+                for (key, target) in [
+                    ("idle_timeout", "idle_timeout_ms"),
+                    ("ping_timeout", "ping_timeout_ms"),
+                ] {
+                    if let Some(value) = f.take(key).filter(|value| value != "") {
+                        settings[target] =
+                            parse_duration_millis(value, &format!("{path}.{key}"))?.into();
+                    }
+                }
                 p["settings"] = settings;
             }
             p
@@ -370,7 +420,7 @@ pub fn convert_outbound(value: Value, path: &str) -> Result<Value> {
                 "VLESS Vision requires TCP without an additional stream transport",
             ));
         }
-        let (wrapped, quic) = transport(v, protocol, has_tls, path)?;
+        let (wrapped, quic) = transport(v, protocol, tls.as_ref(), path)?;
         protocol = wrapped;
         quic_transport |= quic;
     }
@@ -590,9 +640,18 @@ fn packet_encoding(f: &mut Fields, default_xudp: bool) -> Result<String> {
     }
     Ok(encoding)
 }
-fn transport(value: Value, protocol: Value, tls: bool, path: &str) -> Result<(Value, bool)> {
+fn transport(
+    value: Value,
+    protocol: Value,
+    tls: Option<&Value>,
+    path: &str,
+) -> Result<(Value, bool)> {
     let mut f = Fields::new(value, &format!("{path}.transport"))?;
     let kind = f.text("type")?;
+    if kind == "xhttp" {
+        return super::xhttp::convert(f, protocol, tls, path);
+    }
+    let tls = tls.is_some_and(|tls| tls["enabled"] == true);
     if kind == "quic" {
         if !tls {
             return Err(error(&f.path, "QUIC requires TLS"));

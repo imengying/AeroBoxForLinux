@@ -35,8 +35,8 @@ pub const UPDATE_INTERVAL_MAX_MINUTES: u32 = 10_080;
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub theme: String,
-    /// Base UI font size in points. Row heights and paddings derive from it,
-    /// so text and layout scale together instead of only the glyphs.
+    /// Base UI font size in points. Zero follows the desktop's font size;
+    /// explicit values scale rows and padding with the text.
     pub font_size: u32,
     pub active_subscription: String,
     pub system_proxy: bool,
@@ -61,7 +61,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "system".into(),
-            font_size: 11,
+            font_size: 0,
             active_subscription: String::new(),
             system_proxy: true,
             routing_mode: "rule".into(),
@@ -101,8 +101,8 @@ impl Settings {
             "无效的主题"
         );
         ensure!(
-            (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
-            "字体大小须在 {FONT_SIZE_MIN} 到 {FONT_SIZE_MAX} 之间"
+            self.font_size == 0 || (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&self.font_size),
+            "字体大小须跟随系统，或在 {FONT_SIZE_MIN} 到 {FONT_SIZE_MAX} 之间"
         );
         ensure!(
             matches!(self.routing_mode.as_str(), "rule" | "global"),
@@ -603,7 +603,7 @@ mod tests {
         assert!(
             store
                 .update(|s| {
-                    s.settings.font_size = 0;
+                    s.settings.font_size = FONT_SIZE_MAX + 1;
                     Ok(())
                 })
                 .is_err()

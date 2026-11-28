@@ -1,5 +1,3 @@
-use anyhow::{Context, Result, ensure};
-use serde_json::Value;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -7,21 +5,6 @@ pub struct Counters {
     pub download: u64,
     pub upload: u64,
     pub connections: usize,
-}
-
-impl Counters {
-    pub fn from_api(value: &Value) -> Result<Self> {
-        let connections = value.get("connections").context("缺少连接统计")?;
-        ensure!(
-            connections.is_null() || connections.is_array(),
-            "连接统计格式无效"
-        );
-        Ok(Self {
-            download: value["downloadTotal"].as_u64().context("缺少下载统计")?,
-            upload: value["uploadTotal"].as_u64().context("缺少上传统计")?,
-            connections: connections.as_array().map_or(0, Vec::len),
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,31 +47,7 @@ impl RateMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::time::Duration;
-
-    #[test]
-    fn parses_totals_including_closed_connections_and_null_connection_list() {
-        let result = Counters::from_api(
-            &json!({"downloadTotal":4096,"uploadTotal":1024,"connections":[{"download":8}]}),
-        )
-        .unwrap();
-        assert_eq!(
-            (result.download, result.upload, result.connections),
-            (4096, 1024, 1)
-        );
-        assert_eq!(
-            Counters::from_api(&json!({"downloadTotal":0,"uploadTotal":0,"connections":null}))
-                .unwrap()
-                .connections,
-            0
-        );
-        assert!(Counters::from_api(&json!({"message":"unavailable"})).is_err());
-        assert!(
-            Counters::from_api(&json!({"downloadTotal":0,"uploadTotal":0,"connections":{}}))
-                .is_err()
-        );
-    }
 
     #[test]
     fn rates_use_elapsed_time_and_begin_with_a_baseline() {

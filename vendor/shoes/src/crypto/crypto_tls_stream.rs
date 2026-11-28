@@ -712,6 +712,9 @@ impl<IO: AsyncStream> AsyncPing for CryptoTlsStream<IO> {
 }
 
 impl<IO: AsyncStream> AsyncStream for CryptoTlsStream<IO> {
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        self.alpn_protocol()
+    }
     fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.io.local_addr()
     }

@@ -636,10 +636,30 @@ pub struct HttpClientOptions {
     pub path: String,
     #[serde(default)]
     pub headers: crate::naiveproxy::options::Headers,
+    #[serde(default)]
+    pub alpn_fallback: bool,
+    #[serde(default)]
+    pub idle_timeout_ms: u32,
+    #[serde(default)]
+    pub ping_timeout_ms: u32,
 }
 impl HttpClientOptions {
     pub fn validate(&self, version: HttpVersion) -> std::io::Result<()> {
         let headers = self.headers.parsed()?;
+        if version == HttpVersion::H2 && headers.contains_key("host") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP/2 CONNECT cannot carry a Host header",
+            ));
+        }
+        if version == HttpVersion::H1
+            && (self.alpn_fallback || self.idle_timeout_ms != 0 || self.ping_timeout_ms != 0)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP/2 settings require HTTP/2 CONNECT",
+            ));
+        }
         if headers.get_all("host").iter().count() > 1 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -835,7 +855,11 @@ impl TcpClientHandler for HttpTcpClientHandler {
     fn validate_alpn(&self, alpn: Option<&[u8]>) -> std::io::Result<()> {
         let valid = match self.version {
             HttpVersion::H1 => alpn.is_none_or(|protocol| protocol == b"http/1.1"),
-            HttpVersion::H2 => alpn == Some(b"h2"),
+            HttpVersion::H2 => {
+                alpn == Some(b"h2")
+                    || (self.options.alpn_fallback
+                        && alpn.is_none_or(|protocol| protocol == b"http/1.1"))
+            }
         };
         if valid {
             Ok(())
@@ -871,9 +895,32 @@ impl TcpClientHandler for HttpTcpClientHandler {
         mut client_stream: Box<dyn AsyncStream>,
         remote_location: ResolvedLocation,
     ) -> std::io::Result<TcpClientSetupResult> {
-        if self.version == HttpVersion::H2 {
+        if self.version == HttpVersion::H2
+            && (!self.options.alpn_fallback || client_stream.negotiated_alpn() == Some(b"h2"))
+        {
             // The supplied carrier already embodies the selected route and wrappers.
-            let session = H2ClientSession::new(client_stream).await?;
+            let session = if self.options.idle_timeout_ms != 0 || self.options.ping_timeout_ms != 0
+            {
+                H2ClientSession::with_keepalive(
+                    client_stream,
+                    crate::http2::client::KeepAlive {
+                        idle_timeout: (self.options.idle_timeout_ms != 0).then(|| {
+                            std::time::Duration::from_millis(self.options.idle_timeout_ms.into())
+                        }),
+                        ping_timeout: std::time::Duration::from_millis(
+                            if self.options.ping_timeout_ms == 0 {
+                                15_000
+                            } else {
+                                self.options.ping_timeout_ms.into()
+                            },
+                        ),
+                        permit_without_stream: true,
+                    },
+                )
+                .await?
+            } else {
+                H2ClientSession::new(client_stream).await?
+            };
             let reservation = session.reserve();
             // Only eligible first-hop routes probe reuse before building a carrier.
             if self.reuse_enabled.load(Ordering::Relaxed) {

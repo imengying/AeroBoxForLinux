@@ -6,73 +6,54 @@ use crate::{
     async_stream::AsyncStream,
     config::xhttp::{XhttpMode, XhttpVersion, invalid},
     config::{GlobalLimits, ResolvedClientConfig, ResolvedClientProxyConfig, Transport},
-    crypto::{CryptoTlsStream, TlsConnection, TlsReadMode},
     resolver::Resolver,
-    tcp::tcp_handler::TcpClientHandler,
+    tcp::tcp_handler::{ClientTransport, TcpClientHandler},
 };
 
 #[derive(Debug)]
 pub enum Security {
     Plain,
-    Tls {
-        config: Arc<rustls::ClientConfig>,
-        name: rustls::pki_types::ServerName<'static>,
-        buffer_size: Option<usize>,
-        handshake_timeout: std::time::Duration,
-    },
+    Tls(Box<crate::tls_client_handler::TlsClientHandler>),
     Reality(Box<dyn TcpClientHandler>),
 }
 
 impl Security {
     pub async fn wrap(
         &self,
-        stream: Box<dyn AsyncStream>,
+        transport: ClientTransport<'_>,
         endpoint: &NetLocation,
         version: XhttpVersion,
     ) -> io::Result<Box<dyn AsyncStream>> {
-        match self {
-            Self::Plain => Ok(stream),
-            Self::Reality(handler) => Ok(handler
-                .setup_client_tcp_stream(stream, endpoint.into())
-                .await?
-                .client_stream),
-            Self::Tls {
-                config,
-                name,
-                buffer_size,
-                handshake_timeout,
-            } => {
-                let mut connection = rustls::ClientConnection::new(config.clone(), name.clone())
-                    .map_err(io::Error::other)?;
-                if let Some(size) = buffer_size {
-                    connection.set_buffer_limit(Some(*size));
-                }
-                let stream = tokio::time::timeout(
-                    *handshake_timeout,
-                    CryptoTlsStream::handshake(
-                        stream,
-                        TlsConnection::new(connection),
-                        TlsReadMode::Stream,
-                        &[],
-                    ),
-                )
-                .await
-                .map_err(io::Error::from)??;
-                let expected: &[u8] = if version == XhttpVersion::H1 {
-                    b"http/1.1"
-                } else {
-                    b"h2"
-                };
-                if stream.alpn_protocol().is_some_and(|alpn| alpn != expected)
-                    || (version == XhttpVersion::H2 && stream.alpn_protocol().is_none())
-                {
-                    return Err(invalid(
-                        "XHTTP TLS ALPN does not match selected HTTP version",
-                    ));
-                }
-                Ok(Box::new(stream))
+        let stream = match self {
+            Self::Plain => return transport.open.await,
+            Self::Reality(handler) => {
+                // REALITY authenticates the carrier; XHTTP fixes its inner
+                // protocol to H2 independently of the cover site's ALPN.
+                return Ok(handler
+                    .connect_client_tcp(transport, endpoint.into())
+                    .await?
+                    .client_stream);
             }
+            Self::Tls(handler) => {
+                handler
+                    .connect_client_tcp(transport, endpoint.into())
+                    .await?
+                    .client_stream
+            }
+        };
+        let expected: &[u8] = if version == XhttpVersion::H1 {
+            b"http/1.1"
+        } else {
+            b"h2"
+        };
+        if stream
+            .negotiated_alpn()
+            .is_some_and(|alpn| alpn != expected)
+            || (version == XhttpVersion::H2 && stream.negotiated_alpn().is_none())
+        {
+            return Err(invalid("XHTTP ALPN does not match selected HTTP version"));
         }
+        Ok(stream)
     }
 }
 
@@ -91,12 +72,12 @@ pub fn contains(config: &ResolvedClientProxyConfig) -> bool {
     }
 }
 
-type ClientTransport = (Arc<Client>, Box<dyn TcpClientHandler>);
+type ClientAndHandler = (Arc<Client>, Box<dyn TcpClientHandler>);
 
 pub fn build(
     config: &ResolvedClientConfig,
     resolver: Arc<dyn Resolver>,
-) -> io::Result<Option<ClientTransport>> {
+) -> io::Result<Option<ClientAndHandler>> {
     // DNS preparation can build connectors before candidate limits replace the live policy.
     // Candidate capacity is checked separately during full-config validation.
     build_with_limits(config, resolver, GlobalLimits::default())
@@ -106,7 +87,7 @@ pub(crate) fn build_with_limits(
     config: &ResolvedClientConfig,
     resolver: Arc<dyn Resolver>,
     global_limits: GlobalLimits,
-) -> io::Result<Option<ClientTransport>> {
+) -> io::Result<Option<ClientAndHandler>> {
     if !contains(&config.protocol) {
         return Ok(None);
     }
@@ -142,7 +123,7 @@ pub(crate) fn build_with_limits(
             }
             let xhttp = xhttp.clone();
             let sni = if tls.sni_hostname.is_unspecified() {
-                default_sni
+                default_sni.clone()
             } else {
                 tls.sni_hostname.clone().into_option()
             };
@@ -157,39 +138,28 @@ pub(crate) fn build_with_limits(
                 XhttpVersion::H2 => "h2",
                 _ => return Err(invalid("H3 cannot be wrapped in TLS")),
             };
-            if !explicit_alpn.is_empty() && explicit_alpn != [alpn] {
+            if !explicit_alpn.is_empty()
+                && (!explicit_alpn.iter().any(|protocol| protocol == alpn)
+                    || explicit_alpn
+                        .iter()
+                        .any(|protocol| !matches!(protocol.as_str(), "h2" | "http/1.1")))
+            {
                 return Err(invalid(
                     "XHTTP TLS ALPN must select the configured HTTP version",
                 ));
             }
-            let client = crate::rustls_config_util::try_create_client_config_with_options(
-                tls.verify,
-                tls.server_fingerprints.clone().into_vec(),
-                vec![alpn.into()],
-                sni.is_some(),
-                tls.key
-                    .clone()
-                    .zip(tls.cert.clone())
-                    .map(|(k, c)| (k.into_bytes(), c.into_bytes())),
-                false,
-                &tls.key_exchange_groups,
-                &tls.options,
-            )?;
-            let name = crate::tcp::tcp_client_handler_factory::tls_verification_name(
-                sni.clone(),
+            tls.alpn_protocols = crate::option_util::NoneOrSome::One(alpn.into());
+            tls.protocol = Box::new(ResolvedClientProxyConfig::PortForward);
+            let handler = crate::tcp::tcp_client_handler_factory::create_tls_client_handler(
+                tls.clone(),
                 &config.address,
+                default_sni,
+                resolver.clone(),
             )?;
             (
                 xhttp,
                 sni,
-                Security::Tls {
-                    config: Arc::new(client),
-                    name,
-                    buffer_size: tls.tls_buffer_size,
-                    handshake_timeout: crate::config::tls::handshake_timeout(
-                        tls.options.handshake_timeout_ms,
-                    ),
-                },
+                Security::Tls(Box::new(handler)),
                 Some(version),
                 false,
             )

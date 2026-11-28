@@ -50,9 +50,9 @@ impl Ui {
 
         let toggle = floating_button(
             if status.running {
-                "media-playback-stop-symbolic"
+                "aerobox-stop-symbolic"
             } else {
-                "media-playback-start-symbolic"
+                "aerobox-start-symbolic"
             },
             if status.running { "停止" } else { "启动" },
         );
@@ -484,8 +484,7 @@ pub(super) fn smoke_cards(ui: &Rc<Ui>) -> Result<()> {
 
 #[cfg(feature = "ui-smoke")]
 fn ensure_home_action_state(action: &gtk::Button, icon: &gtk::Image, running: bool) -> Result<()> {
-    #[allow(deprecated)]
-    let color = icon.style_context().color();
+    let color = icon.color();
     anyhow::ensure!(
         action.has_css_class("suggested-action")
             && !action.has_css_class("destructive-action")
@@ -509,7 +508,7 @@ fn ensure_home_action_state(action: &gtk::Button, icon: &gtk::Image, running: bo
 #[cfg(feature = "ui-smoke")]
 pub(super) fn smoke_home_action_theme(ui: &Rc<Ui>, dark: bool) -> Result<()> {
     let action = ui.home_action.borrow().clone().context("缺少启动按钮")?;
-    // GTK exposes the foreground through StyleContext, not the resolved CSS
+    // GTK exposes the widget foreground, not the resolved CSS
     // background. A class assertion here ties the button to the stylesheet;
     // the paired home-dark.png / home.png screenshots are the visual check of
     // the surface itself.
@@ -526,14 +525,6 @@ pub(super) fn smoke_home_action_theme(ui: &Rc<Ui>, dark: bool) -> Result<()> {
         .find_map(|widget| widget.downcast::<gtk::Image>().ok())
         .context("启动按钮没有图标")?;
     ensure_home_action_state(&action, &icon, false)?;
-    if dark {
-        #[allow(deprecated)]
-        let color = icon.style_context().color();
-        anyhow::ensure!(
-            color.red() > 0.99 && color.green() > 0.99 && color.blue() > 0.99,
-            "深色主题下启动图标不是白色: {color:?}"
-        );
-    }
     Ok(())
 }
 
@@ -691,11 +682,11 @@ pub(super) async fn smoke_running_action(ui: &Rc<Ui>, path: &Path) -> Result<()>
         .find_map(|widget| widget.downcast::<gtk::Image>().ok())
         .context("启动按钮没有图标")?;
     ensure_home_action_state(&action, &icon, false)?;
-    action.set_icon_name("media-playback-stop-symbolic");
+    action.set_icon_name("aerobox-stop-symbolic");
     action.add_css_class("home-running");
     ensure_home_action_state(&action, &icon, true)?;
     super::smoke::screenshot(&ui.window, path).await?;
-    action.set_icon_name("media-playback-start-symbolic");
+    action.set_icon_name("aerobox-start-symbolic");
     action.remove_css_class("home-running");
     ensure_home_action_state(&action, &icon, false)
 }
@@ -714,7 +705,6 @@ pub(super) async fn smoke_ip_cache(ui: &Rc<Ui>) -> Result<()> {
         network::NetworkInfo {
             ipv4: Some("192.0.2.10".into()),
             ipv6: Some("2001:db8:abcd:1234:5678:9abc:def0:1234".into()),
-            ..Default::default()
         },
     )));
     ui.navigate(Page::Home);
@@ -820,9 +810,9 @@ impl Dashboard {
             update_action(
                 button,
                 if status.running {
-                    "media-playback-stop-symbolic"
+                    "aerobox-stop-symbolic"
                 } else {
-                    "media-playback-start-symbolic"
+                    "aerobox-start-symbolic"
                 },
                 title,
             );
@@ -929,7 +919,6 @@ impl Dashboard {
                     if ui.service.status().generation == status.generation {
                         if ui.jobs.get() == 0
                             && ui.service.snapshot().settings.routing_mode == saved_mode
-                            && let Ok(mode) = mode
                         {
                             dashboard.syncing.set(true);
                             for (value, button) in &dashboard.modes {

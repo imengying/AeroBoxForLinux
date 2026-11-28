@@ -96,11 +96,7 @@ pub(crate) fn configure(config: &mut ClientConfig, reality: bool) -> io::Result<
     );
     config.cert_compressors.clear();
     config.cert_decompressors = vec![rustls::compress::BROTLI_DECOMPRESSOR];
-    config.initial_key_share_groups = if reality {
-        vec![NamedGroup::X25519]
-    } else {
-        vec![NamedGroup::X25519MLKEM768, NamedGroup::X25519]
-    };
+    config.initial_key_share_groups = vec![NamedGroup::X25519MLKEM768, NamedGroup::X25519];
     config.client_hello_layout = Some(ClientHelloLayout::Chrome133);
     config.enable_tls12_renegotiation = !reality;
     // sing-box's pinned wrapper does not configure a client session cache.

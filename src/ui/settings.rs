@@ -1,4 +1,21 @@
 use super::*;
+use model::FONT_SIZE_MIN;
+
+const fn font_size_choice(size: u32) -> u32 {
+    if size == 0 {
+        0
+    } else {
+        size - FONT_SIZE_MIN + 1
+    }
+}
+
+const fn choice_font_size(choice: u32) -> u32 {
+    if choice == 0 {
+        0
+    } else {
+        choice + FONT_SIZE_MIN - 1
+    }
+}
 
 type SettingsAction = Rc<dyn Fn(&Rc<Ui>, bool)>;
 
@@ -298,26 +315,21 @@ impl Ui {
         appearance.add(&theme);
         // Discrete sizes keep the preview predictable: each step is a whole
         // point, matching how FlClash offers a short list instead of a slider.
-        let sizes: Vec<String> = (model::FONT_SIZE_MIN..=model::FONT_SIZE_MAX)
-            .map(|size| format!("{size} pt"))
-            .collect();
+        let mut sizes = vec!["跟随系统".into()];
+        sizes
+            .extend((model::FONT_SIZE_MIN..=model::FONT_SIZE_MAX).map(|size| format!("{size} pt")));
         let font_size = adw::ComboRow::builder()
             .title("字号")
             .model(&gtk::StringList::new(
                 &sizes.iter().map(String::as_str).collect::<Vec<_>>(),
             ))
-            .selected(
-                settings
-                    .font_size
-                    .clamp(model::FONT_SIZE_MIN, model::FONT_SIZE_MAX)
-                    - model::FONT_SIZE_MIN,
-            )
+            .selected(font_size_choice(settings.font_size))
             .build();
         appearance.add(&font_size);
         let weak = Rc::downgrade(self);
         font_size.connect_selected_notify(move |row| {
             if let Some(ui) = weak.upgrade() {
-                ui.apply_font_size(model::FONT_SIZE_MIN + row.selected());
+                ui.apply_font_size(choice_font_size(row.selected()));
             }
         });
         theme.connect_selected_notify(|row| {
@@ -640,7 +652,7 @@ impl Ui {
             let autostart = autostart.clone();
             move || {
                 let next = model::Settings {
-                    font_size: model::FONT_SIZE_MIN + font_size.selected(),
+                    font_size: choice_font_size(font_size.selected()),
                     theme: match theme.selected() {
                         1 => "light",
                         2 => "dark",
@@ -1163,9 +1175,9 @@ pub(super) fn smoke_edit(ui: &Rc<Ui>) -> Result<()> {
         .find(|row| row.title() == "字号")
         .context("缺少字体大小控件")?;
     font_size.set_selected(if saved.font_size == model::FONT_SIZE_MIN {
-        model::FONT_SIZE_MAX - model::FONT_SIZE_MIN
+        font_size_choice(model::FONT_SIZE_MAX)
     } else {
-        0
+        font_size_choice(model::FONT_SIZE_MIN)
     });
     ensure!(
         ui.service.snapshot().settings.font_size == saved.font_size,
@@ -1192,7 +1204,7 @@ pub(super) fn smoke_restored(ui: &Rc<Ui>) -> Result<()> {
     );
     let widgets = descendants(&ui.body);
     for (title, selected) in [
-        ("字号", saved.font_size - model::FONT_SIZE_MIN),
+        ("字号", font_size_choice(saved.font_size)),
         (
             "主题",
             match saved.theme.as_str() {
@@ -1340,7 +1352,7 @@ pub(super) fn smoke_settings(ui: &Rc<Ui>, verify: bool) -> Result<()> {
         .filter_map(|w| w.clone().downcast::<adw::ComboRow>().ok())
         .find(|row| row.title() == "字号")
         .context("缺少字体大小控件")?
-        .set_selected(model::FONT_SIZE_MAX - model::FONT_SIZE_MIN);
+        .set_selected(font_size_choice(model::FONT_SIZE_MAX));
     for (title, text) in [
         ("直连 DNS", "tcp://223.5.5.5:5353"),
         ("远程 DNS", "tls://one.one.one.one"),

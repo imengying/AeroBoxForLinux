@@ -701,7 +701,7 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
     app.service.stop().unwrap();
     let reopened = support::service(Store::open(Some(app.dir.path().into())).unwrap());
     assert_eq!(reopened.snapshot().settings.active_subscription, second);
-    assert_eq!(reopened.runtime_mode().unwrap(), "global");
+    assert_eq!(reopened.runtime_mode(), "global");
     reopened.start().unwrap();
     assert_eq!(request(&reopened, &url).unwrap(), "node C");
     reopened.shutdown().unwrap();
@@ -744,7 +744,7 @@ fn failed_persistence_restores_runtime_selection_modes_and_settings() {
             serde_json::to_value(app.service.snapshot()).unwrap(),
             serde_json::to_value(&before).unwrap()
         );
-        assert_eq!(app.service.runtime_mode().unwrap(), "global");
+        assert_eq!(app.service.runtime_mode(), "global");
         assert_eq!(app.service.subscription_revision(), revision);
         assert_eq!(request(&app.service, &url).unwrap(), "original");
     }

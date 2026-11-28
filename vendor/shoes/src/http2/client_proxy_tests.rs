@@ -33,7 +33,7 @@ fn version_defaults_and_alpn_are_explicit() {
             assert_eq!(
                 handler.validate_alpn(alpn).is_ok(),
                 match version {
-                    HttpVersion::H1 => true,
+                    HttpVersion::H1 => alpn.is_none_or(|protocol| protocol == b"http/1.1"),
                     HttpVersion::H2 => alpn == Some(b"h2"),
                 }
             );

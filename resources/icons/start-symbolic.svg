@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Balance the triangle's filled area around the canvas center. -->
+  <path fill="#2e3434" d="M4.5 2.25Q4.5 1.4 5.24 1.82L14.76 7.32Q15.94 8 14.76 8.68L5.24 14.18Q4.5 14.6 4.5 13.75Z"/>
+</svg>

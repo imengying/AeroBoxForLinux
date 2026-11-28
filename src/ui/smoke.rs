@@ -254,6 +254,7 @@ pub(super) async fn smoke_sequence(ui: Rc<Ui>, path: PathBuf, failed: Rc<Cell<bo
                 screenshot(&window, &parent.join(name)).await?;
             }
             if current == 0 {
+                smoke_decoration_layout(&ui).await?;
                 let scale = std::env::var("AEROBOX_TEST_SCALE")
                     .ok()
                     .and_then(|s| s.parse::<f64>().ok())
@@ -827,6 +828,11 @@ async fn smoke_form_dialogs(ui: &Rc<Ui>, path: &Path, size: (i32, i32)) -> Resul
             .with_context(|| format!("{title}未打开"))?;
         screenshot(&window, &path.join(format!("{file}.png"))).await?;
         anyhow::ensure!(
+            window.pango_context().font_description()
+                == ui.window.pango_context().font_description(),
+            "{title}字体没有与主窗口同步"
+        );
+        anyhow::ensure!(
             (window.width(), window.height()) == size,
             "{title}尺寸与导入订阅不同: {}x{} / {}x{}",
             window.width(),
@@ -890,6 +896,7 @@ async fn smoke_form_dialogs(ui: &Rc<Ui>, path: &Path, size: (i32, i32)) -> Resul
 }
 
 async fn smoke_resize_boundaries(ui: &Rc<Ui>) -> Result<()> {
+    let saved_font_size = ui.service.snapshot().settings.font_size;
     // The sidebar grows at the wide breakpoint. Repeated frames must keep the
     // new density, rather than using the narrower content to switch it back.
     for (width, density) in [(1224, 100), (1232, 112), (1224, 100), (1000, 100)] {
@@ -915,7 +922,7 @@ async fn smoke_resize_boundaries(ui: &Rc<Ui>) -> Result<()> {
         ui.apply_font_size(size);
         glib::timeout_future(Duration::from_millis(80)).await;
         anyhow::ensure!(
-            (ui.split.min_sidebar_width() - sidebar_width(size)).abs() < 0.1,
+            (ui.split.min_sidebar_width() - sidebar_width(f64::from(size))).abs() < 0.1,
             "修改字号没有同步侧栏宽度"
         );
         let actual = ui
@@ -941,8 +948,114 @@ async fn smoke_resize_boundaries(ui: &Rc<Ui>) -> Result<()> {
         );
     }
     anyhow::ensure!(
-        ui.service.snapshot().settings.font_size == 11,
+        ui.service.snapshot().settings.font_size == saved_font_size,
         "预览改写了保存的字号"
     );
+    let desktop = gio::Settings::new("org.gnome.desktop.interface");
+    let original_font = desktop.string("font-name");
+    let original_scale = desktop.double("text-scaling-factor");
+    ui.apply_font_size(0);
+    for (name, scale, expected_px) in [
+        ("Sans 15", 1.0, 20.0),
+        ("Sans 15", 1.25, 25.0),
+        ("Sans 20px", 1.25, 20.0),
+    ] {
+        desktop.set_string("font-name", name)?;
+        desktop.set_double("text-scaling-factor", scale)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let font = ui
+                .window
+                .pango_context()
+                .font_description()
+                .context("缺少系统字体")?;
+            let actual_px = f64::from(font.size()) / f64::from(gtk::pango::SCALE)
+                * if font.is_size_absolute() {
+                    1.0
+                } else {
+                    96.0 * scale / 72.0
+                };
+            if (actual_px - expected_px).abs() < 0.1 {
+                break;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "系统字体或文字缩放未生效: {name}, scale={scale}, px={actual_px}"
+            );
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        anyhow::ensure!(
+            (ui.split.min_sidebar_width() - sidebar_width(expected_px * 72.0 / 96.0)).abs() < 0.1,
+            "系统字号变化没有同步侧栏宽度"
+        );
+    }
+    let font = ui
+        .window
+        .pango_context()
+        .font_description()
+        .context("缺少系统字体")?;
+    anyhow::ensure!(font.family().as_deref() == Some("Sans"), "系统字体族未生效");
+    desktop.set_string("font-name", &original_font)?;
+    desktop.set_double("text-scaling-factor", original_scale)?;
+    ui.apply_font_size(saved_font_size);
+    Ok(())
+}
+
+async fn smoke_decoration_layout(ui: &Rc<Ui>) -> Result<()> {
+    let headers = descendants(&ui.window)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<adw::HeaderBar>().ok())
+        .filter(|header| header.has_css_class("app-header"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        headers.len() == 1,
+        "找不到主窗口标题栏: count={}",
+        headers.len()
+    );
+    let header = &headers[0];
+    anyhow::ensure!(
+        header.decoration_layout().is_none(),
+        "标题栏覆盖了系统窗口按钮布局"
+    );
+    let controls = descendants(header)
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::WindowControls>().ok())
+        .filter(|controls| controls.side() == gtk::PackType::End)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(controls.len() == 1, "主窗口缺少右侧窗口按钮");
+    let buttons = descendants(&controls[0])
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+        .filter(|button| button.is_visible())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(buttons.len() == 1, "窗口按钮不是仅关闭: {}", buttons.len());
+    let icon = buttons[0]
+        .child()
+        .and_then(|child| child.downcast::<gtk::Image>().ok())
+        .and_then(|image| image.icon_name());
+    anyhow::ensure!(
+        icon.as_deref() == Some("window-close-symbolic"),
+        "唯一窗口按钮不是关闭: {icon:?}"
+    );
+    let desktop = gio::Settings::new("org.gnome.desktop.wm.preferences");
+    for (layout, count) in [("menu:minimize,maximize,close", 3), (":close", 1)] {
+        desktop.set_string("button-layout", layout)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let buttons = descendants(&controls[0])
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+                .filter(|button| button.is_visible())
+                .count();
+            if buttons == count {
+                break;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "桌面窗口按钮变化未实时同步: {layout}, buttons={buttons}"
+            );
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+    }
     Ok(())
 }

@@ -141,11 +141,7 @@ fn apply_profile(config: &mut ClientConfig, profile: ClientHelloProfile, reality
             let template = chrome_template();
             config.client_hello_layout = template.client_hello_layout;
             config.application_settings = template.application_settings;
-            config.initial_key_share_groups = if reality {
-                vec![NamedGroup::X25519]
-            } else {
-                template.initial_key_share_groups
-            };
+            config.initial_key_share_groups = template.initial_key_share_groups;
             config.alpn_protocols = template.alpn_protocols;
             config.cert_decompressors = template.cert_decompressors;
             config.enable_tls12_renegotiation = !reality;
@@ -560,9 +556,17 @@ impl rustls::reality::ClientHooks for RealityHooks {
 #[test]
 fn profile_preserves_reality_final_hello_and_authentication_exchange() {
     for profile in PROFILES {
-        let crypto = profile_provider(profile);
+        let crypto = match profile {
+            ClientHelloProfile::Chrome => profile_provider(profile),
+            ClientHelloProfile::Firefox => {
+                let mut crypto = classical_provider();
+                crypto.kx_groups = chrome_template().crypto_provider().kx_groups.clone();
+                crypto
+            }
+        };
         let (mut config, server_config) = configs(&crypto, &crypto, &[&rustls::version::TLS13]);
         apply_profile(&mut config, profile, true);
+        config.initial_key_share_groups = vec![NamedGroup::X25519MLKEM768, NamedGroup::X25519];
         let captured = Arc::new(Mutex::new(Vec::new()));
         let mut client = ClientConnection::new_reality(
             Arc::new(config),
@@ -575,15 +579,17 @@ fn profile_preserves_reality_final_hello_and_authentication_exchange() {
         client.write_tls(&mut wire).unwrap();
         let hello = WireHello::read(&wire);
         assert_eq!(&wire[44..76], &[0xa7; 32]);
-        // No unrelated P-256 exchange can supersede REALITY's authenticated
-        // exchange. GREASE may precede the one real X25519 share.
+        // The hybrid share precedes the independent authentication exchange.
+        // Browser layout must not reorder them or substitute the hybrid key.
         let shares: Vec<_> = hello
             .shares()
             .into_iter()
             .filter(|(group, _)| !is_grease(*group))
             .collect();
-        assert_eq!(shares.len(), 1);
-        assert_eq!(shares[0].0, 29);
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares[0].0, 0x11ec);
+        assert_eq!(shares[1].0, 29);
+        assert_ne!(&shares[0].1[1184..], shares[1].1);
         feed_server(&mut server, &wire);
         do_handshake(&mut client, &mut server);
         assert_eq!(*captured.lock().unwrap(), wire[5..]);

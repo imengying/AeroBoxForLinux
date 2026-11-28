@@ -190,6 +190,10 @@ impl AsyncShutdownMessage for UdpSocket {
 }
 
 pub trait AsyncStream: AsyncRead + AsyncWrite + AsyncPing + Unpin + Send + Sync {
+    /// Protocol negotiated on this carrier, not on an outer proxy hop.
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        None
+    }
     fn local_addr(&self) -> Option<std::net::SocketAddr> {
         None
     }
@@ -543,6 +547,9 @@ impl<T: ?Sized + AsyncWriteSourcedMessage + Unpin> AsyncWriteSourcedMessage for 
 }
 
 impl<T: ?Sized + AsyncStream + Unpin> AsyncStream for Box<T> {
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        (**self).negotiated_alpn()
+    }
     fn local_addr(&self) -> Option<std::net::SocketAddr> {
         (**self).local_addr()
     }
@@ -562,6 +569,9 @@ impl<T: ?Sized + AsyncStream + Unpin> AsyncStream for Box<T> {
     }
 }
 impl<T: ?Sized + AsyncStream + Unpin> AsyncStream for &mut T {
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        (**self).negotiated_alpn()
+    }
     fn local_addr(&self) -> Option<std::net::SocketAddr> {
         (**self).local_addr()
     }

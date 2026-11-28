@@ -74,18 +74,13 @@ fn run_with_timeout(program: &Path, args: &[String], timeout: Duration) -> Resul
     Ok(output.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-fn executable(names: &[&str]) -> Option<PathBuf> {
+fn executable(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
-    for name in names {
-        for dir in env::split_paths(&paths) {
-            let path = dir.join(name);
-            if fs::metadata(&path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
+    env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -100,17 +95,25 @@ enum Backend {
     },
 }
 
-fn desktop_kind(desktop: &str) -> Option<&'static str> {
-    let desktop = desktop.to_lowercase();
-    let names: Vec<_> = desktop.split([':', ';', ',']).map(str::trim).collect();
-    if names.iter().any(|s| ["kde", "plasma"].contains(s)) {
-        return Some("kde");
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desktop {
+    Gnome,
+    Kde,
+}
+
+pub fn desktop_kind(desktop: &str) -> Option<Desktop> {
+    let contains = |names: &[&str]| {
+        desktop.split([':', ';', ',']).any(|name| {
+            names
+                .iter()
+                .any(|candidate| name.trim().eq_ignore_ascii_case(candidate))
+        })
+    };
+    if contains(&["kde", "plasma"]) {
+        return Some(Desktop::Kde);
     }
-    if names
-        .iter()
-        .any(|s| ["gnome", "ubuntu", "unity", "budgie"].contains(s))
-    {
-        return Some("gnome");
+    if contains(&["gnome", "ubuntu", "unity", "budgie"]) {
+        return Some(Desktop::Gnome);
     }
     None
 }
@@ -118,15 +121,13 @@ fn desktop_kind(desktop: &str) -> Option<&'static str> {
 fn backend() -> Result<Backend> {
     let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     match desktop_kind(&desktop) {
-        Some("kde") => Ok(Backend::Kde {
-            read: executable(&["kreadconfig6", "kreadconfig5"])
-                .context("KDE 的 kreadconfig 工具不可用")?,
-            write: executable(&["kwriteconfig6", "kwriteconfig5"])
-                .context("KDE 的 kwriteconfig 工具不可用")?,
-            notify: executable(&["dbus-send"]).context("KDE 的 dbus-send 工具不可用")?,
+        Some(Desktop::Kde) => Ok(Backend::Kde {
+            read: executable("kreadconfig6").context("KDE 的 kreadconfig6 工具不可用")?,
+            write: executable("kwriteconfig6").context("KDE 的 kwriteconfig6 工具不可用")?,
+            notify: executable("dbus-send").context("KDE 的 dbus-send 工具不可用")?,
         }),
-        Some("gnome") => {
-            let settings = executable(&["gsettings"]).context("GNOME 的 gsettings 工具不可用")?;
+        Some(Desktop::Gnome) => {
+            let settings = executable("gsettings").context("GNOME 的 gsettings 工具不可用")?;
             let schemas = DesktopCommand::new(&settings, ["list-schemas"]).run()?;
             ensure!(
                 schemas.lines().any(|s| s == GNOME_PROXY),
@@ -138,7 +139,7 @@ fn backend() -> Result<Backend> {
             );
             Ok(Backend::Gnome { settings })
         }
-        _ => bail!(
+        None => bail!(
             "当前桌面没有可用的系统代理设置。Sway / Hyprland 可使用 TUN，或在应用中填写 HTTP/SOCKS 代理。"
         ),
     }
@@ -559,8 +560,9 @@ mod tests {
 
     #[test]
     fn desktop_detection_does_not_modify_unrelated_gsettings() {
-        assert_eq!(desktop_kind("ubuntu:GNOME"), Some("gnome"));
-        assert_eq!(desktop_kind("KDE"), Some("kde"));
+        assert_eq!(desktop_kind("ubuntu:GNOME"), Some(Desktop::Gnome));
+        assert_eq!(desktop_kind("KDE"), Some(Desktop::Kde));
+        assert_eq!(desktop_kind("gnome"), Some(Desktop::Gnome));
         assert_eq!(desktop_kind("sway"), None);
         assert_eq!(desktop_kind("Hyprland"), None);
     }
@@ -716,7 +718,7 @@ else:
         let file = prefix
             .join("share/applications")
             .join(format!("{APP_ID}.desktop"));
-        let gio = executable(&["gio"]).expect("GTK installs the gio desktop launcher");
+        let gio = executable("gio").expect("GTK installs the gio desktop launcher");
         DesktopCommand::new(gio, ["launch", file.to_str().unwrap()])
             .run()
             .unwrap();

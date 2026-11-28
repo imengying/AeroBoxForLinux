@@ -16,6 +16,9 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -m 700 "$test_dir/runtime" "$test_dir/screenshots"
 export XDG_RUNTIME_DIR="$test_dir/runtime"
+export XDG_CONFIG_HOME="$test_dir/config"
+export XDG_DATA_HOME="$test_dir/data"
+export XDG_CACHE_HOME="$test_dir/cache"
 cp "$binary" "$test_dir/AeroBox"
 chmod 755 "$test_dir/AeroBox"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -36,12 +39,13 @@ cat > "$test_dir/session.sh" <<'SESSION'
 set -eu
 test_dir=$1
 export XDG_RUNTIME_DIR="$test_dir/runtime"
-export XDG_CONFIG_HOME="$test_dir/config"
-export XDG_DATA_HOME="$test_dir/data"
-export XDG_CACHE_HOME="$test_dir/cache"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 export GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals GTK_A11Y=none GTK_ANIMATIONS=0
 export AEROBOX_TEST_SCALE=1.25
+export XDG_CURRENT_DESKTOP=GNOME
+gsettings set org.gnome.desktop.wm.preferences button-layout ':close'
+gsettings set org.gnome.desktop.interface font-name 'Sans 11'
+gsettings set org.gnome.desktop.interface text-scaling-factor 1.0
 unset DISPLAY WAYLAND_DISPLAY SWAYSOCK
 sway --unsupported-gpu --config "$test_dir/sway.config" > "$test_dir/screenshots/sway.log" 2>&1 &
 compositor_pid=$!

@@ -24,7 +24,7 @@ make clean
 `scripts/check-network.sh` 检查网络任务的归属，并验证 Vision 分帧状态机和基准工具。持续模糊测试、性能对比与连接日志说明见 [网络诊断与验证](network-validation.md)。这些开发工具不随应用安装。
 
 
-`Protocol interoperability` 是独立工作流，在 main 推送、pull request、每周及手动触发时运行。使用 ubuntu-latest、固定 Go 工具链和依赖，以及经过 SHA256 校验的 sing-box 1.14.4，覆盖 Naive HTTP/2 / HTTP/3、VMess、SS 插件、TUIC、ECH、TLS 与应用协议互通，不重复运行 `--unit` 测试。标签发布执行 Rust 应用、网络组件、Wayland 和安装包检查，不构建外部 Go 测试服务或运行性能基准工具。参考服务端仅用于开发验证，不打包进 Release；打标签前检查主分支的两条工作流。kTLS 和特权 TUN 环境测试仍单独运行。
+`Protocol interoperability` 是独立工作流，在 main 推送、pull request、每周及手动触发时运行。使用 ubuntu-latest、固定 Go 工具链和依赖，以及经过 SHA256 校验的 sing-box 1.14.4、Xray 26.10.31，覆盖 XHTTP、Naive HTTP/2 / HTTP/3、VMess、SS 插件、TUIC、ECH、TLS 与应用协议互通，不重复运行 `--unit` 测试。标签发布执行 Rust 应用、网络组件、Wayland 和安装包检查，不构建外部 Go 测试服务或运行性能基准工具。参考服务端仅用于开发验证，不打包进 Release；打标签前检查主分支的两条工作流。kTLS 和特权 TUN 环境测试仍单独运行。
 
 额外测试按需显式运行，测试服务端不属于应用运行依赖：
 
@@ -33,15 +33,15 @@ make clean
 cargo test --test subscription_profiles --test tls_profiles
 # 隔离命名空间内验证 TUN TCP/UDP/DNS、断网与崩溃恢复、停止清理
 cargo test --test tun managed_tun_routes_traffic_and_restores_network_in_namespace -- --ignored
-# 与独立 sing-box 测试服务端验证协议及 WS/gRPC/HTTP/Vision/REALITY 传输互通
-AEROBOX_TEST_PEER=/path/to/sing-box cargo test --test interop -- --ignored
+# 与独立 sing-box / Xray 服务端验证协议及 WS/gRPC/HTTP/XHTTP/Vision/REALITY 互通
+AEROBOX_TEST_PEER=/path/to/sing-box AEROBOX_TEST_XRAY=/path/to/xray cargo test --test interop -- --ignored
 # Naive HTTP/2、HTTP/3 的独立 Go 回显服务端
 (cd vendor/shoes/tests/fixtures/naive-peer && go build -o /tmp/aerobox-naive-peer .)
 AEROBOX_NAIVE_PEER=/tmp/aerobox-naive-peer cargo test --test naive_interop -- --ignored
 # VMess、SS 插件、TUIC 0-RTT/UoT、Naive、ECH 与 TLS 分片：独立 Go 服务互通
 scripts/test-protocols.sh
-# 还可同时加入 sing-box 作为独立服务端
-AEROBOX_TEST_PEER=/path/to/sing-box scripts/test-protocols.sh
+# 还可加入 sing-box、Xray 作为独立服务端
+AEROBOX_TEST_PEER=/path/to/sing-box AEROBOX_TEST_XRAY=/path/to/xray scripts/test-protocols.sh
 # Linux 6.14+ 且启用 kTLS：增加 ECH/kTLS 组合与 TLS 1.3 密钥更新测试
 AEROBOX_TEST_KTLS_REKEY=1 scripts/test-protocols.sh
 # 单独验证 kTLS 的密码套件、收发方向、半关闭、异常 EOF 与密钥更新

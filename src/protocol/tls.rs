@@ -81,7 +81,21 @@ pub(super) fn configure(
         out["alpn_protocols"] = strings(alpn, &format!("{}.alpn", f.path))?.into();
     }
     if out.get("alpn_protocols").is_none() || out["alpn_protocols"] == json!([]) {
-        if kind == "naive" || matches!(out["protocol"]["kind"].as_str(), Some("grpc" | "http2")) {
+        if out["protocol"]["type"] == "xhttp" {
+            out["alpn_protocols"] = json!([match out["protocol"]["http_version"].as_str() {
+                Some("h1") => "http/1.1",
+                Some("h3") => "h3",
+                _ => "h2",
+            }]);
+        } else if kind == "http" && out["protocol"]["http_version"] == "h2" {
+            out["alpn_protocols"] = if out["protocol"]["settings"]["alpn_fallback"] == true {
+                json!(["h2", "http/1.1"])
+            } else {
+                json!(["h2"])
+            };
+        } else if kind == "naive"
+            || matches!(out["protocol"]["kind"].as_str(), Some("grpc" | "http2"))
+        {
             out["alpn_protocols"] = json!([if quic { "h3" } else { "h2" }]);
         } else if out["protocol"]["type"] == "websocket"
             || kind == "http"

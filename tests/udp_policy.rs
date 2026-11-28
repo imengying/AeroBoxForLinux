@@ -72,6 +72,7 @@ fn case(kind: &str, transport: &str, cert: &str, directory: &Path) -> (Value, Va
 
 #[test]
 fn tcp_only_nodes_keep_tcp_and_never_fall_back_for_udp() {
+    let _serial = support::runtime_lock();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -170,4 +171,73 @@ fn tcp_only_nodes_keep_tcp_and_never_fall_back_for_udp() {
             TcpListener::bind(("127.0.0.1", inbound)).expect("mixed listener released");
         }
     }
+}
+
+#[test]
+fn udp_only_nodes_keep_datagrams_and_block_tcp_without_switching_nodes() {
+    let _serial = support::runtime_lock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate = certified.cert.pem();
+    std::fs::write(directory.path().join("cert.pem"), &certificate).unwrap();
+    std::fs::write(
+        directory.path().join("key.pem"),
+        certified.signing_key.serialize_pem(),
+    )
+    .unwrap();
+    let (origin, requests) = support::http(b"must not arrive".to_vec());
+    for (kind, transport) in [
+        ("socks", "native"),
+        ("socks", "uot1"),
+        ("socks", "uot2"),
+        ("trojan", "native"),
+        ("naive", "uot2"),
+    ] {
+        let (mut node, server) = case(kind, transport, &certificate, directory.path());
+        node["network"] = "udp".into();
+        let inbound = support::free_port();
+        let client = protocol::convert_outbound(node.clone(), "node").unwrap();
+        for selector in [false, true] {
+            let mut config = json!([client, server]);
+            if selector {
+                config.as_array_mut().unwrap().push(
+                    json!({"client_group":"choice", "type":"selector", "default":"policy-node",
+                    "client_chains":[{"chain":["policy-node"]},{"chain":["direct"]}]}),
+                );
+            }
+            config.as_array_mut().unwrap().push(json!({"address":format!("127.0.0.1:{inbound}"), "protocol":{"type":"mixed"},
+                "rules":[{"conditions":{"any_destination":true},"action":"allow","client_chain":if selector {"choice"} else {"policy-node"}}]}));
+            let running = Running {
+                core: runtime
+                    .block_on(EmbeddedCore::start_json(&config.to_string(), None))
+                    .unwrap(),
+                runtime: &runtime,
+            };
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{inbound}")).unwrap())
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap();
+            for _ in 0..2 {
+                assert!(
+                    client
+                        .get(format!("http://{}/blocked", origin.address))
+                        .send()
+                        .is_err(),
+                    "{kind}/{transport}, selector={selector}"
+                );
+                support::udp_roundtrip(inbound).unwrap_or_else(|error| {
+                    panic!("{kind}/{transport}, selector={selector}: {error}")
+                });
+            }
+            drop(running);
+        }
+    }
+    assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 0);
 }

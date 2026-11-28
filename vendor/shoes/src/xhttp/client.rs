@@ -214,17 +214,27 @@ impl Client {
                 if self.version == XhttpVersion::H3 {
                     Carrier::quic(dialer.open_quic().await?, header_limit).await
                 } else {
-                    let mut stream = dialer.open_stream().await?;
-                    for config in &self.masks {
-                        stream = Box::new(crate::sudoku_mask::SudokuStream::new(
-                            stream,
-                            config.clone(),
-                            crate::sudoku_mask::Role::Client,
-                        ));
-                    }
+                    let reopen: crate::tcp::tcp_handler::ReopenTransport<'_> = Arc::new(|| {
+                        Box::pin(async {
+                            let mut stream = dialer.open_stream().await?;
+                            for config in &self.masks {
+                                stream = Box::new(crate::sudoku_mask::SudokuStream::new(
+                                    stream,
+                                    config.clone(),
+                                    crate::sudoku_mask::Role::Client,
+                                ));
+                            }
+                            Ok(stream)
+                        })
+                    });
+                    let transport = crate::tcp::tcp_handler::ClientTransport {
+                        route: dialer.clone(),
+                        open: reopen(),
+                        reopen: Some(reopen),
+                    };
                     let stream = self
                         .security
-                        .wrap(stream, &self.endpoint, self.version)
+                        .wrap(transport, &self.endpoint, self.version)
                         .await?;
                     Carrier::tcp_with_windows(
                         stream,
@@ -1127,8 +1137,8 @@ mod tests {
                 request.uri().scheme_str(),
                 Some(if secure { "https" } else { "http" })
             );
-            if let Security::Tls { name, .. } = &client.security {
-                assert_eq!(name.to_str(), "origin.example");
+            if let Security::Tls(handler) = &client.security {
+                assert_eq!(handler.server_name.to_str(), "origin.example");
             }
         }
         let config = crate::config::test_support::from_json(
@@ -1139,10 +1149,10 @@ mod tests {
         let (client, _) = super::super::connector::build(&config, resolver)
             .unwrap()
             .unwrap();
-        let Security::Tls { config, .. } = &client.security else {
+        let Security::Tls(handler) = &client.security else {
             panic!("expected TLS")
         };
-        assert!(!config.enable_sni);
+        assert!(!handler.client_config.enable_sni);
     }
 
     #[test]
@@ -1375,11 +1385,12 @@ mod tests {
                 let (client, _) = super::super::connector::build(&config, resolver.clone())
                     .unwrap()
                     .unwrap();
-                let Security::Tls { config, .. } = &client.security else {
+                let Security::Tls(handler) = &client.security else {
                     panic!("expected TLS carrier");
                 };
                 assert_eq!(
-                    config
+                    handler
+                        .client_config
                         .crypto_provider()
                         .kx_groups
                         .iter()
@@ -1387,7 +1398,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     expected
                 );
-                assert_eq!(config.alpn_protocols, [alpn]);
+                assert_eq!(handler.client_config.alpn_protocols, [alpn]);
             }
         }
     }

@@ -63,6 +63,96 @@ pub(crate) fn tls_verification_name(
     rustls::pki_types::ServerName::try_from(identity).map_err(std::io::Error::other)
 }
 
+pub(crate) fn create_tls_client_handler(
+    tls_client_config: ResolvedTlsClientConfig,
+    hop_location: &NetLocation,
+    default_sni_hostname: Option<String>,
+    resolver: Arc<dyn Resolver>,
+) -> std::io::Result<TlsClientHandler> {
+    let ResolvedTlsClientConfig {
+        options,
+        key_exchange_groups,
+        verify,
+        server_fingerprints,
+        sni_hostname,
+        alpn_protocols,
+        tls_buffer_size,
+        protocol,
+        key,
+        cert,
+        vision,
+    } = tls_client_config;
+    key_exchange_groups.validate_vision(vision)?;
+    crate::config::validate_resolved_client_vision_protocol(vision, &protocol, "TLS")?;
+
+    let sni_hostname = if sni_hostname.is_unspecified() {
+        if let Some(ref hostname) = default_sni_hostname {
+            debug!(
+                "Using default sni hostname for TLS client connection: {}",
+                hostname
+            );
+        }
+        default_sni_hostname
+    } else {
+        sni_hostname.into_option()
+    };
+
+    let key_and_cert_bytes = key.zip(cert).map(|(key, cert)| {
+        // Certificates are already embedded as PEM data during config validation
+        let cert_bytes = cert.as_bytes().to_vec();
+        let key_bytes = key.as_bytes().to_vec();
+
+        (key_bytes, cert_bytes)
+    });
+
+    let client_config = Arc::new(try_create_client_config_with_options(
+        verify,
+        server_fingerprints.into_vec(),
+        alpn_protocols.into_vec(),
+        sni_hostname.is_some(),
+        key_and_cert_bytes,
+        vision,
+        &key_exchange_groups,
+        &options,
+    )?);
+
+    let server_name = tls_verification_name(sni_hostname, hop_location)?;
+    let ech = options
+        .ech
+        .as_ref()
+        .map(|options| crate::ech::Policy::new(options, &server_name))
+        .transpose()?;
+
+    let handler = if vision {
+        let ResolvedClientProxyConfig::Vless {
+            user_id,
+            udp_enabled,
+            ..
+        } = protocol.as_ref()
+        else {
+            // Validated when loading config
+            unreachable!();
+        };
+        let user_id_bytes = parse_user_id(user_id)?.into_boxed_slice();
+        TlsClientHandler::new_vision_vless(
+            client_config,
+            tls_buffer_size,
+            server_name,
+            user_id_bytes,
+            *udp_enabled,
+        )
+    } else {
+        let handler = create_with_hop_context(*protocol, hop_location, None, resolver.clone())?;
+
+        TlsClientHandler::new(client_config, tls_buffer_size, server_name, handler)
+    };
+    Ok(handler
+        .with_handshake_timeout(options.handshake_timeout_ms)
+        .with_kernel(options.kernel_tx, options.kernel_rx)?
+        .with_fragmentation(options.fragmentation)
+        .with_ech(ech, resolver))
+}
+
 pub(crate) fn create_with_hop_context(
     client_proxy_config: ResolvedClientProxyConfig,
     hop_location: &NetLocation,
@@ -227,98 +317,12 @@ pub(crate) fn create_with_hop_context(
                 handler
             }
         }
-        ResolvedClientProxyConfig::Tls(tls_client_config) => {
-            let ResolvedTlsClientConfig {
-                options,
-                key_exchange_groups,
-                verify,
-                server_fingerprints,
-                sni_hostname,
-                alpn_protocols,
-                tls_buffer_size,
-                protocol,
-                key,
-                cert,
-                vision,
-            } = tls_client_config;
-            key_exchange_groups.validate_vision(vision)?;
-            crate::config::validate_resolved_client_vision_protocol(vision, &protocol, "TLS")?;
-
-            let sni_hostname = if sni_hostname.is_unspecified() {
-                if let Some(ref hostname) = default_sni_hostname {
-                    debug!(
-                        "Using default sni hostname for TLS client connection: {}",
-                        hostname
-                    );
-                }
-                default_sni_hostname
-            } else {
-                sni_hostname.into_option()
-            };
-
-            let key_and_cert_bytes = key.zip(cert).map(|(key, cert)| {
-                // Certificates are already embedded as PEM data during config validation
-                let cert_bytes = cert.as_bytes().to_vec();
-                let key_bytes = key.as_bytes().to_vec();
-
-                (key_bytes, cert_bytes)
-            });
-
-            let client_config = Arc::new(try_create_client_config_with_options(
-                verify,
-                server_fingerprints.into_vec(),
-                alpn_protocols.into_vec(),
-                sni_hostname.is_some(),
-                key_and_cert_bytes,
-                vision,
-                &key_exchange_groups,
-                &options,
-            )?);
-
-            let server_name = tls_verification_name(sni_hostname, hop_location)?;
-            let ech = options
-                .ech
-                .as_ref()
-                .map(|options| crate::ech::Policy::new(options, &server_name))
-                .transpose()?;
-
-            if vision {
-                let ResolvedClientProxyConfig::Vless {
-                    user_id,
-                    udp_enabled,
-                    ..
-                } = protocol.as_ref()
-                else {
-                    // Validated when loading config
-                    unreachable!();
-                };
-                let user_id_bytes = parse_user_id(user_id)?.into_boxed_slice();
-                Box::new(
-                    TlsClientHandler::new_vision_vless(
-                        client_config,
-                        tls_buffer_size,
-                        server_name,
-                        user_id_bytes,
-                        *udp_enabled,
-                    )
-                    .with_handshake_timeout(options.handshake_timeout_ms)
-                    .with_kernel(options.kernel_tx, options.kernel_rx)?
-                    .with_fragmentation(options.fragmentation.clone())
-                    .with_ech(ech.clone(), resolver.clone()),
-                )
-            } else {
-                let handler =
-                    create_with_hop_context(*protocol, hop_location, None, resolver.clone())?;
-
-                Box::new(
-                    TlsClientHandler::new(client_config, tls_buffer_size, server_name, handler)
-                        .with_handshake_timeout(options.handshake_timeout_ms)
-                        .with_kernel(options.kernel_tx, options.kernel_rx)?
-                        .with_fragmentation(options.fragmentation.clone())
-                        .with_ech(ech.clone(), resolver.clone()),
-                )
-            }
-        }
+        ResolvedClientProxyConfig::Tls(tls_client_config) => Box::new(create_tls_client_handler(
+            tls_client_config,
+            hop_location,
+            default_sni_hostname,
+            resolver,
+        )?),
         ResolvedClientProxyConfig::Reality {
             fragmentation,
             handshake_timeout_ms,

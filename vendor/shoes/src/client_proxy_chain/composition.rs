@@ -11,6 +11,7 @@ struct Leaf {
     initial: Option<Arc<InitialHopEntry>>,
     proxy: Option<Arc<dyn ProxyConnector>>,
     udp: bool,
+    tcp: bool,
 }
 
 const TCP: u8 = 1;
@@ -20,7 +21,7 @@ const BOTH: u8 = TCP | UDP;
 impl Leaf {
     fn carrier_input(&self, udp: bool) -> u8 {
         if !udp {
-            return TCP;
+            return if self.tcp { TCP } else { 0 };
         }
         if !self.udp {
             return 0;
@@ -105,6 +106,7 @@ impl Composition {
                 .map(|entry| {
                     Node::Client(Leaf {
                         origin: None,
+                        tcp: true,
                         direct: matches!(entry, InitialHopEntry::Direct(_)),
                         udp: entry.supports_udp(),
                         initial: Some(Arc::new(entry)),
@@ -119,6 +121,7 @@ impl Composition {
                     .map(|proxy| {
                         Node::Client(Leaf {
                             origin: None,
+                            tcp: true,
                             direct: false,
                             udp: proxy.supports_udp(),
                             initial: None,
@@ -264,6 +267,9 @@ fn node(
         ResolvedClientHop::Single(mut config) => {
             let origin = config.control.clone();
             let direct = config.protocol.is_direct();
+            let tcp = config.tcp_enabled;
+            // Selection enforces payload policy; the carrier may still be TCP for UDP-over-TCP.
+            config.tcp_enabled = true;
             let (initial, proxy, udp) = if first {
                 config.control = None;
                 let chain = crate::tcp::chain_builder::build_client_proxy_chain_with_limits(
@@ -290,6 +296,7 @@ fn node(
                 initial,
                 proxy,
                 udp,
+                tcp,
             }))
         }
         ResolvedClientHop::Choice(choice) => {
@@ -301,7 +308,13 @@ fn node(
                 && !members.iter().any(Node::contains_selector))
             .then(|| {
                 [
-                    (0..members.len()).collect(),
+                    members
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, member)| {
+                            (member.carrier_inputs(false, None) != 0).then_some(index)
+                        })
+                        .collect(),
                     members
                         .iter()
                         .enumerate()
@@ -640,9 +653,10 @@ mod tests {
     fn native_udp_filters_prefixes_without_consuming_tcp_choices() {
         let (chain, _) = build(
             json!([
+                {"clash_api_address":"127.0.0.1:0","secret":"test"},
                 {"client_group":"entry","client_chains":[
-                    {"name":"tcp-only","address":"192.0.2.1:80","protocol":{"type":"http"}},
-                    {"name":"datagrams","address":"192.0.2.2:1080","protocol":{"type":"socks"}}
+                    {"chain":[{"name":"tcp-only","address":"192.0.2.1:80","protocol":{"type":"http"}}]},
+                    {"chain":[{"name":"datagrams","address":"192.0.2.2:1080","protocol":{"type":"socks"}}]}
                 ]},
                 {"client_group":"exit","client_chain":{"address":"192.0.2.3:443","protocol":{"type":"shadowsocks","cipher":"aes-128-gcm","password":"test"}}}
             ]),
@@ -669,10 +683,11 @@ mod tests {
     fn stream_udp_exit_remains_eligible_after_tcp_only_prefix() {
         let (chain, _) = build(
             json!([
+                {"clash_api_address":"127.0.0.1:0","secret":"test"},
                 {"client_group":"entry","client_chain":{"address":"192.0.2.1:80","protocol":{"type":"http"}}},
                 {"client_group":"exit","client_chains":[
-                    {"name":"native","address":"192.0.2.2:1080","protocol":{"type":"socks"}},
-                    {"name":"stream","address":"192.0.2.3:443","protocol":{"type":"vless","user_id":"550e8400-e29b-41d4-a716-446655440000"}}
+                    {"chain":[{"name":"native","address":"192.0.2.2:1080","protocol":{"type":"socks"}}]},
+                    {"chain":[{"name":"stream","address":"192.0.2.3:443","protocol":{"type":"vless","user_id":"550e8400-e29b-41d4-a716-446655440000"}}]}
                 ]}
             ]),
             json!(["entry", {"pool":["exit"]}]),
@@ -690,8 +705,8 @@ mod tests {
         let (chain, catalog) = build(
             json!([
                 {"client_group":"entry","type":"selector","client_chains":[
-                    {"name":"tcp-only","address":"192.0.2.1:80","protocol":{"type":"http"}},
-                    {"name":"datagrams","address":"192.0.2.2:1080","protocol":{"type":"socks"}}
+                    {"chain":[{"name":"tcp-only","address":"192.0.2.1:80","protocol":{"type":"http"}}]},
+                    {"chain":[{"name":"datagrams","address":"192.0.2.2:1080","protocol":{"type":"socks"}}]}
                 ]},
                 {"client_group":"exit","client_chain":{"address":"192.0.2.3:1080","protocol":{"type":"socks"}}},
                 {"client_group":"blocked","client_chain":[

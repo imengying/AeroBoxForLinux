@@ -10,6 +10,7 @@ use url::Url;
 mod quic;
 mod ss_plugin;
 mod tls;
+mod xhttp;
 
 /// Subscription format negotiation follows FlClash's Linux request identifier.
 pub(crate) const USER_AGENT: &str = "FlClash/v0.9.4 clash-verge Platform/linux";
@@ -478,6 +479,9 @@ pub fn uri(input: &str) -> Result<Value> {
         fields.extend(DIAL_FIELDS);
         fields.extend(tls::link_fields());
         fields.extend(TRANSPORT_KEEPALIVE_FIELDS.iter().map(|(alias, _)| *alias));
+        if v["net"] == "xhttp" {
+            fields.extend(["mode", "extra"]);
+        }
         known_fields(&v, &fields, "VMess 链接")?;
         for field in [
             "type", "net", "scy", "tls", "sni", "alpn", "fp", "host", "path",
@@ -552,9 +556,36 @@ pub fn uri(input: &str) -> Result<Value> {
                     );
                 }
             }
-            "ws" => {
+            "xhttp" => {
+                node["transport"] = xhttp::link(
+                    v["path"].as_str().unwrap_or(""),
+                    v["host"].as_str().unwrap_or(""),
+                    v.get("mode")
+                        .map(|value| value.as_str().context("XHTTP mode 须为文本"))
+                        .transpose()?
+                        .unwrap_or(""),
+                    &v.get("extra")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string())
+                        })
+                        .unwrap_or_default(),
+                )?;
+            }
+            "quic" => {
+                for field in ["host", "path"] {
+                    ensure!(
+                        v[field].as_str().is_none_or(str::is_empty),
+                        "QUIC 传输不支持参数 {field}"
+                    );
+                }
+                node["transport"] = json!({"type":"quic"});
+            }
+            "ws" | "httpupgrade" => {
                 node["transport"] = link_transport(
-                    "ws",
+                    v["net"].as_str().unwrap(),
                     v["path"].as_str().unwrap_or(""),
                     v["host"].as_str().unwrap_or(""),
                 )
@@ -797,6 +828,10 @@ pub fn uri(input: &str) -> Result<Value> {
         "grpc" => node["transport"] = json!({"type":"grpc","service_name":q("serviceName")}),
         "httpupgrade" => node["transport"] = link_transport("httpupgrade", &q("path"), &q("host")),
         "http" | "h2" => node["transport"] = link_transport("http", &q("path"), &q("host")),
+        "xhttp" => {
+            node["transport"] = xhttp::link(&q("path"), &q("host"), &q("mode"), &q("extra"))?
+        }
+        "quic" => node["transport"] = json!({"type":"quic"}),
         other => bail!("不支持的传输方式: {other}"),
     }
     for key in DIAL_FIELDS {
@@ -947,6 +982,16 @@ fn clash(v: &Value) -> Result<Value> {
             "insecure-concurrency",
         ]);
     }
+    if typ == "http" {
+        fields.extend([
+            "http-version",
+            "disable-version-fallback",
+            "headers",
+            "path",
+            "idle-timeout",
+            "ping-timeout",
+        ]);
+    }
     let tls_enabled = v["tls"] == true
         || v["type"] == "https"
         || ["trojan", "hysteria2", "tuic", "anytls", "naive"].contains(&typ);
@@ -1019,6 +1064,7 @@ fn clash(v: &Value) -> Result<Value> {
         ]),
         "http" | "httpupgrade" => fields.push("http-opts"),
         "h2" => fields.push("h2-opts"),
+        "xhttp" => fields.push("xhttp-opts"),
         _ => {}
     }
     known_fields(v, &fields, "Clash 节点")?;
@@ -1029,6 +1075,20 @@ fn clash(v: &Value) -> Result<Value> {
     n["server"] = v["server"].clone();
     n["server_port"] = json!(number(&v["port"]));
     quic::clash(v, typ, &mut n)?;
+    if typ == "http" {
+        for (source, target) in [
+            ("http-version", "version"),
+            ("disable-version-fallback", "disable_version_fallback"),
+            ("headers", "headers"),
+            ("path", "path"),
+            ("idle-timeout", "idle_timeout"),
+            ("ping-timeout", "ping_timeout"),
+        ] {
+            if let Some(value) = v.get(source) {
+                n[target] = value.clone();
+            }
+        }
+    }
     for (alias, field) in [("tfo", "tcp_fast_open"), ("mptcp", "tcp_multi_path")] {
         ensure!(
             v.get(alias).is_none() || v.get(field).is_none(),
@@ -1384,6 +1444,8 @@ fn clash(v: &Value) -> Result<Value> {
             }
             n["transport"] = transport
         }
+        "xhttp" => n["transport"] = xhttp::clash(&v["xhttp-opts"])?,
+        "quic" => n["transport"] = json!({"type":"quic"}),
         other => bail!("不支持的 Clash 传输: {other}"),
     }
     if let Some(obfs) = v.get("obfs") {

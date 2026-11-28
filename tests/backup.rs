@@ -618,7 +618,7 @@ fn running_restore_failure_rolls_back_rule_files_and_actual_traffic() {
     app.service.restore_backup(&path).unwrap_err();
     drop(block);
     assert_eq!(app.service.status().generation, generation);
-    assert_eq!(app.service.runtime_mode().unwrap(), "global");
+    assert_eq!(app.service.runtime_mode(), "global");
     assert_eq!(json_eq(&app.service.snapshot()), json_eq(&before));
     assert_eq!(
         support::request(&app.service, &url).unwrap(),

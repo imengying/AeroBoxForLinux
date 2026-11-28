@@ -60,7 +60,6 @@ pub(crate) struct WireEncoding {
 pub(super) struct LayoutState {
     encoding: WireEncoding,
     ech: Option<EncryptedClientHello>,
-    reality: bool,
 }
 impl LayoutState {
     pub(super) fn new(
@@ -73,12 +72,7 @@ impl LayoutState {
         let signatures = config
             .verifier
             .supported_verify_schemes();
-        let reality = cx.data.reality.is_some();
-        let initial_groups: &[NamedGroup] = if reality {
-            &[NamedGroup::X25519]
-        } else {
-            &[NamedGroup::X25519MLKEM768, NamedGroup::X25519]
-        };
+        let initial_groups = [NamedGroup::X25519MLKEM768, NamedGroup::X25519];
         if config.client_hello_profile.is_some()
             || cx.common.is_quic()
             || matches!(config.ech_mode, Some(super::EchMode::Grease(_)))
@@ -97,9 +91,6 @@ impl LayoutState {
                 .iter()
                 .any(|scheme| !signatures.contains(&SignatureScheme::from(*scheme)))
             || GROUPS.iter().any(|group| {
-                if reality && *group == 4588 {
-                    return false;
-                }
                 config
                     .find_kx_group(NamedGroup::from(*group), ProtocolVersion::TLSv1_3)
                     .is_none()
@@ -163,7 +154,6 @@ impl LayoutState {
         Ok(Some(Self {
             encoding: WireEncoding { grease, extensions },
             ech,
-            reality,
         }))
     }
 
@@ -184,7 +174,6 @@ impl LayoutState {
                 .chain(
                     GROUPS
                         .iter()
-                        .filter(|group| !self.reality || **group != 4588)
                         .map(|v| NamedGroup::from(*v)),
                 )
                 .collect(),

@@ -6,6 +6,7 @@ mod outbound;
 mod quic;
 pub(crate) mod ss_plugin;
 mod tls;
+mod xhttp;
 use anyhow::Context;
 pub use outbound::convert_outbound;
 use serde_json::{Map, Value};

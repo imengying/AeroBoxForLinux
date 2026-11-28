@@ -1,11 +1,12 @@
 use super::*;
 
-/// Recovery starts from fresh defaults; old schemas are never interpreted.
+/// Back up unreadable data before restoring defaults.
 pub fn recover_store(
     dir: Option<PathBuf>,
     mut error: anyhow::Error,
 ) -> Result<Option<model::Store>> {
     adw::init().context("无法初始化 Wayland 界面")?;
+    desktop::follow_settings();
     let path = dir
         .clone()
         .map(Ok)

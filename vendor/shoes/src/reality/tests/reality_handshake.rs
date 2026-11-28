@@ -330,31 +330,44 @@ fn certificate_verify_and_server_finished_must_verify() {
 fn client_hello_carries_authenticated_reality_metadata() {
     use crate::reality::reality_auth::{decrypt_session_id, derive_auth_key, perform_ecdh};
 
-    let (mut cc, mut sc) = configs(CipherSuite::AES_128_GCM_SHA256);
-    let short_id = [1, 2, 3, 4, 5, 6, 7, 8];
-    cc.short_id = short_id;
-    sc.short_ids = vec![[0; 8], short_id, [255; 8]];
-    sc.min_client_version = Some([1, 8, 1]);
-    sc.max_client_version = Some([1, 8, 1]);
-    sc.max_time_diff = Some(60_000);
+    use crate::config::tls::TlsClientFingerprint::{Chrome, Firefox};
+    for fingerprint in [None, Some(Chrome), Some(Firefox)] {
+        let (mut cc, mut sc) = configs(CipherSuite::AES_128_GCM_SHA256);
+        cc.client_fingerprint = fingerprint;
+        if fingerprint == Some(Chrome) {
+            cc.cipher_suites.clear();
+        }
+        let short_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        cc.short_id = short_id;
+        sc.short_ids = vec![[0; 8], short_id, [255; 8]];
+        sc.min_client_version = Some([1, 8, 1]);
+        sc.max_client_version = Some([1, 8, 1]);
+        sc.max_time_diff = Some(60_000);
 
-    let mut client = cc.create_connection().unwrap();
-    let mut hello = Vec::new();
-    client.write_tls(&mut hello).unwrap();
-    let shares = extract_client_key_shares(&hello).unwrap();
-    let shared =
-        perform_ecdh(&sc.private_key, shares.authentication_public_key().unwrap()).unwrap();
-    let auth = derive_auth_key(&shared, &hello[11..31], b"REALITY").unwrap();
-    assert_eq!(hello[43], 32);
-    let session = hello[44..76].try_into().unwrap();
-    let mut aad = hello[5..].to_vec();
-    aad[39..71].fill(0);
-    let metadata = decrypt_session_id(session, &auth, &hello[31..43], &aad).unwrap();
-    assert_eq!(metadata[..4], [1, 8, 1, 0]);
-    let timestamp = u32::from_be_bytes(metadata[4..8].try_into().unwrap()) as u64;
-    assert!(timestamp.abs_diff(crate::clock::unix_seconds().unwrap()) <= 1);
-    assert_eq!(metadata[8..], short_id);
-    sc.authenticate_client_hello(&hello).unwrap();
+        let mut client = cc.create_connection().unwrap();
+        let mut hello = Vec::new();
+        client.write_tls(&mut hello).unwrap();
+        let shares = extract_client_key_shares(&hello).unwrap();
+        if fingerprint.is_some() {
+            assert_ne!(
+                shares.x25519.unwrap().as_slice(),
+                &shares.hybrid.unwrap()[1184..]
+            );
+        }
+        let shared =
+            perform_ecdh(&sc.private_key, shares.authentication_public_key().unwrap()).unwrap();
+        let auth = derive_auth_key(&shared, &hello[11..31], b"REALITY").unwrap();
+        assert_eq!(hello[43], 32);
+        let session = hello[44..76].try_into().unwrap();
+        let mut aad = hello[5..].to_vec();
+        aad[39..71].fill(0);
+        let metadata = decrypt_session_id(session, &auth, &hello[31..43], &aad).unwrap();
+        assert_eq!(metadata[..4], [1, 8, 1, 0]);
+        let timestamp = u32::from_be_bytes(metadata[4..8].try_into().unwrap()) as u64;
+        assert!(timestamp.abs_diff(crate::clock::unix_seconds().unwrap()) <= 1);
+        assert_eq!(metadata[8..], short_id);
+        sc.authenticate_client_hello(&hello).unwrap();
+    }
 }
 
 #[test]

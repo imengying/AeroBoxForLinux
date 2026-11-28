@@ -229,7 +229,6 @@ impl Service {
             let cleanup = self.stop_locked();
             return Err(error.context(format!("设置系统代理失败；清理结果：{cleanup:?}")));
         }
-        self.log("连接已启动");
         Ok(())
     }
     pub fn stop(&self) -> Result<()> {
@@ -246,10 +245,7 @@ impl Service {
         if let Some(core) = core {
             runtime::executor().block_on(core.shutdown())?;
         }
-        let run = std::mem::take(&mut *self.running.lock().unwrap());
-        if run.generation.is_some() {
-            self.log("连接已停止");
-        }
+        *self.running.lock().unwrap() = Running::default();
         restore
     }
     pub fn restart(&self) -> Result<()> {
@@ -318,15 +314,14 @@ impl Service {
         candidate.settings.system_proxy = enabled;
         self.commit_state(&before, candidate)
     }
-    pub fn runtime_mode(&self) -> Result<String> {
-        Ok(self
-            .running
+    pub fn runtime_mode(&self) -> String {
+        self.running
             .lock()
             .unwrap()
             .prepared
             .as_ref()
             .map(|p| p.settings.routing_mode.clone())
-            .unwrap_or_else(|| self.snapshot().settings.routing_mode))
+            .unwrap_or_else(|| self.snapshot().settings.routing_mode)
     }
     pub fn set_routing_mode(&self, mode: &str) -> Result<()> {
         ensure!(matches!(mode, "rule" | "global"), "无效的出站模式");
@@ -642,9 +637,6 @@ impl Service {
             .map_err(|error| error.context("备份未恢复；登录启动状态可能已更改，请检查设置页"))
     }
 
-    pub fn network_info(&self) -> Result<network::NetworkInfo> {
-        self.network_info_updates(|_| {})
-    }
     pub fn network_info_updates(
         &self,
         progress: impl Fn(&network::NetworkInfo),
@@ -656,7 +648,7 @@ impl Service {
             let run = self.running.lock().unwrap();
             network::exit_client(run.prepared.as_ref().map(|prepared| &prepared.config))?
         };
-        let info = network::detect(client, settings.ipv6, generation.is_some(), |info| {
+        let info = network::detect(client, settings.ipv6, |info| {
             if self.status().generation == generation && self.subscription_revision() == revision {
                 progress(info);
             }

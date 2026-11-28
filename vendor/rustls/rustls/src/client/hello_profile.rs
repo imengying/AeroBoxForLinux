@@ -58,7 +58,8 @@ impl ClientHelloProfile {
         hello.renegotiation_info = Some(PayloadU8::empty());
         hello.extensions.hello_profile = Some(self);
         if let Some(groups) = &mut hello.named_groups {
-            groups.sort_by_key(|group| rank(&[29, 23, 24, 25, 256, 257], u16::from(*group)));
+            groups
+                .sort_by_key(|group| rank(&[0x11ec, 29, 23, 24, 25, 256, 257], u16::from(*group)));
         }
         hello.certificate_compression_algorithms = None;
         if let Some(schemes) = &mut hello.signature_schemes {

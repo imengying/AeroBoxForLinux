@@ -26,7 +26,7 @@ pub(crate) fn supports_udp_offline(
         for hop in hops.into_iter().rev() {
             required = match hop {
                 ResolvedClientHop::Single(config) => {
-                    let mut input = required & 1;
+                    let mut input = if config.tcp_enabled { required & 1 } else { 0 };
                     if required & 2 != 0 {
                         if config.protocol.is_direct() || config.protocol.is_wireguard() {
                             input |= 2;
@@ -82,10 +82,10 @@ pub(crate) fn build_client_proxy_chain_with_limits(
     resolver: Arc<dyn Resolver>,
     limits: crate::config::GlobalLimits,
 ) -> std::io::Result<ClientProxyChain> {
-    if client_chain
-        .iter()
-        .any(|hop| matches!(hop, ResolvedClientHop::Choice(_)))
-    {
+    if client_chain.iter().any(|hop| match hop {
+        ResolvedClientHop::Choice(_) => true,
+        ResolvedClientHop::Single(client) => !client.tcp_enabled,
+    }) {
         return ClientProxyChain::composed(client_chain, resolver, limits);
     }
     let hops: Vec<ResolvedClientConfig> = client_chain

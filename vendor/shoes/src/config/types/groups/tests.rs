@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 fn create_test_client_config() -> ClientConfig {
     ClientConfig {
+        tcp_enabled: true,
         domain_resolver: None,
         connect_timeout_ms: None,
         dial_options: Default::default(),
@@ -60,6 +61,7 @@ fn test_client_config_group() {
         client_chains: OneOrSome::Some(vec![
             ConfigSelection::Config(create_test_client_config()).into(),
             ConfigSelection::Config(ClientConfig {
+                tcp_enabled: true,
                 domain_resolver: None,
                 connect_timeout_ms: None,
                 dial_options: Default::default(),

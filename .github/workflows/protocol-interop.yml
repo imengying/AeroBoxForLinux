@@ -44,6 +44,14 @@ jobs:
           echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  peer.tar.gz' | sha256sum --check --strict
           tar -xzf peer.tar.gz --strip-components=1 sing-box-1.14.4-linux-amd64/sing-box
           echo "AEROBOX_TEST_PEER=$PWD/sing-box" >> "$GITHUB_ENV"
+      - name: Prepare pinned independent Xray server
+        run: |
+          cd target/protocol-reference
+          curl --fail --location --retry 3 --output xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip
+          echo 'e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214  xray.zip' | sha256sum --check --strict
+          python3 -c 'from zipfile import ZipFile; ZipFile("xray.zip").extract("xray")'
+          chmod +x xray
+          echo "AEROBOX_TEST_XRAY=$PWD/xray" >> "$GITHUB_ENV"
       - name: Test against independent protocol implementations
         run: |
           set -o pipefail

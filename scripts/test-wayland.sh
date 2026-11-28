@@ -38,6 +38,7 @@ export GSK_RENDERER=cairo
 export GTK_ANIMATIONS=0
 export G_DEBUG=fatal-criticals
 export GTK_A11Y=none
+export XDG_CURRENT_DESKTOP=GNOME
 # Opt-in regression check for desktops without SVG/Pixbuf loader packages.
 if [ "${AEROBOX_TEST_NO_SVG:-0}" = 1 ]; then
   : > "$test_dir/pixbuf-loaders.cache"
@@ -53,5 +54,10 @@ while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do
   if [ "$attempt" -ge 50 ]; then cat "$test_dir/weston.log"; exit 1; fi
   sleep 0.1
 done
-dbus-run-session -- "$binary" --data-dir "$test_dir/data" --smoke-test "$output_dir/home.png"
+dbus-run-session -- sh -c '
+  gsettings set org.gnome.desktop.wm.preferences button-layout ":close"
+  gsettings set org.gnome.desktop.interface font-name "Sans 11"
+  gsettings set org.gnome.desktop.interface text-scaling-factor 1.0
+  exec "$@"
+' sh "$binary" --data-dir "$test_dir/data" --smoke-test "$output_dir/home.png"
 test -s "$output_dir/home.png"

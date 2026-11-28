@@ -15,6 +15,7 @@ pub(super) fn client(
         domain_resolver: source.domain_resolver,
         connect_timeout_ms: source.connect_timeout_ms,
         dial_options: source.dial_options,
+        tcp_enabled: source.tcp_enabled,
         protocol: client_protocol(source.protocol, carrier),
         transport: source.transport,
         tcp_settings: source.tcp_settings,

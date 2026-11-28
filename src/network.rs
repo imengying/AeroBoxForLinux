@@ -12,7 +12,6 @@ use std::{
 pub struct NetworkInfo {
     pub ipv4: Option<String>,
     pub ipv6: Option<String>,
-    pub via_proxy: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -128,13 +127,11 @@ pub(crate) fn request_failure(error: &reqwest::Error) -> String {
 pub(crate) fn detect(
     client: Client,
     ipv6: bool,
-    via_proxy: bool,
     progress: impl Fn(&NetworkInfo),
 ) -> Result<NetworkInfo> {
     detect_with_endpoints(
         &client,
         ipv6,
-        via_proxy,
         &["https://api4.ipify.org", "https://ipv4.icanhazip.com"],
         &["https://api6.ipify.org", "https://ipv6.icanhazip.com"],
         EXIT_TOTAL_TIMEOUT,
@@ -145,17 +142,13 @@ pub(crate) fn detect(
 fn detect_with_endpoints(
     client: &Client,
     ipv6: bool,
-    via_proxy: bool,
     v4_endpoints: &[&str],
     v6_endpoints: &[&str],
     budget: Duration,
     progress: impl Fn(&NetworkInfo),
 ) -> Result<NetworkInfo> {
     let deadline = Instant::now() + budget;
-    let mut info = NetworkInfo {
-        via_proxy,
-        ..Default::default()
-    };
+    let mut info = NetworkInfo::default();
     let mut last_error = anyhow::anyhow!("检测超时");
     // Publish each family as soon as it completes. IPv6 can never hold back a
     // usable IPv4 address, and a failed family cannot discard a successful one.

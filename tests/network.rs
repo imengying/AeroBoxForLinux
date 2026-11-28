@@ -346,7 +346,7 @@ fn exit_ip_detection_uses_the_selected_proxy_and_respects_disabled_ipv6() {
     app.service.start().unwrap();
     // The fixture rejects TLS, so this checks routing without reaching public
     // IP services or trusting a test certificate in the application.
-    assert!(app.service.network_info().is_err());
+    assert!(app.service.network_info_updates(|_| {}).is_err());
     let targets = targets.lock().unwrap();
     assert!(
         targets

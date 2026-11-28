@@ -372,13 +372,16 @@ fn reality_preserves_explicit_alpn_and_tls13_cipher_selection() {
 
 #[test]
 fn http_proxy_and_naive_keep_their_application_protocol_with_browser_profiles() {
-    for (kind, expected) in [("http", "http/1.1"), ("naive", "h2")] {
+    for (kind, expected) in [
+        ("http", json!(["h2", "http/1.1"])),
+        ("naive", json!(["h2"])),
+    ] {
         let node = json!({"type":kind,"tag":kind,"server":"offline.invalid","server_port":443,
             "tls":{"enabled":true,"server_name":"offline.invalid","utls":{"enabled":true}}});
         let converted = protocol::convert_outbound(node, "fixture").unwrap();
         assert_eq!(
             converted["client_chains"][0]["chain"][0]["protocol"]["alpn_protocols"],
-            json!([expected])
+            expected
         );
     }
 }

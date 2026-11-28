@@ -84,7 +84,7 @@ separator { background: alpha(#728292,.13); min-height: 0.09em; }
 .home-stat-value { font-size: 1.18em; font-weight: 600; font-feature-settings: "tnum"; }
 /* Compact icon targets keep the same geometry while busy. */
 .aerobox-window button.floating-action { border-radius: 12px; padding: 0; min-width: 3em; min-height: 3em; box-shadow: 0 2px 6px alpha(#1a202a,.12); }
-.floating-action image { -gtk-icon-size: 1.65em; }
+.floating-action image { -gtk-icon-size: 1.65em; margin: 0; padding: 0; }
 .aerobox-window button.home-connect image { color: @accent_fg_color; filter: none; -gtk-icon-filter: none; }
 .dark.aerobox-window button.home-connect image { color: @accent_fg_color; filter: none; -gtk-icon-filter: none; }
 .aerobox-window button.home-connect.home-running image,

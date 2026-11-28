@@ -167,6 +167,7 @@ pub type ResolvedClientChoice = ChoicePlan<ResolvedClientConfig>;
 impl Default for ResolvedClientConfig {
     fn default() -> Self {
         Self {
+            tcp_enabled: true,
             name: None,
             control: None,
             bind_interface: crate::option_util::NoneOrOne::None,

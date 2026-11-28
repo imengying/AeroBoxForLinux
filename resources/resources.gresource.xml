@@ -2,6 +2,8 @@
 <gresources>
   <gresource prefix="/io/github/imengying/AeroBoxForLinux">
     <file alias="icons/scalable/actions/aerobox-bolt-symbolic.svg">icons/bolt-symbolic.svg</file>
+    <file alias="icons/scalable/actions/aerobox-start-symbolic.svg">icons/start-symbolic.svg</file>
+    <file alias="icons/scalable/actions/aerobox-stop-symbolic.svg">icons/stop-symbolic.svg</file>
     <file>styles/main.css</file>
     <file>styles/theme.css</file>
     <file>styles/components.css</file>

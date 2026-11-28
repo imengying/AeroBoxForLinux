@@ -2,6 +2,7 @@
 mod smoke;
 #[cfg(feature = "ui-smoke")]
 use smoke::{seed_smoke, smoke_sequence};
+mod desktop;
 mod editors;
 mod home;
 mod nodes;
@@ -193,7 +194,7 @@ struct Ui {
     window_size_generation: Cell<u64>,
     scroll: gtk::ScrolledWindow,
     content_clamp: adw::Clamp,
-    layout_scale: Cell<(u32, i32)>,
+    layout_scale: Cell<(f64, i32)>,
     floating: gtk::Overlay,
     home_action: RefCell<Option<gtk::Button>>,
     nodes_action: RefCell<Option<gtk::Button>>,
@@ -231,6 +232,7 @@ impl Ui {
     ) -> Rc<Self> {
         const MIN_WIDTH: i32 = 480;
         const MIN_HEIGHT: i32 = 400;
+        desktop::follow_settings();
         let settings = service.snapshot().settings;
         apply_theme(&settings.theme);
         let typography = typography::Typography::new(settings.font_size);
@@ -307,13 +309,15 @@ impl Ui {
         nav_scroll.set_child(Some(&nav));
         let split = adw::OverlaySplitView::new();
         split.set_sidebar(Some(&sidebar));
-        let sidebar_width = sidebar_width(settings.font_size);
+        split.set_sidebar_width_unit(adw::LengthUnit::Px);
+        let sidebar_width = sidebar_width(typography.layout_font_size());
         split.set_min_sidebar_width(sidebar_width);
         split.set_max_sidebar_width(sidebar_width);
         split.set_sidebar_width_fraction(0.2);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = adw::HeaderBar::new();
-        header.add_css_class("transparent-header app-header");
+        header.add_css_class("transparent-header");
+        header.add_css_class("app-header");
         header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
         content.append(&header);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 16);
@@ -353,7 +357,7 @@ impl Ui {
             window_size_generation: Cell::new(0),
             scroll,
             content_clamp: clamp,
-            layout_scale: Cell::new((0, 0)),
+            layout_scale: Cell::new((0.0, 0)),
             floating,
             home_action: RefCell::new(None),
             nodes_action: RefCell::new(None),
@@ -443,6 +447,16 @@ impl Ui {
                     ui.observe_window_size();
                 }
             });
+        }
+        for property in ["gtk-font-name", "gtk-xft-dpi"] {
+            let weak = Rc::downgrade(&ui);
+            gtk::Settings::default()
+                .expect("GTK settings")
+                .connect_notify_local(Some(property), move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.apply_font_size(ui.typography.preview());
+                    }
+                });
         }
         let weak = Rc::downgrade(&ui);
         glib::timeout_add_local(Duration::from_secs(1), move || {
@@ -589,7 +603,7 @@ impl Ui {
     /// Apply a font size to the window and the pieces whose width is measured
     /// in pixels rather than em, so a live preview stays internally consistent.
     fn apply_font_size(&self, font_size: u32) {
-        self.typography.apply(font_size);
+        self.typography.set_font_size(font_size);
         self.update_viewport_scale();
     }
 
@@ -597,7 +611,7 @@ impl Ui {
     /// the available viewport. The saved normal geometry is never overwritten
     /// when maximizing, fullscreening or switching between density classes.
     fn update_viewport_scale(&self) {
-        let font_size = self.typography.preview();
+        let font_size = self.typography.layout_font_size();
         // Use the unscaled sidebar reservation. Measuring the scaled sidebar
         // would toggle the density back and forth at a breakpoint.
         let width = (self.window.width() - sidebar_width(font_size).round() as i32).max(0);
@@ -610,9 +624,9 @@ impl Ui {
         }
         let density = self.typography.density();
         self.split
-            .set_min_sidebar_width(sidebar_width(self.typography.preview()) * density);
+            .set_min_sidebar_width(sidebar_width(font_size) * density);
         self.split
-            .set_max_sidebar_width(sidebar_width(self.typography.preview()) * density);
+            .set_max_sidebar_width(sidebar_width(font_size) * density);
         let gutter = (20.0 * density).round() as i32;
         let top = (10.0 * density).round() as i32;
         margin(&self.body, gutter, gutter, top, self.body.margin_bottom());
@@ -1277,6 +1291,7 @@ fn apply_theme(theme: &str) {
         _ => adw::ColorScheme::Default,
     });
 }
+
 /// Depth-first list of every descendant widget, used by the UI checks.
 pub(super) fn descendants(root: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
     let mut widgets = vec![];
@@ -1434,6 +1449,10 @@ fn busy_content(title: Option<&str>) -> (gtk::Box, gtk::Spinner) {
 fn update_action(button: &gtk::Button, icon: &str, title: &str) {
     if button.has_css_class("floating-action") {
         button.set_icon_name(icon);
+        if let Some(image) = button.child() {
+            image.set_halign(gtk::Align::Center);
+            image.set_valign(gtk::Align::Center);
+        }
     } else {
         button.set_child(Some(&action_content(icon, title)));
     }
@@ -1578,10 +1597,10 @@ fn switch_row(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
 // version reliably offers.
 // Sidebar width follows the font so the brand and nav labels keep their
 /// margins instead of clipping against a fixed track.
-fn sidebar_width(font_size: u32) -> f64 {
+fn sidebar_width(font_size: f64) -> f64 {
     // Keep this width in user-font units. Viewport density is applied once by
     // `update_viewport_scale`, rather than being multiplied in twice.
-    128.0 * (font_size as f64 / 11.0).clamp(0.92, 1.5)
+    128.0 * (font_size / 11.0).clamp(0.92, 1.5)
 }
 fn follow_width(
     grid: &gtk::FlowBox,

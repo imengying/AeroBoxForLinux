@@ -10,9 +10,9 @@ Shadowsocks 支持应用内实现的 `obfs-local`（HTTP / TLS 混淆）和 `v2r
 
 普通 Chrome TLS 1.2 允许一次服务端发起的安全重协商，校验此前 Finished、证书、ALPN 和 EMS，重新认证后再继续发送应用数据。Chrome 的显式版本、密码套件、曲线设置必须与模板相符；Vision / ECH / REALITY 内部仍强制 TLS 1.3。Chrome133 是 TCP TLS 模板，不能用于 QUIC。Firefox 仍是基于实际能力的 Firefox120 风格布局，提供第二份独立 P-256 共享，不宣称完整浏览器模拟。两者都不包含浏览器的 HTTP 行为。
 
-未启用 ECH 时带 GREASE ECH；启用后使用真实加密 ClientHello。REALITY Chrome 握手移除混合交换，只使用参与认证的 X25519 共享；其特殊证书验签规则仅限 REALITY。
+未启用 ECH 时带 GREASE ECH；启用后使用真实加密 ClientHello。REALITY 的 Chrome / Firefox 握手同时提供 X25519MLKEM768 和独立 X25519 共享，以独立 X25519 密钥派生认证信息，TLS 交换由目标服务器协商；其特殊证书验签规则仅限 REALITY。
 
-TLS 默认使用 Firefox 指纹；明确指定 `chrome` 时使用 Chrome，其他名称（如 `safari`）按 Firefox 处理。JSON 可通过 `tls.utls.enabled: false` 关闭浏览器指纹。普通 TCP 浏览器握手默认 ALPN 为 `h2`、`http/1.1`；WebSocket / HTTP Upgrade / HTTPS 代理默认 `http/1.1`，gRPC / HTTP2 / Naive 默认 `h2`（Naive QUIC 使用 `h3`）。节点显式指定的 ALPN 会保留，传输开始前校验协商结果，避免 HTTP 版本错配。REALITY 支持显式 ALPN 和已实现的 TLS 1.3 密码套件。
+TLS 默认使用 Firefox 指纹；明确指定 `chrome` 时使用 Chrome，其他名称（如 `safari`）按 Firefox 处理。JSON 可通过 `tls.utls.enabled: false` 关闭浏览器指纹。普通 TCP 浏览器握手默认 ALPN 为 `h2`、`http/1.1`；WebSocket / HTTP Upgrade 默认 `http/1.1`，gRPC / HTTP2 / Naive 默认 `h2`（Naive QUIC 使用 `h3`）。HTTP 代理与 XHTTP 按所选 HTTP 版本设置 ALPN；显式列表必须包含所选版本，开始传输前校验协商结果。REALITY 支持显式 ALPN 和已实现的 TLS 1.3 密码套件。
 
 TLS 接收 `P256`、`P384`、`P521`、`X25519` 和 `X25519MLKEM768` 曲线名称，证书与客户端密钥可用 PEM 文本、按行数组或文件路径，非空内联值优先。`certificate_sha256` 校验完整叶证书，`certificate_public_key_sha256` 校验叶证书公钥，均使用 Base64 SHA-256；任一固定哈希匹配即可认证自签名证书，仍验证握手签名，不能与自定义信任证书同用。Clash `fingerprint` 为证书 SHA-256 十六进制值，命中 CA 时还会验证证书链和服务名；`certificate` / `private-key` 为客户端证书和私钥，与浏览器指纹无关。字段语义参考 [sing-box TLS](https://sing-box.sagernet.org/configuration/shared/tls/) 和 [Mihomo TLS](https://wiki.metacubex.one/config/proxies/tls/)。
 
@@ -24,7 +24,9 @@ VMess / VLESS 的用户标识支持 UUID 和字符串。VLESS 支持 `encryption
 
 VMess 同时支持 AEAD（`alter_id: 0`）与仍在使用的旧认证协议（`alter_id: 1–65535`），载荷加密支持 `auto`、`aes-128-gcm`、`chacha20-poly1305`、`aes-128-cfb`、`none` 和 `zero`，支持 TCP、UDP、TLS 及已有传输组合。`global_padding` 与 `authenticated_length` 按所选密码方案应用。Clash 的 `alterId` 和分享链接的 `aid` 会保留并校验。
 
-VLESS 的 `xtls-rprx-vision` 使用 TLS、REALITY 或 VLESS 原生加密，不与 WebSocket、gRPC 等额外传输或多路复用叠加；Vision UDP 使用 XUDP。节点声明 `network: "tcp"` 时禁止该节点转发 UDP，开启 UoT 或多路复用也不会覆盖此限制。
+VLESS 的 `xtls-rprx-vision` 使用 TLS、REALITY 或 VLESS 原生加密，不与 WebSocket、gRPC 等额外传输或多路复用叠加；Vision UDP 使用 XUDP。节点声明 `network: "tcp"` 时禁止转发 UDP，`network: "udp"` 时禁止转发 TCP；选择器不会为被禁止的请求改用其他节点。限制作用于业务流量，UDP 所需的 TCP 承载（如 UoT）仍可使用。
+
+XHTTP 支持 JSON、Clash `network: xhttp` / `xhttp-opts` 和分享链接导入，提供 HTTP/1.1、HTTP/2、HTTP/3，以及 `auto`、`packet-up`、`stream-up`、`stream-one` 模式。支持路径、Host、自定义请求头、填充长度、分包大小、发送间隔和 gRPC 请求头开关。TLS 默认使用 HTTP/2，ALPN 为 `h3` 时使用 HTTP/3；REALITY 使用 HTTP/2。普通 TLS 共用 ECH、分片、证书验证和 kTLS 的实现及限制。上游 `downloadSettings`、XMUX 和扩展的头部/载荷放置选项尚未接入。
 
 VMess / VLESS 支持普通 UDP、XUDP 与 `packetaddr` 编码；VLESS 默认 XUDP，VMess 默认普通 UDP，`packet_encoding` 可设为 `"xudp"`、`"packetaddr"` 或空字符串。`packetaddr` 在发送前按节点 DNS 策略解析目标域名并编码 IP 地址。XUDP 支持跨传输分片发送最长 65535 字节的数据报；空数据报在线协议中没有 UDP 载荷语义，需使用 `packetaddr` 或支持空包的原生 UDP 编码。导入时检查用户标识、密钥、TLS 参数和内联证书，订阅更新保留有效节点并报告无效项；证书文件在启动时读取检查。
 
@@ -44,7 +46,9 @@ gRPC / HTTP2 传输支持 `idle_timeout` 和 `ping_timeout`；gRPC 还支持 `pe
 
 HTTP 传输的 `host` 支持多个候选，每次建立传输时随机选择。Clash 的 `smux` 设置可导入为 smux / yamux / h2mux；关闭时不应用其参数。SOCKS 和 Naive 的 Clash 节点支持导入 UoT 开关与版本。
 
-当前覆盖上述客户端功能，并非 sing-box 全部配置。HTTP 代理出站仍使用 HTTP/1.1 CONNECT，未实现新版 HTTP/2、HTTP/3 和自动版本回退；Hysteria2 Realm、BBR profile、TCP Brutal 多路复用、SOCKS4/4a 及 `network: "udp"` 单独限制 TCP 也尚未实现。Naive 的 HTTP/2、HTTP/3 与 HTTP 代理出站是不同实现。单节点 DNS 由应用设置统一管理。
+HTTP 代理出站支持 HTTP/1.1 和 HTTP/2 CONNECT。`version` 可指定 `1` 或 `2`；默认在启用 TLS 且未设置路径或 Host 请求头时使用 HTTP/2，否则使用 HTTP/1.1。TLS 协商允许 HTTP/1.1 回退，`disable_version_fallback: true` 可关闭回退；不会在发送业务数据失败后重放请求。HTTP/2 支持连接复用以及 `idle_timeout`、`ping_timeout`。
+
+当前覆盖上述客户端功能，并非 sing-box 全部配置。HTTP 代理出站的 HTTP/3、Hysteria2 Realm、BBR profile、TCP Brutal 多路复用、SOCKS4/4a 尚未实现。Naive 的 HTTP/2、HTTP/3 与 HTTP 代理出站是不同实现。单节点 DNS 由应用设置统一管理。
 
 `tcp_fast_open`、`tcp_multi_path` 使用 Linux 的 TCP Fast Open 和 MPTCP 套接字；它们只适用于 TCP 传输。MPTCP 是否使用多条路径取决于操作系统和服务端配置。`udp_fragment` 控制 IPv4 / IPv6 UDP 套接字的分片策略，并同步作用于 QUIC 和 Hysteria2 端口跳跃创建的套接字。
 
