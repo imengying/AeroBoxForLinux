@@ -11,6 +11,10 @@ is launched. Native crypto backends use explicit AeroBox RustCrypto
 providers and local patches for rustls, Quinn, rcgen, BLAKE3 and related crates.
 The upstream license and notices are retained.
 
+Upstream Docker/cross-compilation, standalone release and JavaScript benchmark
+drivers are omitted. AeroBox uses `cargo xtask` for its own development and
+packaging; protocol fixtures and the Rust benchmark assertions remain in-tree.
+
 AeroBox additions include the embedded lifecycle controller, platform socket
 protection/DNS integration, Android borrowed TUN support, strict configuration
 conversion, native Shadowsocks/SOCKS UDP, UoT v1/v2, Android stream transports,

@@ -68,7 +68,7 @@ export AEROBOX_TUIC_PEER="$test_output/tuic-peer"
 export AEROBOX_ECH_PEER="$test_output/ech-peer"
 export AEROBOX_TLS_PROFILE_PEER="$test_output/tls-profile-peer"
 export AEROBOX_NAIVE_PEER="$test_output/naive-peer"
-python3 vendor/shoes/tests/fixtures/tls12-renegotiation-peer/build.py
+cargo xtask tls12-peer
 export AEROBOX_TLS12_RENEGOTIATION_PEER="$test_output/tls12-renegotiation-peer"
 (cd vendor/support/aerobox-crypto/tests/fixtures/cbc-peer &&
     CGO_ENABLED=0 GOMAXPROCS=1 go build -p 1 -o "$test_output/cbc-peer" main.go)

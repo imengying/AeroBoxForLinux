@@ -21,9 +21,7 @@ export XDG_DATA_HOME="$test_dir/data"
 export XDG_CACHE_HOME="$test_dir/cache"
 cp "$binary" "$test_dir/AeroBox"
 chmod 755 "$test_dir/AeroBox"
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cp "$script_dir/install.sh" "$script_dir/test-desktop.py" "$test_dir/"
-cp "$script_dir/../resources/icons/io.github.imengying.AeroBoxForLinux.png" "$test_dir/"
+cargo xtask desktop-prepare "$test_dir"
 test_width=${AEROBOX_TEST_WIDTH:-1400}
 case "$test_width" in 1400|1920) ;; *) printf '%s\n' 'AEROBOX_TEST_WIDTH must be 1400 or 1920' >&2; exit 1 ;; esac
 cat > "$test_dir/sway.config" <<CONFIG
@@ -68,14 +66,9 @@ while [ -z "${WAYLAND_DISPLAY:-}" ] || [ -z "${SWAYSOCK:-}" ]; do
   sleep 0.1
 done
 swaymsg -t get_outputs -r > "$test_dir/screenshots/outputs.json"
-python3 - "$test_dir/screenshots/outputs.json" <<'PY'
-import json, sys
-outputs = json.load(open(sys.argv[1]))
-assert any(o['active'] and o['scale'] == 1.25 for o in outputs), outputs
-PY
 "$test_dir/AeroBox" --data-dir "$test_dir/data" --smoke-test "$test_dir/screenshots/home.png"
 test -s "$test_dir/screenshots/home.png"
-python3 "$test_dir/test-desktop.py" "$test_dir"
+"$test_dir/xtask" desktop "$test_dir" > "$test_dir/screenshots/desktop-launch.log" 2>&1 || { cat "$test_dir/screenshots/desktop-launch.log"; exit 1; }
 SESSION
 # A headless compositor still refuses to run as root. Drop privileges inside
 # this disposable directory; all application and D-Bus state stays isolated.

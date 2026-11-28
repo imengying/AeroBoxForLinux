@@ -35,7 +35,7 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
           cargo clippy --bin AeroBox --features ui-smoke --locked -- -D warnings
       - name: Check task ownership and protocol state machines
-        run: scripts/check-network.sh
+        run: cargo xtask network
       - name: Test
         run: cargo test --locked
       - name: Test network and TLS components
@@ -52,12 +52,8 @@ jobs:
         env:
           AEROBOX_TEST_SCALE: "1.25"
         run: timeout 90s scripts/test-wayland.sh
-      - name: Build release without development features
-        run: cargo build --release --locked --no-default-features
-      - name: Package
-        run: |
-          scripts/package.sh amd64
-          python3 scripts/check-package.py target/packages/AeroBoxForLinux-linux-amd64.tar.gz
+      - name: Build and verify release package
+        run: cargo xtask package
       - uses: actions/upload-artifact@v6
         with:
           name: linux-amd64
@@ -90,10 +86,9 @@ jobs:
 
             连接、分流、DNS 和 TUN 直接集成在应用中，无需下载或指定外部内核。
 
-            - 桌面适配收敛到 GNOME 51+，移除 KDE、其它桌面识别及后端选择逻辑。
-            - 系统代理直接使用 GNOME GSettings；保留设置回读校验和停止后的原设置恢复。
-            - 字体、文字缩放和窗口按钮布局直接跟随 GNOME，清理其它桌面的兜底分支。
-            - 应用、协议组件及 Wayland 界面均有回归检查；独立服务端验证使用 sing-box 和 Xray。具体支持范围与限制见协议说明。
+            - 开发工具统一到 Rust 的 cargo xtask，替换自有 Python 脚本和顶层 Makefile。
+            - 清理依赖中的 Docker、交叉编译、独立 C 构建、发布和网站工具，并整理相关文档与 Cargo 入口。
+            - 修复网络基准导入测试订阅后未选中而无法启动的问题，以及 QUIC/DNS 验证工程的依赖路径。
             - 安装包只包含程序、图标、安装与卸载脚本，文档和许可证保留在源码仓库。
             - 使用 Rust 1.100，仅发布 AMD64 安装包；在 ubuntu-latest 构建，检查 1 倍、1.25 倍和 2 倍 Wayland 缩放。
 

@@ -10,18 +10,18 @@ resolver = "3"
 [dependencies]
 aerobox-crypto = { path = "../.." }
 aerobox-primitives = { path = "../../../aerobox-primitives" }
-quinn = { path = "../../../../vendor/quinn", default-features = false, features = ["runtime-tokio", "rustls-rustcrypto"] }
+quinn = { path = "../../../../quinn", default-features = false, features = ["runtime-tokio", "rustls-rustcrypto"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12"] }
-hickory-net = { path = "../../../../vendor/hickory-dns/crates/net", default-features = false, features = ["tls-rustcrypto", "https-rustcrypto", "quic-rustcrypto", "h3-rustcrypto", "webpki-roots"] }
-hickory-resolver = { path = "../../../../vendor/hickory-dns/crates/resolver", default-features = false, features = ["tls-rustcrypto", "https-rustcrypto", "quic-rustcrypto", "h3-rustcrypto", "webpki-roots", "tokio"] }
+hickory-net = { path = "../../../../hickory-dns/crates/net", default-features = false, features = ["tls-rustcrypto", "https-rustcrypto", "quic-rustcrypto", "h3-rustcrypto", "webpki-roots"] }
+hickory-resolver = { path = "../../../../hickory-dns/crates/resolver", default-features = false, features = ["tls-rustcrypto", "https-rustcrypto", "quic-rustcrypto", "h3-rustcrypto", "webpki-roots", "tokio"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
 
 [patch.crates-io]
-quinn = { path = "../../../../vendor/quinn" }
-quinn-proto = { path = "../../../../vendor/quinn-proto" }
-rustls = { path = "../../../../vendor/rustls/rustls" }
-h3 = { path = "../../../../vendor/h3/h3" }
-h3-quinn = { path = "../../../../vendor/h3/h3-quinn" }
+quinn = { path = "../../../../quinn" }
+quinn-proto = { path = "../../../../quinn-proto" }
+rustls = { path = "../../../../rustls/rustls" }
+h3 = { path = "../../../../h3/h3" }
+h3-quinn = { path = "../../../../h3/h3-quinn" }
 
 [profile.dev]
 debug = 1

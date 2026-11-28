@@ -49,7 +49,7 @@ connection peer=127.0.0.1:12345 kind=UnexpectedEof: target=example.test:443 rout
 ## 任务归属检查
 
 ```sh
-scripts/check-network.sh
+cargo xtask network
 ```
 
 检查器使用 `syn` 遍历 `vendor/shoes/src/lib.rs` 引用的生产模块，识别 Tokio 启动函数、导入别名、运行时句柄及宏中的直接启动表达式。网络任务应交给现有的 `NetworkTasks`，或由局部 `JoinSet`、中止守卫、明确在 `Drop` 中中止的字段持有。借用的 `JoinSet` 不自动视为安全归属。少量运行时适配边界在检查器内逐项列明，新增启动点需要重新审核。
@@ -59,7 +59,7 @@ scripts/check-network.sh
 ## Vision 状态机模糊测试
 
 ```sh
-# 固定输入回归包含在 check-network.sh 中
+# 固定输入回归包含在 cargo xtask network 中
 scripts/fuzz-vision.sh 60
 ```
 
@@ -77,7 +77,7 @@ target/protocol-fuzz/x86_64-unknown-linux-gnu/release/vision /path/to/crash-inpu
 
 ```sh
 cargo build --release --locked --example network-bench
-python3 scripts/bench-network.py \
+cargo xtask bench \
   --candidate target/release/examples/network-bench \
   --baseline /path/to/baseline/network-bench \
   --sing-box /path/to/sing-box \
@@ -89,13 +89,13 @@ python3 scripts/bench-network.py \
 
 测量包括上下行吞吐量、64 字节回显延迟、短连接速率、应用 CPU 时间、预热后 RSS 和累计峰值 RSS。每段载荷校验内容与长度；中途失败仍写入标记为未完成的报告，不输出成功结果。`results.json` 保留逐次样本、p50/p99、二进制哈希、版本、CPU 亲和性和系统计时精度；`report.md` 汇总各项中位数。
 
-这些数值衡量应用的网络服务进程，不包含 GTK 窗口渲染、TUN 或公网条件。Python 负载端也可能成为瓶颈；同一轮的峰值 RSS 包含此前负载，极短测试的 CPU 时间可能低于系统计时精度。应在空闲机器上使用 release 构建、多轮相同负载，保留原始样本；脚本不自动宣称性能提升，也不以固定速度作为 CI 门槛。可使用 `--core-cpus` 和 `--server-cpus` 指定进程 CPU 列表。
+这些数值衡量应用的网络服务进程，不包含 GTK 窗口渲染、TUN 或公网条件。Rust 负载端也可能成为瓶颈；同一轮的峰值 RSS 包含此前负载，极短测试的 CPU 时间可能低于系统计时精度。应在空闲机器上使用 release 构建、多轮相同负载，保留原始样本；脚本不自动宣称性能提升，也不以固定速度作为 CI 门槛。可使用 `--core-cpus` 和 `--server-cpus` 指定进程 CPU 列表。
 
 仅验证工具可运行时：
 
 ```sh
 cargo build --locked --example network-bench
-python3 scripts/bench-network.py \
+cargo xtask bench \
   --candidate target/debug/examples/network-bench \
   --output target/bench-smoke --rounds 1 --mib 1 --operations 10 --smoke
 ```

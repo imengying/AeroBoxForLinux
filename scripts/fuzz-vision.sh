@@ -14,7 +14,7 @@ fuzz_host=$(rustc -vV | sed -n 's/^host: //p')
 # An explicit target keeps coverage instrumentation out of build scripts.
 # Stable Rust supports LLVM coverage instrumentation; sanitizers are not enabled here.
 RUSTFLAGS="${RUSTFLAGS:-} -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares -Cdebug-assertions -Coverflow-checks -Ccodegen-units=1" \
-    cargo build --manifest-path tools/protocol-checks/fuzz/Cargo.toml --locked \
+    cargo build --manifest-path tools/xtask/fuzz/Cargo.toml --locked \
         --release --target "$fuzz_host" --target-dir "$fuzz_target"
 mkdir -p "$fuzz_target/corpus" "$fuzz_target/artifacts"
 "$fuzz_target/$fuzz_host/release/vision" -max_total_time="$duration" -timeout=5 \

@@ -91,10 +91,6 @@ path = "tests/runners/api_ffdhe.rs"
 required-features = ["tls12"]
 
 [[test]]
-name = "bogo"
-path = "tests/bogo.rs"
-
-[[test]]
 name = "client_cert_verifier"
 path = "tests/runners/client_cert_verifier.rs"
 

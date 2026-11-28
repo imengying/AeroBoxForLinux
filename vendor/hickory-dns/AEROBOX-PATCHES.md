@@ -11,4 +11,4 @@ DNSSEC backend or change DNS message processing. Existing ring/AWS-LC
 features remain available for other users of this local fork.
 
 Validation and dependency-tree inspection use the independent project at
-`crates/aerobox-crypto/validation/transport` in the repository root.
+`vendor/support/aerobox-crypto/validation/transport` in the repository root.

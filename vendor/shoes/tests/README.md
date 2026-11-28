@@ -150,45 +150,6 @@ EOF. sing-box uses reply-first exchanges: the pinned build truncates replies
 after early upload EOF even with a single-key SS2022 configuration. All three
 peers must deliver server-first data and clean EOF after the acknowledged exchange.
 
-## Measuring Coverage
-
-The manual `Advisory verification evidence` workflow collects Linux unit/process
-coverage with Rust 1.99.1, `llvm-tools-preview`, and `cargo-llvm-cov` 0.9.1. It has
-no percentage gate. `smoke` selects one rule-loader unit test and one process
-test that verifies a child actually flushes a nonempty LLVM profile. `full` runs
-the library and process-contract suites, without optional features. Each command
-uses the existing nonzero-test guard. Run locally with the same pinned tooling:
-
-```sh
-export CARGO_BUILD_JOBS=1
-bash scripts/coverage-linux.sh NEW_OUTPUT_DIRECTORY smoke BASE_REVISION
-```
-
-In the recommendation batch VM, hold the shared foreground build lock around the
-entire script and use its dedicated target, as specified in `EXECUTION_RULES.md`.
-The script uses a fresh, named coverage target under `CARGO_TARGET_DIR`, refuses
-reuse, and never cleans shared artifacts. Tool installation, if needed, is
-`cargo install cargo-llvm-cov --version 0.9.1 --locked`; do not install another
-toolchain just to manufacture local success evidence.
-
-The output retains test logs, commands, toolchain and skip information, LCOV,
-changed-line JSON and profile paths. Raw profiles remain in the named target.
-The changed-line report compares the chosen local base revision to the tracked
-working tree, includes uncovered line numbers, and reports `null` rather than
-100% for no executable changed lines. Untracked files are outside `git diff`;
-missing source instrumentation is distinguished from uncovered executable lines.
-Unknown/non-executable lines are never implicitly called covered.
-
-On Linux, `SHOES_TEST_GRACEFUL_STOP` makes both shared guards and process-contract
-guards send SIGTERM before bounded SIGKILL fallback. The coverage script sets it
-and preserves per-process profile filenames. Forced exits or failed startup can
-still lack profiles; successful smoke verifies a normal server shutdown, not
-every error path. Inline unit-test code can be included, while standalone test
-and support paths may be excluded by cargo-llvm-cov's default report filters.
-Inspect per-file results rather than a headline percentage. Peers, privileged/kernel tests,
-external-network suites, FFI, device and non-Linux coverage remain separate,
-unmeasured categories, not silent skips or part of this percentage.
-
 ## Bounded Rule Properties
 
 `rule_properties` is explicitly registered because `autotests = false`. It uses
@@ -219,65 +180,10 @@ properties. Broader differential cases must only compare intentionally shared
 semantics with pinned peers and preserve fixture licensing. No new peer or
 libFuzzer toolchain is required for this first surface.
 
-## CI And Remaining Gaps
+## AeroBox checks
 
-The workflows run Linux unit, process, FFI, local-protocol, external-network,
-kernel TUN/WireGuard, and pinned-peer suites. macOS runs rootless TUN, WireGuard,
-process-watcher unit tests, and selected FFI/process contracts. Android and iOS
-jobs cross-compile the native libraries but do not exercise device VPN lifecycles.
-Only selected bounded stress cases run in CI; long-duration and performance tests
-remain explicit opt-ins. Filtered test steps run through
-`.github/require-tests.sh`, which fails a step whose filter selects no tests.
-The local-protocol job explicitly selects the bounded
-`vless_xudp_long_lived::test_content_integrity_varying_sizes` case from the stress
-target; its sustained and burst siblings remain manual. The selected case has a
-whole-test deadline as well as per-reply deadlines.
-
-Retain the existing suite boundaries. Prefer deterministic in-process tests for
-fragmentation, cancellation, credit accounting, and parser rejection; use
-process/kernel tests for descriptor ownership, real routing, and reload behavior.
-Bound network waits, assert exact payloads and EOF/error outcomes, and propagate
-fixture-task failures rather than accepting a timeout as proof of rejection.
-
-The `process::retention_tests::` library case launches an exact-filter child to
-isolate process-global budgets and descriptor counts from parallel tests. The
-child must run exactly one passing test, so a stale filter cannot silently pass.
-The case repeats partial listener startup failures, malformed and cancelled SOCKS
-handshakes, TCP generation retirement with live and stalled sessions, owner
-destruction, and QUIC endpoint/stream ownership. Every cycle must restore its
-known baseline within five seconds, including Tokio live tasks and active
-connection/stream/QUIC reservations. Linux also gates FD recovery; other
-platforms explicitly report FD/RSS as unavailable (`None`). RSS is informational.
-These are lifecycle primitives, not a replacement for process activation tests.
-The real SIGHUP datapath measurement remains in `benches/reload_memory.mjs`.
-
-`shoes_test_support::measure` supplies the shared counting system allocator,
-Linux process samples, and bounded state polling. Do not use process-wide
-samples in concurrently running tests. Allocation tests have one test per
-executable, warm up first, and sample equivalent owner states before printing.
-The allocator counts successful allocations/reallocations and requested live
-bytes/blocks, not jemalloc arenas, foreign allocations, or RSS. Retention checks
-require exact return to baseline; compilation peak budgets remain enforced.
-
-Important remaining limitations:
-
-- Coverage is manual and Linux unit/process only; see [Measuring Coverage](#measuring-coverage).
-  Passing suites or increased percentages do not establish exhaustive coverage.
-- Android/iOS device execution and macOS Network Extension kernel-device behavior
-  remain separate from host-side tests and cross-compilation.
-- Windows build entries are disabled; ARM and musl builds do not establish
-  runtime coverage. macOS does not run the full Linux protocol and IP-stack suite.
-- The legacy `privileged` target's `tun::` cases are not selected by CI; the
-  `tun_kernel::` cases are. Native Naive and most sustained multi-GiB stress tests
-  remain manual.
-- The historical Naive/sing-box idle timeout remains unattributed. Progress
-  diagnostics and deterministic H2 credit tests do not prove its cause.
-- Mihomo and sing-box early-half-close limitations retain ignored strict tests.
-  Their enabled reply-first cases still require exact payloads and clean TLS EOF.
-  A passing non-injected run is not proof that the timing-sensitive Mihomo issue
-  is fixed; see the fixture guide.
-- WebSocket Close frames are skipped rather than answered as RFC 6455 requires.
-  Xray, sing-box and mihomo close the TCP connection right after sending Close,
-  so reads still end at EOF.
-- Internet-dependent failures and manual native Naive prerequisites require
-  separate investigation; they are not covered by a local-only test run.
+The application maintains its checks in the root `.github/workflows/` and
+[`tools/xtask`](../../../tools/xtask/). See the
+[development guide](../../../docs/development.md) for the selected protocol,
+application, Wayland and independent-peer checks. Upstream mobile, cross-target,
+Docker and standalone release workflows are not included.

@@ -13,7 +13,7 @@ possession. A test-only exporter bypasses Go's API prohibition on exporters
 when renegotiation is enabled to compare the independent key schedules.
 
 ```sh
-python3 vendor/shoes/tests/fixtures/tls12-renegotiation-peer/build.py
+cargo xtask tls12-peer
 AEROBOX_TLS12_RENEGOTIATION_PEER="$PWD/target/protocol-peers/tls12-renegotiation-peer" \
   cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml --test tls12_renegotiation -- --include-ignored --test-threads=1
 ```

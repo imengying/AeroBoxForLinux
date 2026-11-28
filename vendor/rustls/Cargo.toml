@@ -1,9 +1,5 @@
 [workspace]
 members = [
-  # Bogo test shim
-  "bogo",
-  # CI benchmarks
-  "ci-bench",
   # Network-based tests
   "connect-tests",
   # tests and example code
@@ -16,8 +12,6 @@ members = [
   "rustls",
   # common code for testing the core crate
   "rustls-test",
-  # benchmarking tool
-  "rustls-bench",
   # experimental post-quantum algorithm support
   "rustls-post-quantum",
   # rustls cryptography provider integration tests

@@ -7,7 +7,7 @@
 //! To update that data:
 //!
 //! - delete all `testdata/cert-*.der`.
-//! - run the `admin/capture-certdata` script.
+//! - run the upstream `rustls/admin/capture-certdata` script.
 //! - update the verification timestamp near the bottom of this file
 //!   to the current time.
 //! - where a website's chain length changed, reflect that in the list

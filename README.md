@@ -62,7 +62,7 @@ TUN 的路由与防回环由引擎统一管理，停止时清理。默认网络�
 
 ## 开发
 
-使用 Rust 1.100、GTK ≥ 4.10、libadwaita ≥ 1.5 和 GtkSourceView ≥ 5.6。执行 `make test` 检查代码，`make package` 生成安装包。依赖安装、文件布局和验证方式见[开发说明](docs/development.md)。
+使用 Rust 1.100、GTK ≥ 4.10、libadwaita ≥ 1.5 和 GtkSourceView ≥ 5.6。执行 `cargo xtask test` 检查代码，`cargo xtask package` 生成安装包。依赖安装、文件布局和验证方式见[开发说明](docs/development.md)。
 
 ## 来源与许可
 

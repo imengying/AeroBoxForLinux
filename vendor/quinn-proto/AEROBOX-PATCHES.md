@@ -11,9 +11,9 @@ supplies Retry AES-GCM, handshake-token HKDF/AEAD and stateless-reset HMAC.
 The default endpoint/server constructors are enabled for this backend.
 
 Independent validation that avoids upstream native crypto development
-dependencies is in `crates/aerobox-crypto/validation/transport` at the
+dependencies is in `vendor/support/aerobox-crypto/validation/transport` at the
 repository root. The provider's experimental status and limitations are
-documented in `crates/aerobox-crypto/README.md`.
+documented in `vendor/support/aerobox-crypto/README.md`.
 
 ## Application-negotiated congestion control
 

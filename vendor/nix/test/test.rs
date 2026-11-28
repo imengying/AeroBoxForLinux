@@ -11,8 +11,6 @@ mod sys;
 mod test_dir;
 mod test_errno;
 mod test_fcntl;
-#[cfg(linux_android)]
-mod test_kmod;
 #[cfg(any(
     freebsdlike,
     all(target_os = "linux", not(target_env = "ohos")),
@@ -78,8 +76,6 @@ pub static CWD_LOCK: RwLock<()> = RwLock::new(());
 /// Any test that changes the process's supplementary groups must grab this
 /// mutex
 pub static GROUPS_MTX: Mutex<()> = Mutex::new(());
-/// Any tests that loads or unloads kernel modules must grab this mutex
-pub static KMOD_MTX: Mutex<()> = Mutex::new(());
 /// Any test that calls ptsname(3) must grab this mutex.
 pub static PTSNAME_MTX: Mutex<()> = Mutex::new(());
 /// Any test that alters signal handling must grab this mutex.

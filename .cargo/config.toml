@@ -1,0 +1,5 @@
+[alias]
+xtask = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml --"
+
+[build]
+target-dir = "target"

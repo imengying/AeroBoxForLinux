@@ -42,29 +42,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 `licenses/dependencies.txt` reproduces the license texts and attributions for
 Shoes' production and build dependencies, including transitive dependencies
 across all target platforms. A given binary may link only a subset of them.
-The release tarballs include this bundle and the additional GotaTun and
-anytls-rs notices below. Applications embedding Shoes' native libraries must
-also distribute these notices and corresponding source information.
-
-Regenerate the bundle after changing Cargo.lock, using cargo-about 0.9.3:
-
-```sh
-cargo install --locked --features cli cargo-about@0.9.3
-python3 scripts/generate-release-notices.py
-cargo fetch --locked
-rustup component add rust-src --toolchain 1.100.0
-python3 scripts/test-release-notices.py
-```
-
-Generation requires network access for the checksummed upstream blake2b_simd
-license clarification. The generator rejects warnings, including failed
-clarifications, without replacing the existing bundle.
-
-`about.toml` records the license choices and verified clarifications. CI checks
-that regeneration is clean and that every production/build dependency appears.
-`scripts/check-release-notices.py <artifact>` checks the exact notice bytes in
-a release tarball. The binary release workflow (`.github/workflows/build.yml`)
-invokes it before uploading tarballs. Do not remove the bundle when redistributing.
+These notices are retained from the upstream source snapshot. AeroBox maintains
+its own build and packaging through `cargo xtask`; the upstream standalone
+release and notice-generation scripts are not included. See the repository's
+[third-party source record](../../docs/third-party.md) for AeroBox integration.
 
 ## Rust Standard Library
 
@@ -72,10 +53,7 @@ Release builds use Rust 1.100.0. `licenses/rust-1.100.0-COPYRIGHT-library.html`
 reproduces the toolchain's standard-library copyright and dependency notices.
 `licenses/rust-1.100.0-sysroot-supplement.txt` supplies the exact vendored licenses
 for sysroot package versions missing from that upstream document, plus the
-in-tree `core::slice::memchr` attribution. The notice tests reconcile the matching
-`rust-src` lockfile against these files. MIPS builds compile
-this sysroot from the matching `rust-src` rather than using a prebuilt standard
-library. `licenses/rust-1.100.0-compiler-builtins.txt` additionally reproduces
+in-tree `core::slice::memchr` attribution. The files retain the upstream source snapshot’s standard-library attributions. `licenses/rust-1.100.0-compiler-builtins.txt` additionally reproduces
 the compiler-builtins and bundled libm licenses and their source-file notices.
 These files are separate from the Cargo dependency bundle above.
 

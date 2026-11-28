@@ -1,13 +1,14 @@
 # Transport validation
 
 这个独立工程验证 vendored Quinn 和 Hickory 的 RustCrypto 功能开关，
-不引入上游测试中的 rcgen/ring 开发依赖。Cargo.lock 锁定验证使用的完整依赖图。
+不引入上游测试中的 rcgen/ring 开发依赖。依赖版本沿用应用的 `Cargo.lock`。
 
 从仓库根目录运行：
 
 ```sh
-cargo test --offline --manifest-path crates/aerobox-crypto/validation/transport/Cargo.toml
-cargo tree --offline --manifest-path crates/aerobox-crypto/validation/transport/Cargo.toml --edges normal,build
+cp Cargo.lock vendor/support/aerobox-crypto/validation/transport/Cargo.lock
+cargo test --manifest-path vendor/support/aerobox-crypto/validation/transport/Cargo.toml
+rm vendor/support/aerobox-crypto/validation/transport/Cargo.lock
 ```
 
 测试覆盖默认 QUIC/DNS TLS 配置构建、握手 token 和 reset HMAC 篡改拒绝、

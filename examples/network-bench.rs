@@ -1,4 +1,4 @@
-//! Isolated application service for scripts/bench-network.py. The load generator
+//! Isolated application service for cargo xtask bench. The load generator
 //! and independent server run in other processes, outside measured CPU/memory.
 use aerobox_for_linux::{
     engine::Service,
@@ -45,11 +45,14 @@ fn main() -> Result<()> {
             "method":"aes-128-gcm", "password":"aerobox-loopback-benchmark"}),
         _ => bail!("unknown benchmark case: {case}"),
     };
-    service.import_subscription(Subscription {
+    let subscription = Subscription {
         name: "benchmark".into(),
         nodes: vec![node],
         ..Default::default()
-    })?;
+    };
+    let id = subscription.id.clone();
+    service.import_subscription(subscription)?;
+    service.select_subscription(&id)?;
     service.start()?;
     println!(
         "{}",

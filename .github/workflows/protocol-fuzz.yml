@@ -23,7 +23,7 @@ jobs:
           toolchain: "1.100.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tools/protocol-checks/fuzz -> ../../../target/protocol-fuzz
+          workspaces: tools/xtask/fuzz -> ../../../target/protocol-fuzz
       - name: Fuzz Vision framing
         run: scripts/fuzz-vision.sh 120
       - uses: actions/upload-artifact@v6
