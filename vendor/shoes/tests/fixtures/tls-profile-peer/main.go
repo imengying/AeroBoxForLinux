@@ -193,7 +193,7 @@ func main() {
 	forceRetry := flag.Bool("force-retry", false, "request the selected group even if already offered (malformed HRR)")
 	sct := flag.String("sct", "", "timestamp framing: valid, empty, empty-entry, trailing")
 	unadvertised := flag.Bool("unadvertised-group", false, "send an invalid P521 HRR")
-	realityBrowser := flag.Bool("reality-browser", false, "require sing-box Chrome133 REALITY share and group layout")
+	realityBrowser := flag.Bool("reality-browser", false, "require Chrome133 REALITY hybrid and independent X25519 shares")
 	reality := flag.String("reality", "", "test REALITY: valid, bad-hmac, bad-signature, bad-short-id")
 	unadvertisedSignature := flag.Bool("unadvertised-signature", false, "send a valid unadvertised Ed25519 CertificateVerify")
 	flag.Parse()

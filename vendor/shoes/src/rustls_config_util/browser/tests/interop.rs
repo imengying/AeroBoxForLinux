@@ -192,11 +192,13 @@ async fn production_chrome_tls12_reauthenticates_and_rejects_bad_finished() {
 #[tokio::test]
 #[ignore = "requires AEROBOX_TLS_PROFILE_PEER"]
 async fn production_chrome_reality_checks_independent_authentication() {
-    for mode in ["valid", "bad-hmac", "bad-signature", "bad-short-id"] {
+    for (group, mode) in [29, 4588].into_iter().flat_map(|group| {
+        ["valid", "bad-hmac", "bad-signature", "bad-short-id"].map(|mode| (group, mode))
+    }) {
         tokio::time::timeout(Duration::from_secs(15), async {
             let args = [
                 "-group".into(),
-                "29".into(),
+                group.to_string(),
                 "-reality".into(),
                 mode.into(),
                 "-reality-browser".into(),
@@ -229,6 +231,10 @@ async fn production_chrome_reality_checks_independent_authentication() {
             }
             let mut stream = result.unwrap();
             assert!(stream.is_reality());
+            assert_eq!(
+                stream.negotiated_group(),
+                Some(NamedGroup::from(group as u16))
+            );
             echo(&mut stream).await;
         })
         .await

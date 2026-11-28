@@ -69,8 +69,9 @@ The expected uTLS rejection is recorded separately and is not counted as a
 successful resumed handshake.
 
 REALITY modes independently validate X25519/HKDF/AES-GCM ClientHello metadata,
-certificate HMAC and Ed25519 CertificateVerify. The pinned sing-box v1.14.4
-wrapper strips the hybrid share and uses version 1.8.1; provenance is recorded
-in `sing-box-reality-client.json`. Six REALITY reference cases passed, including
-bad HMAC/signature/short ID. An additional ordinary-TLS Ed25519 case ensures
+certificate HMAC and Ed25519 CertificateVerify. Authentication metadata follows
+the source recorded in `sing-box-reality-client.json`. Chrome keeps both the
+hybrid and independent X25519 shares; either group may negotiate TLS, while
+authentication always uses the independent X25519 key. Reference cases cover
+both groups and bad HMAC/signature/short ID. An ordinary-TLS Ed25519 case ensures
 the REALITY signature exception cannot leak into normal browser handshakes.

@@ -22,10 +22,9 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// Follow the pinned sing-box constructor's session-ID authentication, including
-// removing MLKEM for its browser path. Retaining MLKEM exercises the independent
-// share API separately; it is not claimed as the pinned Android wire layout.
-func realityClient(socket net.Conn, stripHybrid bool) (*utls.UConn, error) {
+// Authenticate the session ID with the independent X25519 key while preserving
+// Chrome's hybrid share for the target server's TLS key exchange.
+func realityClient(socket net.Conn) (*utls.UConn, error) {
 	var auth []byte
 	cfg := &utls.Config{ServerName: "cover.test", InsecureSkipVerify: true, SessionTicketsDisabled: true}
 	cfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
@@ -50,31 +49,6 @@ func realityClient(socket net.Conn, stripHybrid bool) (*utls.UConn, error) {
 	client := utls.UClient(socket, cfg, utls.HelloChrome_133)
 	if err := client.BuildHandshakeState(); err != nil {
 		return nil, err
-	}
-	if stripHybrid {
-		for _, ext := range client.Extensions {
-			switch ext := ext.(type) {
-			case *utls.SupportedCurvesExtension:
-				var curves []utls.CurveID
-				for _, curve := range ext.Curves {
-					if curve != utls.X25519MLKEM768 {
-						curves = append(curves, curve)
-					}
-				}
-				ext.Curves = curves
-			case *utls.KeyShareExtension:
-				var shares []utls.KeyShare
-				for _, share := range ext.KeyShares {
-					if share.Group != utls.X25519MLKEM768 {
-						shares = append(shares, share)
-					}
-				}
-				ext.KeyShares = shares
-			}
-		}
-		if err := client.BuildHandshakeState(); err != nil {
-			return nil, err
-		}
 	}
 	serverPrivate, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{42}, 32))
 	if err != nil {
@@ -113,12 +87,11 @@ func TestReferenceReality(t *testing.T) {
 	for _, tc := range []struct {
 		mode  string
 		group uint16
-		strip bool
 	}{
-		{"valid", 29, true}, {"valid", 29, false}, {"valid", 4588, false},
-		{"bad-hmac", 29, true}, {"bad-signature", 29, true}, {"bad-short-id", 29, true},
+		{"valid", 29}, {"valid", 4588},
+		{"bad-hmac", 29}, {"bad-signature", 29}, {"bad-short-id", 29},
 	} {
-		t.Run(fmt.Sprintf("%s_group%d_strip%v", tc.mode, tc.group, tc.strip), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s_group%d", tc.mode, tc.group), func(t *testing.T) {
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -135,7 +108,7 @@ func TestReferenceReality(t *testing.T) {
 					done <- outcome{err: err}
 					return
 				}
-				r, e := serveWire(socket, cert, key, peerOptions{Reality: tc.mode, RealityBrowser: tc.strip, Group: tc.group, Compress: true, ALPS: 17613})
+				r, e := serveWire(socket, cert, key, peerOptions{Reality: tc.mode, RealityBrowser: true, Group: tc.group, Compress: true, ALPS: 17613})
 				done <- outcome{r, e}
 			}()
 			socket, err := net.Dial("tcp", listener.Addr().String())
@@ -144,7 +117,7 @@ func TestReferenceReality(t *testing.T) {
 			}
 			defer socket.Close()
 			_ = socket.SetDeadline(time.Now().Add(10 * time.Second))
-			client, err := realityClient(socket, tc.strip)
+			client, err := realityClient(socket)
 			if err != nil {
 				t.Fatal(err)
 			}

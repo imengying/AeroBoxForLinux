@@ -38,8 +38,8 @@ func realityCredential(ch []byte, hello clientHello, mode string, browser bool) 
 		groupsReader := reader{p: hello.extensions[10]}
 		groups := reader{p: groupsReader.vector(2)}
 		grease := uint16(groups.uint(2))
-		if !isGrease(grease) || groups.uint(2) != 29 || groups.uint(2) != 23 || groups.uint(2) != 24 || groups.done() != nil || groupsReader.done() != nil || len(hello.shareOrder) != 2 || hello.shareOrder[0] != grease || hello.shareOrder[1] != 29 || !bytes.Equal(hello.shares[grease], []byte{0}) || len(hybrid) != 0 {
-			return nil, nil, errors.New("wrong sing-box Chrome133 REALITY groups or shares")
+		if !isGrease(grease) || groups.uint(2) != 4588 || groups.uint(2) != 29 || groups.uint(2) != 23 || groups.uint(2) != 24 || groups.done() != nil || groupsReader.done() != nil || len(hello.shareOrder) != 3 || hello.shareOrder[0] != grease || hello.shareOrder[1] != 4588 || hello.shareOrder[2] != 29 || !bytes.Equal(hello.shares[grease], []byte{0}) || len(hybrid) != 1216 {
+			return nil, nil, errors.New("wrong Chrome133 REALITY groups or shares")
 		}
 	}
 	private, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{42}, 32))
