@@ -8,7 +8,7 @@ cargo build --release --locked
 ./target/release/AeroBox
 ```
 
-Rust 工具链固定为 1.100.0，见 `rust-toolchain.toml`；依赖由 `Cargo.lock` 锁定。桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.5、GtkSourceView ≥ 5.6。Ubuntu 24.04 开发包为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config cmake`。
+Rust 工具链固定为 1.100.0，见 `rust-toolchain.toml`；依赖由 `Cargo.lock` 锁定。应用面向 GNOME 51 及以上的 Wayland 会话，桌面库要求 GTK ≥ 4.10、libadwaita ≥ 1.5、GtkSourceView ≥ 5.6。Ubuntu 构建依赖为 `libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev librsvg2-common pkg-config cmake`。
 
 ```sh
 make test     # 格式、Clippy、单元与集成测试

@@ -1,10 +1,10 @@
 [package]
 name = "aerobox-for-linux"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2024"
 rust-version = "1.100"
 license = "GPL-3.0-only"
-description = "A native Rust proxy application for Linux and Wayland"
+description = "A native Rust proxy application for GNOME 51+ and Wayland"
 
 [[bin]]
 name = "AeroBox"

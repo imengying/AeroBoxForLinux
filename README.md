@@ -1,6 +1,6 @@
 # AeroBox
 
-面向 **Linux / Wayland** 的代理客户端，使用 Rust、GTK4、libadwaita 和 GtkSourceView 5。所有连接、分流、DNS 和虚拟网卡功能直接集成在 AeroBox 中，统一构建和发布。
+面向 **GNOME 51 及以上 / Wayland** 的 Linux 代理客户端，使用 Rust、GTK4、libadwaita 和 GtkSourceView 5。所有连接、分流、DNS 和虚拟网卡功能直接集成在 AeroBox 中，统一构建和发布。
 
 ## 安装
 
@@ -17,7 +17,7 @@ cd AeroBoxForLinux-linux-amd64
 
 安装器默认将程序放入 `~/.local/bin/AeroBox`，随后可从应用菜单启动。也可直接运行解压目录中的 `./AeroBox`。成品不需要 Rust 工具链。
 
-程序仅支持 Wayland；Sway / Hyprland 请配置对应的 xdg-desktop-portal 后端。更新时重新运行安装器，完全退出旧进程后再启动。`./uninstall.sh` 卸载程序并保留用户数据。自定义位置使用 `PREFIX=/目标目录 ./install.sh`，卸载时使用相同的 `PREFIX`；系统级安装使用 `sudo env PREFIX=/usr/local ./install.sh`。图形界面以普通用户运行。
+程序在 GNOME 51 及以上的 Wayland 会话中运行。更新时重新运行安装器，完全退出旧进程后再启动。`./uninstall.sh` 卸载程序并保留用户数据。自定义位置使用 `PREFIX=/目标目录 ./install.sh`，卸载时使用相同的 `PREFIX`；系统级安装使用 `sudo env PREFIX=/usr/local ./install.sh`。图形界面以普通用户运行。
 
 ## 使用
 
@@ -32,7 +32,7 @@ cd AeroBoxForLinux-linux-amd64
 
 ### 系统代理与虚拟网卡
 
-系统代理支持 GNOME 和 KDE Plasma 6；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。HTTP / SOCKS 入口固定为本机 `127.0.0.1:2080`，不提供局域网共享和端口设置。
+系统代理直接使用 GNOME GSettings；停止时恢复本次修改前的桌面设置。Brave / Chromium 可使用桌面代理，浏览器扩展或启动参数指定的代理可能覆盖它。HTTP / SOCKS 入口固定为本机 `127.0.0.1:2080`，不提供局域网共享和端口设置。
 
 TUN 使用固定的内部 Rust 网络栈，需要 `/dev/net/tun`、`nftables` 命令及网络管理权限。Arch Linux 可安装 `nftables libcap polkit`。从首页启用虚拟网卡时，如缺少权限会弹出桌面授权框；授权后 AeroBox 自动重启以获得 `CAP_NET_ADMIN` / `CAP_NET_RAW`，并恢复之前的连接状态。取消授权会保留原有状态。界面仍以当前用户身份运行；更新替换程序后，再次启用时会按需授权。
 

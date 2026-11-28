@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "aerobox-for-linux"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "aerobox-crypto",
  "anyhow",

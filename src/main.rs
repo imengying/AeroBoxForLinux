@@ -44,7 +44,9 @@ fn run() -> Result<gtk::glib::ExitCode> {
                 return Ok(gtk::glib::ExitCode::SUCCESS);
             }
             "--help" | "-h" => {
-                println!("AeroBox [--data-dir PATH] [--version]\n仅支持 Linux Wayland 会话。");
+                println!(
+                    "AeroBox [--data-dir PATH] [--version]\n适用于 GNOME 51 及以上的 Wayland 会话。"
+                );
                 return Ok(gtk::glib::ExitCode::SUCCESS);
             }
             _ => bail!("未知参数 {arg}"),
@@ -52,7 +54,7 @@ fn run() -> Result<gtk::glib::ExitCode> {
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none()
     {
-        bail!("请在 Wayland 桌面会话内启动")
+        bail!("请在 GNOME Wayland 会话内启动")
     }
     // Set before any GTK/network worker threads exist. Never fall back to X11.
     unsafe { std::env::set_var("GDK_BACKEND", "wayland") };

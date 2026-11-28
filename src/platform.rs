@@ -1,12 +1,11 @@
-//! Linux desktop integration. All proxy writes go through the user's desktop
-//! tools and can be restored without replacing unrelated desktop settings.
+//! GNOME desktop integration. Proxy writes use GSettings and restore only the
+//! keys changed by AeroBox.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     env, fs,
     io::{Read, Seek, SeekFrom},
     num::NonZeroU16,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -75,79 +74,7 @@ fn run_with_timeout(program: &Path, args: &[String], timeout: Duration) -> Resul
     Ok(output.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-fn executable(name: &str) -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
-    env::split_paths(&paths)
-        .map(|dir| dir.join(name))
-        .find(|path| {
-            fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-}
-
-#[derive(Clone, Debug)]
-enum Backend {
-    Gnome {
-        settings: PathBuf,
-    },
-    Kde {
-        read: PathBuf,
-        write: PathBuf,
-        notify: PathBuf,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Desktop {
-    Gnome,
-    Kde,
-}
-
-pub fn desktop_kind(desktop: &str) -> Option<Desktop> {
-    let contains = |names: &[&str]| {
-        desktop.split([':', ';', ',']).any(|name| {
-            names
-                .iter()
-                .any(|candidate| name.trim().eq_ignore_ascii_case(candidate))
-        })
-    };
-    if contains(&["kde", "plasma"]) {
-        return Some(Desktop::Kde);
-    }
-    if contains(&["gnome", "ubuntu", "unity", "budgie"]) {
-        return Some(Desktop::Gnome);
-    }
-    None
-}
-
-fn backend() -> Result<Backend> {
-    let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    match desktop_kind(&desktop) {
-        Some(Desktop::Kde) => Ok(Backend::Kde {
-            read: executable("kreadconfig6").context("KDE 的 kreadconfig6 工具不可用")?,
-            write: executable("kwriteconfig6").context("KDE 的 kwriteconfig6 工具不可用")?,
-            notify: executable("dbus-send").context("KDE 的 dbus-send 工具不可用")?,
-        }),
-        Some(Desktop::Gnome) => {
-            let settings = executable("gsettings").context("GNOME 的 gsettings 工具不可用")?;
-            let schemas = DesktopCommand::new(&settings, ["list-schemas"]).run()?;
-            ensure!(
-                schemas.lines().any(|s| s == GNOME_PROXY),
-                "GNOME 系统代理设置不可用"
-            );
-            ensure!(
-                DesktopCommand::new(&settings, ["writable", GNOME_PROXY, "mode"]).run()? == "true",
-                "系统代理设置不可写"
-            );
-            Ok(Backend::Gnome { settings })
-        }
-        None => bail!(
-            "当前桌面没有可用的系统代理设置。Sway / Hyprland 可使用 TUN，或在应用中填写 HTTP/SOCKS 代理。"
-        ),
-    }
-}
-
-/// A snapshot contains only the keys this application changed. In particular,
-/// KDE keys that were absent are removed again instead of being set to empty.
+/// A snapshot contains only the keys this application changed.
 #[derive(Debug)]
 pub struct ProxySnapshot {
     restore: Vec<DesktopCommand>,
@@ -164,8 +91,7 @@ impl ProxySnapshot {
         }
         // gsettings can exit successfully even when dconf could not reach the
         // session bus. Do not discard the snapshot until the saved values are
-        // visible again. KDE reads retain the missing-key default sentinel so
-        // a deleted key is distinguished from an explicitly empty value.
+        // visible again.
         for (command, expected) in &self.verify {
             match command.run() {
                 Ok(actual) if &actual == expected => {}
@@ -199,196 +125,93 @@ fn gsettings_keys() -> [(&'static str, &'static str); 10] {
     ]
 }
 
-fn capture(backend: &Backend) -> Result<ProxySnapshot> {
+fn capture(settings: &Path) -> Result<ProxySnapshot> {
     let mut restore = Vec::new();
     let mut verify = Vec::new();
-    match backend {
-        Backend::Gnome { settings } => {
-            for (schema, key) in gsettings_keys() {
-                let read = DesktopCommand::new(settings, ["get", schema, key]);
-                let value = read.run()?;
-                restore.push(DesktopCommand::new(settings, ["set", schema, key, &value]));
-                verify.push((read, value));
-            }
-        }
-        Backend::Kde {
-            read,
-            write,
-            notify,
-        } => {
-            let absent = format!("aerobox-for-linux-missing-{}", uuid::Uuid::new_v4());
-            for key in [
-                "httpProxy",
-                "httpsProxy",
-                "socksProxy",
-                "NoProxyFor",
-                "ReversedException",
-                "ProxyType",
-            ] {
-                let read = DesktopCommand::new(
-                    read,
-                    [
-                        "--file",
-                        "kioslaverc",
-                        "--group",
-                        "Proxy Settings",
-                        "--key",
-                        key,
-                        "--default",
-                        &absent,
-                    ],
-                );
-                let value = read.run()?;
-                let mut args = vec![
-                    "--file",
-                    "kioslaverc",
-                    "--group",
-                    "Proxy Settings",
-                    "--key",
-                    key,
-                ];
-                if value == absent {
-                    args.push("--delete");
-                } else {
-                    args.push(&value);
-                }
-                restore.push(DesktopCommand::new(write, args));
-                verify.push((read, value));
-            }
-            restore.push(kde_notify(notify));
-        }
+    for (schema, key) in gsettings_keys() {
+        let read = DesktopCommand::new(settings, ["get", schema, key]);
+        let value = read.run()?;
+        restore.push(DesktopCommand::new(settings, ["set", schema, key, &value]));
+        verify.push((read, value));
     }
     Ok(ProxySnapshot { restore, verify })
 }
 
-fn kde_notify(program: &Path) -> DesktopCommand {
-    // KIO Scheduler listens for this signal and reparses its cached settings.
-    DesktopCommand::new(
-        program,
-        [
-            "--session",
-            "--type=signal",
-            "/KIO/Scheduler",
-            "org.kde.KIO.Scheduler.reparseSlaveConfiguration",
-            "string:",
-        ],
-    )
-}
-
-fn enable_commands(backend: &Backend, port: NonZeroU16) -> Vec<DesktopCommand> {
-    let endpoint = format!("127.0.0.1:{port}");
+fn enable_commands(settings: &Path, port: NonZeroU16) -> Vec<DesktopCommand> {
     let port = port.to_string();
     let mut commands = Vec::new();
-    match backend {
-        Backend::Gnome { settings } => {
-            for kind in ["http", "https", "socks"] {
-                let schema = format!("{GNOME_PROXY}.{kind}");
-                commands.push(DesktopCommand::new(
-                    settings,
-                    ["set", &schema, "host", "'127.0.0.1'"],
-                ));
-                commands.push(DesktopCommand::new(
-                    settings,
-                    ["set", &schema, "port", &port],
-                ));
-            }
-            commands.push(DesktopCommand::new(
-                settings,
-                [
-                    "set",
-                    "org.gnome.system.proxy.http",
-                    "use-authentication",
-                    "false",
-                ],
-            ));
-            commands.push(DesktopCommand::new(
-                settings,
-                ["set", GNOME_PROXY, "use-same-proxy", "false"],
-            ));
-            commands.push(DesktopCommand::new(
-                settings,
-                [
-                    "set",
-                    GNOME_PROXY,
-                    "ignore-hosts",
-                    "['localhost', '127.0.0.1', '::1']",
-                ],
-            ));
-            // Enable after endpoints have been written, avoiding half-configured proxy use.
-            commands.push(DesktopCommand::new(
-                settings,
-                ["set", GNOME_PROXY, "mode", "'manual'"],
-            ));
-        }
-        Backend::Kde { write, notify, .. } => {
-            for (key, value) in [
-                ("httpProxy", format!("http://{endpoint}")),
-                ("httpsProxy", format!("http://{endpoint}")),
-                ("socksProxy", format!("socks://{endpoint}")),
-                ("NoProxyFor", "localhost,127.0.0.1,::1".to_owned()),
-                ("ReversedException", "false".to_owned()),
-                ("ProxyType", "1".to_owned()),
-            ] {
-                commands.push(DesktopCommand::new(
-                    write,
-                    [
-                        "--file",
-                        "kioslaverc",
-                        "--group",
-                        "Proxy Settings",
-                        "--key",
-                        key,
-                        &value,
-                    ],
-                ));
-            }
-            commands.push(kde_notify(notify));
-        }
+    for kind in ["http", "https", "socks"] {
+        let schema = format!("{GNOME_PROXY}.{kind}");
+        commands.push(DesktopCommand::new(
+            settings,
+            ["set", &schema, "host", "'127.0.0.1'"],
+        ));
+        commands.push(DesktopCommand::new(
+            settings,
+            ["set", &schema, "port", &port],
+        ));
     }
+    commands.push(DesktopCommand::new(
+        settings,
+        [
+            "set",
+            "org.gnome.system.proxy.http",
+            "use-authentication",
+            "false",
+        ],
+    ));
+    commands.push(DesktopCommand::new(
+        settings,
+        ["set", GNOME_PROXY, "use-same-proxy", "false"],
+    ));
+    commands.push(DesktopCommand::new(
+        settings,
+        [
+            "set",
+            GNOME_PROXY,
+            "ignore-hosts",
+            "['localhost', '127.0.0.1', '::1']",
+        ],
+    ));
+    // Enable after endpoints have been written, avoiding half-configured proxy use.
+    commands.push(DesktopCommand::new(
+        settings,
+        ["set", GNOME_PROXY, "mode", "'manual'"],
+    ));
     commands
 }
 
 pub fn enable_proxy(port: NonZeroU16) -> Result<ProxySnapshot> {
-    enable_proxy_for(&backend()?, port)
+    enable_proxy_with(Path::new("gsettings"), port)
 }
 
 /// Read back every field Chromium uses, without changing the desktop.
 pub fn verify_proxy(port: NonZeroU16) -> Result<bool> {
-    let backend = backend()?;
-    verify_commands(&backend, &enable_commands(&backend, port))
+    verify_commands(&enable_commands(Path::new("gsettings"), port))
 }
 
-fn verify_commands(backend: &Backend, commands: &[DesktopCommand]) -> Result<bool> {
+fn verify_commands(commands: &[DesktopCommand]) -> Result<bool> {
     for command in commands {
-        let verification = match backend {
-            Backend::Gnome { settings } => Some((
-                DesktopCommand::new(settings, ["get", &command.args[1], &command.args[2]]),
-                command.args[3].as_str(),
-            )),
-            Backend::Kde { read, write, .. } if command.program == *write => Some((
-                DesktopCommand::new(read, &command.args[..6]),
-                command.args[6].as_str(),
-            )),
-            Backend::Kde { .. } => None,
-        };
-        if let Some((read, expected)) = verification
-            && read.run()? != expected
-        {
+        let read = DesktopCommand::new(
+            &command.program,
+            ["get", &command.args[1], &command.args[2]],
+        );
+        if read.run()? != command.args[3] {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-fn enable_proxy_for(backend: &Backend, port: NonZeroU16) -> Result<ProxySnapshot> {
-    let commands = enable_commands(backend, port);
-    let snapshot = capture(backend)?;
+fn enable_proxy_with(settings: &Path, port: NonZeroU16) -> Result<ProxySnapshot> {
+    let commands = enable_commands(settings, port);
+    let snapshot = capture(settings)?;
     let applied = (|| -> Result<()> {
         for command in &commands {
             command.run()?;
         }
         ensure!(
-            verify_commands(backend, &commands)?,
+            verify_commands(&commands)?,
             "系统代理设置未生效，请检查桌面设置权限"
         );
         Ok(())
@@ -429,7 +252,7 @@ fn desktop_entry(exe: &Path, autostart: bool) -> Result<String> {
         format!("\"{quoted}\"")
     };
     let mut text = format!(
-        "[Desktop Entry]\nType=Application\nName=AeroBox\nComment=Native Rust proxy client for Wayland\nComment[zh_CN]=内置 Rust 引擎的 Wayland 代理客户端\nExec={command}\nIcon={APP_ID}\nTerminal=false\nCategories=Network;Settings;\nStartupNotify=true\nStartupWMClass={APP_ID}\nSingleMainWindow=true\n"
+        "[Desktop Entry]\nType=Application\nName=AeroBox\nComment=Native proxy client for GNOME\nComment[zh_CN]=GNOME 代理客户端\nExec={command}\nIcon={APP_ID}\nTerminal=false\nCategories=Network;Settings;\nOnlyShowIn=GNOME;\nStartupNotify=true\nStartupWMClass={APP_ID}\nSingleMainWindow=true\n"
     );
     if autostart {
         text.push_str("X-GNOME-Autostart-enabled=true\n");
@@ -477,22 +300,11 @@ pub fn install_desktop(prefix: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn desktop_detection_does_not_modify_unrelated_gsettings() {
-        assert_eq!(desktop_kind("ubuntu:GNOME"), Some(Desktop::Gnome));
-        assert_eq!(desktop_kind("KDE"), Some(Desktop::Kde));
-        assert_eq!(desktop_kind("gnome"), Some(Desktop::Gnome));
-        assert_eq!(desktop_kind("sway"), None);
-        assert_eq!(desktop_kind("Hyprland"), None);
-    }
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn proxy_commands_configure_all_protocols_before_enabling() {
-        let backend = Backend::Gnome {
-            settings: PathBuf::from("gsettings"),
-        };
-        let cmds = enable_commands(&backend, NonZeroU16::new(2080).unwrap());
+        let cmds = enable_commands(Path::new("gsettings"), NonZeroU16::new(2080).unwrap());
         for (index, kind) in ["http", "https", "socks"].iter().enumerate() {
             assert_eq!(
                 cmds[index * 2].args,
@@ -532,10 +344,7 @@ elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mod
  s[key]=sys.argv[4];p.write_text(json.dumps(s))
 "#).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-        let backend = Backend::Gnome {
-            settings: program.clone(),
-        };
-        let snapshot = enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap()).unwrap();
+        let snapshot = enable_proxy_with(&program, NonZeroU16::new(2080).unwrap()).unwrap();
         let blocked = program.with_extension("restore-blocked");
         fs::write(&blocked, "").unwrap();
         assert!(
@@ -557,7 +366,7 @@ elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mod
         );
         fs::write(program.with_extension("blocked"), "").unwrap();
         assert!(
-            enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap())
+            enable_proxy_with(&program, NonZeroU16::new(2080).unwrap())
                 .unwrap_err()
                 .to_string()
                 .contains("未生效")
@@ -569,48 +378,13 @@ elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mod
     }
 
     #[test]
-    fn kde_proxy_restore_preserves_absent_and_empty_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let program = dir.path().join("kconfig-test");
-        let state_path = program.with_extension("json");
-        let initial = serde_json::json!({"httpProxy":"", "ProxyType":"0", "unrelated":"keep"});
-        fs::write(&state_path, serde_json::to_vec(&initial).unwrap()).unwrap();
-        fs::write(
-            &program,
-            r#"#!/usr/bin/python3
-import sys,json
-from pathlib import Path
-p=Path(__file__).with_suffix('.json')
-s=json.loads(p.read_text()); args=sys.argv[1:]; key=args[5]
-if len(args)==6 or '--default' in args:
- print(s.get(key,args[7] if '--default' in args else ''))
-else:
- if args[6]=='--delete': s.pop(key,None)
- else: s[key]=args[6]
- p.write_text(json.dumps(s))
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-        let backend = Backend::Kde {
-            read: program.clone(),
-            write: program,
-            notify: PathBuf::from("/bin/true"),
-        };
-        let snapshot = enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap()).unwrap();
-        snapshot.restore().unwrap();
-        let restored: serde_json::Value =
-            serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
-        assert_eq!(restored, initial);
-    }
-
-    #[test]
     fn desktop_entry_keeps_paths_quoted_and_escapes_field_codes() {
         let entry = desktop_entry(Path::new("/tmp/a b/100%/$`\"\\/AeroBox"), false).unwrap();
         assert!(
             entry.contains("Exec=/usr/bin/env \"/tmp/a b/100%%/\\\\$\\\\`\\\\\"\\\\\\\\/AeroBox\"")
         );
         assert!(entry.lines().any(|line| line == "Name=AeroBox"));
+        assert!(entry.lines().any(|line| line == "OnlyShowIn=GNOME;"));
         assert!(
             entry
                 .lines()
@@ -646,8 +420,7 @@ else:
         let file = prefix
             .join("share/applications")
             .join(format!("{APP_ID}.desktop"));
-        let gio = executable("gio").expect("GTK installs the gio desktop launcher");
-        DesktopCommand::new(gio, ["launch", file.to_str().unwrap()])
+        DesktopCommand::new("gio", ["launch", file.to_str().unwrap()])
             .run()
             .unwrap();
         let marker = bin.join("invoked");
