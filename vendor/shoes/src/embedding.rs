@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;
 pub use crate::control::probes::probe_outbound;
+pub use crate::control::flows::{ConnectionSnapshot, ConnectionsSnapshot, Stats};
 
 /// Android must supply the current physical network's DNS servers and protect
 /// every outgoing socket before connect/bind. Callbacks must not reenter the core.
@@ -25,19 +26,12 @@ pub trait Platform: Send + Sync + 'static {
     fn dns_servers(&self) -> io::Result<Vec<SocketAddr>>;
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Stats {
-    pub upload_total: u64,
-    pub download_total: u64,
-    pub active_connections: usize,
-}
-
 type Reply<T> = oneshot::Sender<io::Result<T>>;
 pub(crate) enum Command {
     Reload(Vec<Config>, Reply<()>),
     NetworkChanged(Reply<()>),
     Stats(Reply<Stats>),
-    Connections(Reply<serde_json::Value>),
+    Connections(Reply<ConnectionsSnapshot>),
     Close(String, Reply<()>),
     UrlTest {
         name: String,
@@ -146,7 +140,7 @@ impl EmbeddedCore {
         self.request(Command::Stats).await
     }
     /// At most 500 live connection records; totals include every tracked flow.
-    pub async fn connections(&self) -> io::Result<serde_json::Value> {
+    pub async fn connections(&self) -> io::Result<ConnectionsSnapshot> {
         self.request(Command::Connections).await
     }
     pub async fn close_connection(&self, id: String) -> io::Result<()> {

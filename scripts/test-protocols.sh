@@ -35,7 +35,7 @@ fi
 run_unit_tests() {
     cargo test --manifest-path vendor/support/aerobox-crypto/Cargo.toml -- --test-threads=1
     cargo test --manifest-path vendor/shoes/Cargo.toml --lib -- \
-        diagnostics:: copy_bidirectional:: network_tasks:: resolver::tests:: vless::vless_response_stream:: vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
+        diagnostics:: control::flows:: copy_bidirectional:: network_tasks:: resolver::tests:: vless::vless_response_stream:: vmess:: packet_encoding:: xudp::client_stream:: tls_client_handler:: anytls:: ss_plugin:: \
         quic_client::tuic_uot_tests quic_client::hop:: quic_client::hysteria2:: \
         quic_client::early_tests ech:: tls_fragment:: tcp::fast_open:: dial_options:: crypto:: \
         config:: uuid_util:: client_proxy_chain:: tcp::chain_builder:: http_handler:: xhttp:: \

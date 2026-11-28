@@ -13,7 +13,7 @@ mod typography;
 
 use adw::prelude::*;
 use aerobox_for_linux::{
-    engine::Service,
+    engine::{ConnectionSnapshot, Service},
     model::{self, RuleSet},
     network, platform,
 };
@@ -1064,9 +1064,8 @@ impl Ui {
         self.task(
             "读取连接",
             |s| s.connections(),
-            move |ui, value| {
+            move |ui, connections| {
                 clear_box(&area);
-                let connections = value["connections"].as_array().cloned().unwrap_or_default();
                 let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 area.append(&list);
                 ui.fill_connections(&list, &connections, "");
@@ -1079,37 +1078,37 @@ impl Ui {
             },
         );
     }
-    fn fill_connections(self: &Rc<Self>, list: &gtk::Box, connections: &[Value], filter: &str) {
+    fn fill_connections(
+        self: &Rc<Self>,
+        list: &gtk::Box,
+        connections: &[ConnectionSnapshot],
+        filter: &str,
+    ) {
         clear_box(list);
         list.add_css_class("surface-card");
         let filter = filter.to_lowercase();
         let mut count = 0;
         for item in connections {
-            let metadata = &item["metadata"];
-            let host = metadata["host"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .or_else(|| metadata["destinationIP"].as_str())
-                .unwrap_or("未知目标");
-            let process = metadata["processPath"]
-                .as_str()
-                .or_else(|| metadata["process"].as_str())
-                .unwrap_or("");
-            if !format!("{host} {process} {}", metadata["sourceIP"])
+            let metadata = &item.metadata;
+            let host = if metadata.host.is_empty() {
+                &metadata.destination_ip
+            } else {
+                &metadata.host
+            };
+            let process = if metadata.process_path.is_empty() {
+                &metadata.process
+            } else {
+                &metadata.process_path
+            };
+            if !format!("{host} {process} {}", metadata.source_ip)
                 .to_lowercase()
                 .contains(&filter)
             {
                 continue;
             }
             count += 1;
-            let chain = item["chains"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" → ");
-            let protocol = metadata["network"].as_str().unwrap_or("TCP").to_uppercase();
+            let chain = item.chains.join(" → ");
+            let protocol = metadata.network.to_uppercase();
             let subtitle = format!(
                 "{protocol} · {chain}{}",
                 if process.is_empty() {
@@ -1126,17 +1125,11 @@ impl Ui {
             );
             let row = resource_row("network-transmit-receive-symbolic", host, &subtitle);
             let traffic = gtk::Box::new(gtk::Orientation::Vertical, 4);
-            traffic.append(&label(
-                &format!("↓ {}", bytes(item["download"].as_u64().unwrap_or(0))),
-                "small",
-            ));
-            traffic.append(&label(
-                &format!("↑ {}", bytes(item["upload"].as_u64().unwrap_or(0))),
-                "muted small",
-            ));
+            traffic.append(&label(&format!("↓ {}", bytes(item.download)), "small"));
+            traffic.append(&label(&format!("↑ {}", bytes(item.upload)), "muted small"));
             row.append(&traffic);
             let close = icon_button("window-close-symbolic", "关闭此连接");
-            let id = item["id"].as_str().unwrap_or("").to_string();
+            let id = item.id.clone();
             let weak = Rc::downgrade(self);
             close.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {

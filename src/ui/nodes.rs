@@ -139,19 +139,19 @@ impl NodesPanel {
                 child.add_css_class("node-card");
                 child.set_widget_name("subscription-node");
                 child.set_focusable(true);
-                child.update_property(&[gtk::accessible::Property::Label(&node.name)]);
+                child.update_property(&[gtk::accessible::Property::Label(&node.node_tag)]);
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
                 content.add_css_class("node-card-content");
                 let title = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 title.set_vexpand(false);
-                let name = label(&node.name, "node-name");
+                let name = label(&node.node_tag, "node-name");
                 name.set_hexpand(true);
                 name.set_valign(gtk::Align::Start);
                 name.set_wrap(false);
                 name.set_width_chars(1);
                 name.set_max_width_chars(18);
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                name.set_tooltip_text(Some(&node.name));
+                name.set_tooltip_text(Some(&node.node_tag));
                 title.append(&name);
                 let indicator = gtk::Stack::new();
                 indicator.set_size_request(16, 16);
@@ -183,7 +183,7 @@ impl NodesPanel {
                 test.set_tooltip_text(Some("测试此节点延迟"));
                 test.update_property(&[gtk::accessible::Property::Label(&format!(
                     "测试 {} 延迟",
-                    node.name
+                    node.node_tag
                 ))]);
                 let test_indicator = gtk::Stack::new();
                 test_indicator.set_hhomogeneous(false);

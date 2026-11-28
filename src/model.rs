@@ -20,7 +20,7 @@ pub fn now() -> u64 {
         .as_secs()
 }
 pub fn pretty(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
+    serde_json::to_string_pretty(value).expect("display values must serialize to JSON")
 }
 
 /// Bounds for the configurable base font size, in points. The range keeps

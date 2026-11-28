@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::blocking::Client;
 use serde_json::Value;
+pub use shoes::embedding::ConnectionSnapshot;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -33,7 +34,6 @@ pub struct CoreStatus {
 pub struct SubscriptionNode {
     pub subscription_id: String,
     pub node_tag: String,
-    pub name: String,
     pub protocol: String,
     pub selected: bool,
     pub delay_ms: Option<u64>,
@@ -47,7 +47,7 @@ struct Running {
     delays: HashMap<NodeSelection, u64>,
 }
 pub struct Service {
-    pub store: Mutex<Store>,
+    store: Mutex<Store>,
     local_port: NonZeroU16,
     running: Mutex<Running>,
     operation: Mutex<()>,
@@ -248,22 +248,6 @@ impl Service {
         *self.running.lock().unwrap() = Running::default();
         restore
     }
-    pub fn restart(&self) -> Result<()> {
-        let _op = self.operation.lock().unwrap();
-        let prepared = self.prepare_current(&self.snapshot())?;
-        self.check(&prepared.config)?;
-        if self.status().running {
-            let old = self.running_config()?;
-            let proxy = self.status().proxy;
-            self.stop_locked()?;
-            if let Err(error) = self.start_config_locked(prepared, proxy) {
-                self.start_config_locked(old, proxy)
-                    .context("恢复原连接失败")?;
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
     fn core(&self) -> Result<Arc<EmbeddedCore>> {
         self.running
             .lock()
@@ -287,11 +271,10 @@ impl Service {
         }
         let mut saved = self.proxy.lock().unwrap();
         ensure!(self.status().running, "请先启动连接");
-        let server = format!("127.0.0.1:{}", self.local_port);
-        if saved.is_some() && platform::verify_proxy(&server, "mixed")? {
+        if saved.is_some() && platform::verify_proxy(self.local_port)? {
             return Ok(());
         }
-        let snapshot = platform::enable_proxy(&server, "mixed")?;
+        let snapshot = platform::enable_proxy(self.local_port)?;
         if saved.is_none() {
             *saved = Some(snapshot);
         }
@@ -331,10 +314,12 @@ impl Service {
         candidate.settings.routing_mode = mode.into();
         self.commit_state(&before, candidate)
     }
-    pub fn connections(&self) -> Result<Value> {
+    pub fn connections(&self) -> Result<Vec<ConnectionSnapshot>> {
         let _op = self.operation.lock().unwrap();
         let prepared = self.running_config()?;
-        let mut connections = runtime::executor().block_on(self.core()?.connections())?;
+        let mut connections = runtime::executor()
+            .block_on(self.core()?.connections())?
+            .connections;
         let mut names = HashMap::from([
             ("proxy".to_owned(), "代理".to_owned()),
             ("direct".to_owned(), "直连".to_owned()),
@@ -347,14 +332,10 @@ impl Service {
                 selection.node_tag.clone(),
             );
         }
-        for connection in connections["connections"]
-            .as_array_mut()
-            .into_iter()
-            .flatten()
-        {
-            for chain in connection["chains"].as_array_mut().into_iter().flatten() {
-                if let Some(name) = chain.as_str().and_then(|tag| names.get(tag)) {
-                    *chain = Value::String(name.clone());
+        for connection in &mut connections {
+            for chain in &mut connection.chains {
+                if let Some(name) = names.get(chain) {
+                    chain.clone_from(name);
                 }
             }
         }
@@ -405,7 +386,6 @@ impl Service {
                 SubscriptionNode {
                     subscription_id: id.into(),
                     node_tag: tag.into(),
-                    name: tag.into(),
                     protocol: source["type"].as_str().unwrap_or_default().into(),
                     selected,
                     delay_ms: run.delays.get(&key).copied(),
@@ -535,15 +515,6 @@ impl Service {
         // Only new IDs are written during a merge; rollback can safely remove
         // these files without touching an existing resource's cached bytes.
         let store = self.store.lock().unwrap();
-        for rule in &candidate.rulesets {
-            if !before.rulesets.iter().any(|current| current.id == rule.id) && rule.binary {
-                ensure!(
-                    files.contains_key(&rule.id),
-                    "SRS 规则集「{}」缺少二进制数据",
-                    rule.name
-                );
-            }
-        }
         let mut installed = DropGuard::new(Vec::<PathBuf>::new(), |paths| {
             for path in paths {
                 let _ = fs::remove_file(path);
@@ -644,10 +615,7 @@ impl Service {
         let generation = self.status().generation;
         let revision = self.subscription_revision();
         let settings = self.snapshot().settings;
-        let client = {
-            let run = self.running.lock().unwrap();
-            network::exit_client(run.prepared.as_ref().map(|prepared| &prepared.config))?
-        };
+        let client = network::exit_client(self.download_proxy_port())?;
         let info = network::detect(client, settings.ipv6, |info| {
             if self.status().generation == generation && self.subscription_revision() == revision {
                 progress(info);
@@ -677,7 +645,7 @@ impl Service {
             format!("出站模式：{}", prepared.settings.routing_mode),
             format!(
                 "系统代理：{}",
-                if platform::verify_proxy(&server, "mixed")? {
+                if platform::verify_proxy(self.local_port)? {
                     "已指向 AeroBox"
                 } else {
                     "未指向 AeroBox"
@@ -781,11 +749,17 @@ impl Service {
         Ok(restart.then_some(resume))
     }
     fn client_with_timeout(&self, timeout: Duration) -> Result<Client> {
-        let run = self.running.lock().unwrap();
-        // Until shutdown has finished, requests must keep using the listener;
-        // an unavailable listener is an error, never a direct-download fallback.
-        let config = run.prepared.as_ref().map(|p| &p.config);
-        network::client(config, timeout)
+        network::client(self.download_proxy_port(), timeout)
+    }
+    fn download_proxy_port(&self) -> Option<NonZeroU16> {
+        // A runtime that has not been cleaned up keeps downloads on its proxy;
+        // a failed listener must not silently send a request directly.
+        self.running
+            .lock()
+            .unwrap()
+            .prepared
+            .as_ref()
+            .map(|_| self.local_port)
     }
     async fn fetch_missing_rules(
         &self,
@@ -797,15 +771,8 @@ impl Service {
             .timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(5))
             .user_agent(concat!("AeroBox/", env!("CARGO_PKG_VERSION")));
-        let current = self
-            .running
-            .lock()
-            .unwrap()
-            .prepared
-            .as_ref()
-            .map(|p| p.config.clone());
-        if let Some(config) = current {
-            builder = builder.proxy(reqwest::Proxy::all(network::proxy_url(&config)?)?);
+        if let Some(port) = self.download_proxy_port() {
+            builder = builder.proxy(network::local_proxy(port)?);
         }
         let client = builder.build()?;
         for source in prepared

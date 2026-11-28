@@ -692,9 +692,6 @@ fn selected_nodes_subscriptions_and_modes_change_actual_traffic() {
             .all(|node| !node.selected)
     );
     assert!(app.service.subscription_nodes(&second).unwrap()[0].selected);
-    app.service.restart().unwrap();
-    assert_ne!(app.service.status().generation, generation);
-    assert_eq!(request(&app.service, &url).unwrap(), "node C");
     assert!(hits_a.load(Ordering::Relaxed) >= 3);
     assert!(hits_b.load(Ordering::Relaxed) >= 3);
     assert_eq!(direct_hits.load(Ordering::Relaxed), 2);
@@ -833,16 +830,11 @@ fn closing_connections_and_stopping_releases_live_tunnels_and_the_proxy_port() {
             let traffic = app.service.traffic().unwrap();
             traffic.upload >= 5 && traffic.download >= 5
         });
-        support::wait_for(|| {
-            !app.service.connections().unwrap()["connections"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        });
+        support::wait_for(|| !app.service.connections().unwrap().is_empty());
         match cycle {
             0 => {
                 let connections = app.service.connections().unwrap();
-                let id = connections["connections"][0]["id"].as_str().unwrap();
+                let id = &connections[0].id;
                 app.service.close_connection(id).unwrap();
             }
             1 => app.service.close_all_connections().unwrap(),
@@ -877,28 +869,16 @@ fn connection_rows_use_node_names_and_can_close_the_reported_connection_id() {
     let mut tunnel = support::echo_tunnel(&app.service, origin.address);
     tunnel.write_all(b"x").unwrap();
     tunnel.read_exact(&mut [0; 1]).unwrap();
-    support::wait_for(|| {
-        !app.service.connections().unwrap()["connections"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    });
+    support::wait_for(|| !app.service.connections().unwrap().is_empty());
     let connections = app.service.connections().unwrap();
-    let row = &connections["connections"][0];
-    let chains = row["chains"].as_array().unwrap();
+    let row = &connections[0];
+    let chains = &row.chains;
     assert!(
         chains.iter().any(|name| name == "香港 · 日常"),
         "connection did not show the selected node: {chains:?}"
     );
-    assert!(
-        chains
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .all(|name| !name.starts_with("node-"))
-    );
-    app.service
-        .close_connection(row["id"].as_str().unwrap())
-        .unwrap();
+    assert!(chains.iter().all(|name| !name.starts_with("node-")));
+    app.service.close_connection(&row.id).unwrap();
     let closed = tunnel.read(&mut [0; 1]);
     assert!(
         matches!(closed, Ok(0))

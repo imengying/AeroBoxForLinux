@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     env, fs,
     io::{Read, Seek, SeekFrom},
+    num::NonZeroU16,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -260,43 +261,6 @@ fn capture(backend: &Backend) -> Result<ProxySnapshot> {
     Ok(ProxySnapshot { restore, verify })
 }
 
-fn address(server: &str) -> Result<(String, u16)> {
-    let text = if server.contains("://") {
-        server.to_owned()
-    } else {
-        format!("http://{server}")
-    };
-    let url = url::Url::parse(&text).context("代理地址无效")?;
-    ensure!(
-        ["http", "https", "socks", "socks5", "socks5h"].contains(&url.scheme()),
-        "代理协议无效"
-    );
-    ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "系统代理不能使用此入站的认证信息；请选择无认证的本地入站"
-    );
-    let host = url
-        .host_str()
-        .context("代理缺少地址")?
-        .trim_matches(['[', ']'])
-        .to_owned();
-    let port = url.port_or_known_default().context("代理缺少端口")?;
-    ensure!(port > 0, "代理端口不能为 0");
-    Ok((host, port))
-}
-
-fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-fn variant_string(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
 fn kde_notify(program: &Path) -> DesktopCommand {
     // KIO Scheduler listens for this signal and reparses its cached settings.
     DesktopCommand::new(
@@ -311,32 +275,21 @@ fn kde_notify(program: &Path) -> DesktopCommand {
     )
 }
 
-fn enable_commands(backend: &Backend, server: &str, protocol: &str) -> Result<Vec<DesktopCommand>> {
-    let (host, port) = address(server)?;
-    let protocol = protocol.to_lowercase();
-    let http = matches!(protocol.as_str(), "http" | "mixed");
-    let socks = matches!(protocol.as_str(), "socks" | "socks5" | "mixed");
-    ensure!(http || socks, "不支持的系统代理协议: {protocol}");
+fn enable_commands(backend: &Backend, port: NonZeroU16) -> Vec<DesktopCommand> {
+    let endpoint = format!("127.0.0.1:{port}");
     let port = port.to_string();
-    let endpoint = host_port(&host, port.parse()?);
     let mut commands = Vec::new();
     match backend {
         Backend::Gnome { settings } => {
-            let host = if host.contains(':') {
-                format!("[{host}]")
-            } else {
-                host
-            };
-            for (kind, enabled) in [("http", http), ("https", http), ("socks", socks)] {
+            for kind in ["http", "https", "socks"] {
                 let schema = format!("{GNOME_PROXY}.{kind}");
-                let value = variant_string(if enabled { &host } else { "" });
                 commands.push(DesktopCommand::new(
                     settings,
-                    ["set", &schema, "host", &value],
+                    ["set", &schema, "host", "'127.0.0.1'"],
                 ));
                 commands.push(DesktopCommand::new(
                     settings,
-                    ["set", &schema, "port", if enabled { &port } else { "0" }],
+                    ["set", &schema, "port", &port],
                 ));
             }
             commands.push(DesktopCommand::new(
@@ -369,30 +322,9 @@ fn enable_commands(backend: &Backend, server: &str, protocol: &str) -> Result<Ve
         }
         Backend::Kde { write, notify, .. } => {
             for (key, value) in [
-                (
-                    "httpProxy",
-                    if http {
-                        format!("http://{endpoint}")
-                    } else {
-                        String::new()
-                    },
-                ),
-                (
-                    "httpsProxy",
-                    if http {
-                        format!("http://{endpoint}")
-                    } else {
-                        String::new()
-                    },
-                ),
-                (
-                    "socksProxy",
-                    if socks {
-                        format!("socks://{endpoint}")
-                    } else {
-                        String::new()
-                    },
-                ),
+                ("httpProxy", format!("http://{endpoint}")),
+                ("httpsProxy", format!("http://{endpoint}")),
+                ("socksProxy", format!("socks://{endpoint}")),
                 ("NoProxyFor", "localhost,127.0.0.1,::1".to_owned()),
                 ("ReversedException", "false".to_owned()),
                 ("ProxyType", "1".to_owned()),
@@ -413,19 +345,22 @@ fn enable_commands(backend: &Backend, server: &str, protocol: &str) -> Result<Ve
             commands.push(kde_notify(notify));
         }
     }
-    Ok(commands)
+    commands
 }
 
-pub fn enable_proxy(server: &str, protocol: &str) -> Result<ProxySnapshot> {
-    let backend = backend()?;
-    enable_proxy_for(&backend, server, protocol)
+pub fn enable_proxy(port: NonZeroU16) -> Result<ProxySnapshot> {
+    enable_proxy_for(&backend()?, port)
 }
 
 /// Read back every field Chromium uses, without changing the desktop.
-pub fn verify_proxy(server: &str, protocol: &str) -> Result<bool> {
+pub fn verify_proxy(port: NonZeroU16) -> Result<bool> {
     let backend = backend()?;
-    for command in enable_commands(&backend, server, protocol)? {
-        let verification = match &backend {
+    verify_commands(&backend, &enable_commands(&backend, port))
+}
+
+fn verify_commands(backend: &Backend, commands: &[DesktopCommand]) -> Result<bool> {
+    for command in commands {
+        let verification = match backend {
             Backend::Gnome { settings } => Some((
                 DesktopCommand::new(settings, ["get", &command.args[1], &command.args[2]]),
                 command.args[3].as_str(),
@@ -445,32 +380,17 @@ pub fn verify_proxy(server: &str, protocol: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn enable_proxy_for(backend: &Backend, server: &str, protocol: &str) -> Result<ProxySnapshot> {
-    let commands = enable_commands(backend, server, protocol)?;
+fn enable_proxy_for(backend: &Backend, port: NonZeroU16) -> Result<ProxySnapshot> {
+    let commands = enable_commands(backend, port);
     let snapshot = capture(backend)?;
     let applied = (|| -> Result<()> {
         for command in &commands {
             command.run()?;
         }
-        for command in &commands {
-            let verification = match backend {
-                Backend::Gnome { settings } => Some((
-                    DesktopCommand::new(settings, ["get", &command.args[1], &command.args[2]]),
-                    command.args[3].as_str(),
-                )),
-                Backend::Kde { read, write, .. } if command.program == *write => Some((
-                    DesktopCommand::new(read, &command.args[..6]),
-                    command.args[6].as_str(),
-                )),
-                Backend::Kde { .. } => None,
-            };
-            if let Some((read, expected)) = verification {
-                ensure!(
-                    read.run()? == expected,
-                    "系统代理设置未生效，请检查桌面设置权限"
-                );
-            }
-        }
+        ensure!(
+            verify_commands(backend, &commands)?,
+            "系统代理设置未生效，请检查桌面设置权限"
+        );
         Ok(())
     })();
     if let Err(error) = applied {
@@ -568,19 +488,27 @@ mod tests {
     }
 
     #[test]
-    fn proxy_commands_are_ordered_and_handle_ipv6() {
+    fn proxy_commands_configure_all_protocols_before_enabling() {
         let backend = Backend::Gnome {
             settings: PathBuf::from("gsettings"),
         };
-        let cmds = enable_commands(&backend, "[::1]:2080", "mixed").unwrap();
-        assert_eq!(cmds[0].args.last().unwrap(), "'[::1]'");
+        let cmds = enable_commands(&backend, NonZeroU16::new(2080).unwrap());
+        for (index, kind) in ["http", "https", "socks"].iter().enumerate() {
+            assert_eq!(
+                cmds[index * 2].args,
+                [
+                    "set",
+                    &format!("{GNOME_PROXY}.{kind}"),
+                    "host",
+                    "'127.0.0.1'"
+                ]
+            );
+            assert_eq!(cmds[index * 2 + 1].args.last().unwrap(), "2080");
+        }
         assert_eq!(
             cmds.last().unwrap().args,
             ["set", GNOME_PROXY, "mode", "'manual'"]
         );
-        assert!(enable_commands(&backend, "127.0.0.1:0", "http").is_err());
-        assert!(enable_commands(&backend, "http://user:pass@localhost:2080", "http").is_err());
-        assert!(enable_commands(&backend, "localhost:2080", "unknown").is_err());
     }
 
     #[test]
@@ -607,7 +535,7 @@ elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mod
         let backend = Backend::Gnome {
             settings: program.clone(),
         };
-        let snapshot = enable_proxy_for(&backend, "127.0.0.1:2080", "mixed").unwrap();
+        let snapshot = enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap()).unwrap();
         let blocked = program.with_extension("restore-blocked");
         fs::write(&blocked, "").unwrap();
         assert!(
@@ -629,7 +557,7 @@ elif not ((Path(__file__).with_suffix('.blocked').exists() and sys.argv[3]=='mod
         );
         fs::write(program.with_extension("blocked"), "").unwrap();
         assert!(
-            enable_proxy_for(&backend, "127.0.0.1:2080", "mixed")
+            enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap())
                 .unwrap_err()
                 .to_string()
                 .contains("未生效")
@@ -669,7 +597,7 @@ else:
             write: program,
             notify: PathBuf::from("/bin/true"),
         };
-        let snapshot = enable_proxy_for(&backend, "127.0.0.1:2080", "mixed").unwrap();
+        let snapshot = enable_proxy_for(&backend, NonZeroU16::new(2080).unwrap()).unwrap();
         snapshot.restore().unwrap();
         let restored: serde_json::Value =
             serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();

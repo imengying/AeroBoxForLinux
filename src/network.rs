@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use reqwest::{Proxy, blocking::Client};
-use serde_json::Value;
 use std::{
     fs,
     io::Read,
     net::IpAddr,
+    num::NonZeroU16,
     time::{Duration, Instant},
 };
 
@@ -37,38 +37,24 @@ impl MemoryBasis {
     }
 }
 
-/// Every native configuration has a local mixed listener. Missing listeners
-/// are errors, so an active connection can never fall back to direct downloads.
-pub(crate) fn proxy_url(config: &Value) -> Result<url::Url> {
-    let inbounds = config.as_array().context("运行配置缺少代理入口")?;
-    let inbound = inbounds
-        .iter()
-        .find(|inbound| inbound["name"] == "mixed-in")
-        .context("运行配置没有本地代理入口")?;
-    let address: std::net::SocketAddr = inbound["address"]
-        .as_str()
-        .context("入站缺少地址")?
-        .parse()?;
-    ensure!(
-        address.ip().is_loopback() && address.port() > 0,
-        "代理入口必须是本机地址"
-    );
-    Ok(url::Url::parse(&format!("http://{address}"))?)
+/// AeroBox owns one loopback mixed listener; callers pass its port directly.
+pub(crate) fn local_proxy(port: NonZeroU16) -> Result<Proxy> {
+    Ok(Proxy::all(format!("http://127.0.0.1:{port}"))?)
 }
 
-fn client_builder(config: Option<&Value>) -> Result<reqwest::blocking::ClientBuilder> {
+fn client_builder(port: Option<NonZeroU16>) -> Result<reqwest::blocking::ClientBuilder> {
     let mut builder = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("AeroBox/", env!("CARGO_PKG_VERSION")));
-    if let Some(config) = config {
-        builder = builder.proxy(Proxy::all(proxy_url(config)?)?);
+    if let Some(port) = port {
+        builder = builder.proxy(local_proxy(port)?);
     }
     Ok(builder)
 }
 
-pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client> {
-    Ok(client_builder(config)?
+pub(crate) fn client(port: Option<NonZeroU16>, timeout: Duration) -> Result<Client> {
+    Ok(client_builder(port)?
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(5))
         .build()?)
@@ -77,16 +63,16 @@ pub(crate) fn client(config: Option<&Value>, timeout: Duration) -> Result<Client
 const EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const EXIT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn exit_client_builder(config: Option<&Value>) -> Result<reqwest::blocking::ClientBuilder> {
+fn exit_client_builder(port: Option<NonZeroU16>) -> Result<reqwest::blocking::ClientBuilder> {
     // CONNECT includes proxy-side DNS and the node's handshake. A five-second
     // connect timeout can expire even when ordinary browser requests succeed.
-    Ok(client_builder(config)?
+    Ok(client_builder(port)?
         .timeout(EXIT_REQUEST_TIMEOUT)
         .connect_timeout(EXIT_REQUEST_TIMEOUT))
 }
 
-pub(crate) fn exit_client(config: Option<&Value>) -> Result<Client> {
-    Ok(exit_client_builder(config)?.build()?)
+pub(crate) fn exit_client(port: Option<NonZeroU16>) -> Result<Client> {
+    Ok(exit_client_builder(port)?.build()?)
 }
 
 /// Expose the failure stage without copying URLs, endpoints or credentials
@@ -289,28 +275,7 @@ fn parse_kib(data: &str, field: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::{io::Write, net::TcpListener};
-
-    #[test]
-    fn resolves_ipv4_and_ipv6_native_listeners() {
-        for (address, expected) in [
-            ("127.0.0.1:2080", "http://127.0.0.1:2080/"),
-            ("[::1]:2080", "http://[::1]:2080/"),
-        ] {
-            let config = json!([{"name":"mixed-in","address":address,"protocol":{"type":"mixed"}}]);
-            assert_eq!(proxy_url(&config).unwrap().as_str(), expected);
-        }
-        assert!(proxy_url(&json!([])).is_err());
-        for address in [
-            "0.0.0.0:2080",
-            "[::]:2080",
-            "192.168.1.1:2080",
-            "127.0.0.1:0",
-        ] {
-            assert!(proxy_url(&json!([{"name":"mixed-in","address":address}])).is_err());
-        }
-    }
 
     #[test]
     fn download_requests_use_the_native_listener() {
@@ -328,9 +293,7 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
-        let config =
-            json!([{"name":"mixed-in","address":address.to_string(),"protocol":{"type":"mixed"}}]);
-        let body = client(Some(&config), Duration::from_secs(2))
+        let body = client(NonZeroU16::new(address.port()), Duration::from_secs(2))
             .unwrap()
             .get("http://download.invalid/file")
             .send()
@@ -348,9 +311,8 @@ mod tests {
         let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy_port = proxy.local_addr().unwrap().port();
         drop(proxy);
-        let config = json!([{"name":"mixed-in","address":format!("127.0.0.1:{proxy_port}"),"protocol":{"type":"mixed"}}]);
         assert!(
-            client(Some(&config), Duration::from_secs(1))
+            client(NonZeroU16::new(proxy_port), Duration::from_secs(1))
                 .unwrap()
                 .get(format!("http://{}/", server.local_addr().unwrap()))
                 .send()

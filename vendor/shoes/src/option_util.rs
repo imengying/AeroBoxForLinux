@@ -68,31 +68,27 @@ impl<T> NoneOrSome<T> {
     {
         match self {
             NoneOrSome::Unspecified | NoneOrSome::None => Box::new(std::iter::empty()),
-            NoneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
+            NoneOrSome::One(item) => Box::new(std::iter::once(item)),
             NoneOrSome::Some(v) => Box::new(v.into_iter()),
         }
     }
 
-    pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a T> + Send + 'a>
-    where
-        T: Sync,
-    {
-        match self {
-            NoneOrSome::Unspecified | NoneOrSome::None => Box::new(std::iter::empty()),
-            NoneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
-            NoneOrSome::Some(v) => Box::new(v.iter()),
-        }
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        let items: &[T] = match self {
+            NoneOrSome::Unspecified | NoneOrSome::None => &[],
+            NoneOrSome::One(item) => std::slice::from_ref(item),
+            NoneOrSome::Some(v) => v,
+        };
+        items.iter()
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut T> + Send + 'a>
-    where
-        T: Send,
-    {
-        match self {
-            NoneOrSome::Unspecified | NoneOrSome::None => Box::new(std::iter::empty()),
-            NoneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
-            NoneOrSome::Some(v) => Box::new(v.iter_mut()),
-        }
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        let items: &mut [T] = match self {
+            NoneOrSome::Unspecified | NoneOrSome::None => &mut [],
+            NoneOrSome::One(item) => std::slice::from_mut(item),
+            NoneOrSome::Some(v) => v,
+        };
+        items.iter_mut()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -113,31 +109,6 @@ impl<T> NoneOrSome<T> {
             NoneOrSome::None => NoneOrSome::None,
             NoneOrSome::One(item) => NoneOrSome::One(f(item)),
             NoneOrSome::Some(v) => NoneOrSome::Some(v.into_iter().map(f).collect()),
-        }
-    }
-
-    pub fn _filter<F>(self, f: F) -> Self
-    where
-        F: Fn(&T) -> bool,
-    {
-        match self {
-            NoneOrSome::Unspecified => NoneOrSome::Unspecified,
-            NoneOrSome::None => NoneOrSome::None,
-            NoneOrSome::One(item) => {
-                if f(&item) {
-                    NoneOrSome::One(item)
-                } else {
-                    NoneOrSome::None
-                }
-            }
-            NoneOrSome::Some(v) => {
-                let filtered: Vec<T> = v.into_iter().filter(f).collect();
-                if filtered.is_empty() {
-                    NoneOrSome::None
-                } else {
-                    NoneOrSome::Some(filtered)
-                }
-            }
         }
     }
 }
@@ -181,44 +152,20 @@ impl<T> OneOrSome<T> {
         }
     }
 
-    pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a T> + Send + 'a>
-    where
-        T: Sync,
-    {
-        match self {
-            OneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
-            OneOrSome::Some(v) => Box::new(v.iter()),
-        }
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        let items: &[T] = match self {
+            OneOrSome::One(item) => std::slice::from_ref(item),
+            OneOrSome::Some(v) => v,
+        };
+        items.iter()
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut T> + Send + 'a>
-    where
-        T: Send,
-    {
-        match self {
-            OneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
-            OneOrSome::Some(v) => Box::new(v.iter_mut()),
-        }
-    }
-
-    pub fn _contains(&self, x: &T) -> bool
-    where
-        T: PartialEq,
-    {
-        match self {
-            OneOrSome::One(item) => item == x,
-            OneOrSome::Some(v) => v.contains(x),
-        }
-    }
-}
-
-struct SingleItemIter<T>(Option<T>);
-
-impl<T> Iterator for SingleItemIter<T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.take()
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        let items: &mut [T] = match self {
+            OneOrSome::One(item) => std::slice::from_mut(item),
+            OneOrSome::Some(v) => v,
+        };
+        items.iter_mut()
     }
 }
 

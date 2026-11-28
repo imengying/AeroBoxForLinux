@@ -1626,23 +1626,20 @@ impl EmbeddedProcess {
         lifetime: &crate::network_tasks::NetworkLifetime,
     ) -> Option<crate::embedding::Command> {
         use crate::embedding::Command;
-        let snapshot = || {
-            let control =
-                control.ok_or_else(|| io::Error::other("embedded flow registry missing"))?;
-            Ok::<_, io::Error>(control.runtime.flows.snapshot(0))
+        let flows = || {
+            control
+                .map(|control| &control.runtime.flows)
+                .ok_or_else(|| io::Error::other("embedded flow registry missing"))
         };
         match command {
             Command::Stats(reply) => {
-                let _ = reply.send(snapshot().map(|snapshot| crate::embedding::Stats {
-                    upload_total: snapshot.upload_total,
-                    download_total: snapshot.download_total,
-                    active_connections: snapshot.connections.len(),
-                }));
+                let _ = reply.send(flows().map(|flows| flows.stats()));
             }
             Command::Connections(reply) => {
-                let result = snapshot().and_then(|mut snapshot| {
+                let result = flows().map(|flows| {
+                    let mut snapshot = flows.snapshot(0);
                     snapshot.connections.truncate(500);
-                    serde_json::to_value(snapshot).map_err(io::Error::other)
+                    snapshot
                 });
                 let _ = reply.send(result);
             }

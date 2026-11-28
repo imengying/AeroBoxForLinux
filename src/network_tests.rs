@@ -34,7 +34,7 @@ fn exit_detection_waits_for_cold_proxy_setup_and_respects_disabled_ipv6() {
         )
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let config = serde_json::json!([{"name":"mixed-in", "address":listener.local_addr().unwrap().to_string()}]);
+    let port = NonZeroU16::new(listener.local_addr().unwrap().port());
     let unused = TcpListener::bind("127.0.0.1:0").unwrap();
     unused.set_nonblocking(true).unwrap();
     let ipv6_endpoint = format!("http://{}/", unused.local_addr().unwrap());
@@ -60,7 +60,7 @@ fn exit_detection_waits_for_cold_proxy_setup_and_respects_disabled_ipv6() {
         socket.conn.send_close_notify();
         socket.flush().unwrap();
     });
-    let client = exit_client_builder(Some(&config))
+    let client = exit_client_builder(port)
         .unwrap()
         .add_root_certificate(root)
         .build()
@@ -218,9 +218,9 @@ fn exit_detection_has_one_total_deadline_and_keeps_a_failed_proxy_route() {
     );
     assert_eq!(*probes.paths.lock().unwrap(), ["/slow"]);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let config = serde_json::json!([{"name":"mixed-in", "address":listener.local_addr().unwrap().to_string()}]);
+    let port = NonZeroU16::new(listener.local_addr().unwrap().port());
     drop(listener);
-    let client = exit_client(Some(&config)).unwrap();
+    let client = exit_client(port).unwrap();
     assert!(
         detect_with_endpoints(
             &client,

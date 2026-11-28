@@ -110,25 +110,11 @@ pub fn read(path: &Path) -> Result<(State, HashMap<String, Vec<u8>>)> {
 pub fn merge(
     current: &State,
     imported: State,
-    files: HashMap<String, Vec<u8>>,
+    mut files: HashMap<String, Vec<u8>>,
 ) -> Result<(State, HashMap<String, Vec<u8>>)> {
     imported.validate().context("备份内容未通过校验")?;
     let mut next = current.clone();
     let mut ids = HashMap::new();
-    let mut used_ids: std::collections::HashSet<_> = current
-        .subscriptions
-        .iter()
-        .map(|sub| sub.id.clone())
-        .chain(current.rulesets.iter().map(|rule| rule.id.clone()))
-        .collect();
-    let fresh_id = |used: &mut std::collections::HashSet<String>| {
-        loop {
-            let id = crate::model::id();
-            if used.insert(id.clone()) {
-                return id;
-            }
-        }
-    };
     let unique_name = |name: &str, existing: &[String]| {
         let candidate = name.trim();
         if !existing.iter().any(|existing| existing == candidate) {
@@ -146,7 +132,7 @@ pub fn merge(
     let mut names: Vec<_> = next.subscriptions.iter().map(|s| s.name.clone()).collect();
     for mut sub in imported.subscriptions {
         let old = sub.id.clone();
-        sub.id = fresh_id(&mut used_ids);
+        sub.id = crate::model::id();
         sub.name = unique_name(&sub.name, &names);
         names.push(sub.name.clone());
         ids.insert(old, sub.id.clone());
@@ -156,11 +142,11 @@ pub fn merge(
     let mut binary_files = HashMap::new();
     for mut rule in imported.rulesets {
         let old = rule.id.clone();
-        rule.id = fresh_id(&mut used_ids);
+        rule.id = crate::model::id();
         rule.name = unique_name(&rule.name, &names);
         names.push(rule.name.clone());
-        if let Some(bytes) = files.get(&old) {
-            binary_files.insert(rule.id.clone(), bytes.clone());
+        if let Some(bytes) = files.remove(&old) {
+            binary_files.insert(rule.id.clone(), bytes);
         }
         if rule.binary {
             ensure!(

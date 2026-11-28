@@ -115,6 +115,13 @@ pub struct ConnectionsSnapshot {
     pub connections: Vec<ConnectionSnapshot>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Stats {
+    pub upload_total: u64,
+    pub download_total: u64,
+    pub active_connections: usize,
+}
+
 #[derive(Debug, Default)]
 struct RegistryState {
     snapshot_sequence: u64,
@@ -243,6 +250,22 @@ impl FlowRegistry {
         for entry in entries {
             entry.cancel.cancel();
         }
+    }
+
+    /// Counters do not need connection metadata, route strings or diagnostics.
+    pub fn stats(&self) -> Stats {
+        let state = self.state.lock();
+        let mut stats = Stats {
+            upload_total: state.closed_upload,
+            download_total: state.closed_download,
+            active_connections: state.entries.len(),
+        };
+        for entry in state.entries.values() {
+            let (upload, download) = entry.counters.totals();
+            stats.upload_total += upload;
+            stats.download_total += download;
+        }
+        stats
     }
 
     pub fn snapshot(&self, memory: u64) -> ConnectionsSnapshot {
@@ -496,10 +519,20 @@ mod tests {
         let snapshot = registry.snapshot(0);
         assert_eq!((snapshot.upload_total, snapshot.download_total), (13, 27));
         assert_eq!(snapshot.connections.len(), 1);
+        let stats = registry.stats();
+        assert_eq!(
+            (stats.upload_total, stats.download_total, stats.active_connections),
+            (13, 27, 1)
+        );
         drop(guard);
         let snapshot = registry.snapshot(0);
         assert_eq!((snapshot.upload_total, snapshot.download_total), (13, 27));
         assert!(snapshot.connections.is_empty());
+        let stats = registry.stats();
+        assert_eq!(
+            (stats.upload_total, stats.download_total, stats.active_connections),
+            (13, 27, 0)
+        );
         let context = FlowContext {
             registry,
             generation: 2,
